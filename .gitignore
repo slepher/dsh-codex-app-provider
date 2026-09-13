@@ -1,0 +1,7 @@
+node_modules/
+lib/
+dist/
+*.tgz
+evidence/
+.dsh-state/
+.watch/

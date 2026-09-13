@@ -1,0 +1,24 @@
+export const zh = {
+  childLoading: "正在打开子代理…", childUnavailable: "子代理会话不可用", openMain: "在主区域打开",
+  executionStopRequested: "已请求停止，执行终态待确认", executionUnknown: "执行状态未知", reasoningSummary: "推理摘要", executionInterrupted: "已中断",
+  execution: "Codex 执行", files: "文件修改", search: "网页搜索", compaction: "上下文压缩",
+  executing: "正在执行", executed: "已执行", executionFailed: "执行失败", exitCode: "退出状态",
+  title: "子代理默认打开位置",
+  sidebar: "右侧栏",
+  main: "主区域",
+  loading: "正在加载设置…",
+  unavailable: "当前无法保存设置",
+  saving: "正在保存…",
+};
+export const en: Record<keyof typeof zh, string> = {
+  childLoading: "Opening child…", childUnavailable: "Child conversation unavailable", openMain: "Open in main area",
+  executionStopRequested: "Stop requested; execution outcome unconfirmed", executionUnknown: "Execution state unknown", reasoningSummary: "Reasoning summary", executionInterrupted: "Interrupted",
+  execution: "Codex execution", files: "File changes", search: "Web search", compaction: "Context compaction",
+  executing: "Running", executed: "Executed", executionFailed: "Execution failed", exitCode: "Exit code",
+  title: "Default subagent open position",
+  sidebar: "Right sidebar",
+  main: "Main area",
+  loading: "Loading settings…",
+  unavailable: "Settings cannot be saved here",
+  saving: "Saving…",
+};

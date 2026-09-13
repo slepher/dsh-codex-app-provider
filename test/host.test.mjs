@@ -1,0 +1,29 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { Context } from "@deepseek-ai/cordis";
+import LlmRuntime from "@deepseek-ai/dsh-llm";
+import * as plugin from "../lib/index.js";
+
+test("headless Host registers one route, releases ownership on unload, and reloads", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-app-host-"));
+  const ctx = new Context();
+  new LlmRuntime(ctx);
+  ctx.provide("agents", { get() {} });
+  ctx.provide("sessions", { get() {} });
+  t.after(async () => { await ctx.fiber.dispose(); rmSync(stateDir, { recursive: true, force: true }); });
+  const first = await ctx.plugin(plugin, { stateDir });
+  assert.equal(ctx.llm.listProviders().some(p => p.id === "codex"), true);
+  assert.equal(await ctx.codexExecution.read("nonexistent-native-session"), undefined);
+  assert.equal(existsSync(join(stateDir, "owner.lock")), true);
+  await first.dispose();
+  assert.equal(ctx.llm.listProviders().some(p => p.id === "codex"), false);
+  assert.equal(ctx.get("codexExecution"), undefined);
+  assert.equal(existsSync(join(stateDir, "owner.lock")), false);
+  const second = await ctx.plugin(plugin, { stateDir });
+  assert.equal(ctx.llm.listProviders().filter(p => p.id === "codex").length, 1);
+  await second.dispose();
+  assert.equal(existsSync(join(stateDir, "owner.lock")), false);
+});
