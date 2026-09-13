@@ -64,3 +64,23 @@ test("shipped client loads through DSH module loader and registers native settin
   effects.reverse().forEach(dispose => dispose());
   assert.equal(released, 2); assert.equal(handlers.size, 0);
 });
+
+test("shipped client styles the subagent-position row like the native settings rows", () => {
+  const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  // Geometry and tokens copied from the native settings rows; the row owns its padding and separator.
+  for (const frame of [/display:\s*flex/, /align-items:\s*center/, /gap:\s*8px/, /padding:\s*16px 0/,
+    /border-bottom:\s*0\.5px solid var\(--dsw-alias-border-l2\)/]) {
+    assert.match(source, frame, `row frame ${String(frame)} is missing`);
+  }
+  for (const pill of [/height:\s*36px/, /border-radius:\s*18px/, /padding:\s*0 14px/]) {
+    assert.match(source, pill, `selector pill ${String(pill)} is missing`);
+  }
+  assert.match(source, /data-plugin-css/);
+  assert.ok(source.includes('className: "codex-setting-row"'));
+  assert.ok(source.includes('className: "codex-setting-selector"'));
+  assert.ok(source.includes('className: "codex-setting-text"'));
+  assert.ok(source.includes('className: "codex-setting-control"'));
+  assert.ok(source.includes('className: "codex-setting-chevron"'));
+  assert.ok(source.includes('"aria-hidden": "true"'), "the visible value must not duplicate the select's own options");
+  assert.ok(source.includes('aria-label') && source.includes('"aria-busy"'), "the native select keeps the accessible name and busy state");
+});
