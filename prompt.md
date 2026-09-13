@@ -1,72 +1,128 @@
-# 继续 dsh-codex-app-provider（2026-09-13 保存）
+# 继续 dsh-codex-app-provider：修掉 workflow profile RPC 405（2026-09-13 续）
 
-项目：`/home/slepher/project/agents/dsh/dsh-codex-app-provider`。
-先完整阅读 README.md、EXECUTION.md；阶段追加记录比前面的历史状态新。以工作区文件为准，保留本包和兄弟仓库已有实现及用户修改，不重新制定整体计划。
+项目：`/home/slepher/project/agents/dsh/dsh-codex-app-provider`（provider），业务包 `../dsh-workflow-kit`（workflow）。
 
-## 用户最新要求与当前判断
+**这份 prompt 是为"新工作区"写的。** 上一轮 session 的 DSH 文件策略是 `workspace-write`，工作区只圈定了 app-provider 目录，导致无法写入兄弟仓库 `../dsh-workflow-kit`（连它的 `.git` 都只读）。请在**有兄弟仓库写权限**的新工作区继续；代码落点主要在 workflow，其次是 provider。
 
-用户要求保存进度、生成本文件，并强调“不要纠结于边角”。本轮已停止扩展验证。下一轮优先解决 workflow profile UI 的实际 HTTP 405，这是当前明确未解决的核心集成问题；不要继续堆叠审批、附件或其他边角场景来代替解决主问题。
+先读 `README.md`、`EXECUTION.md`；两份都要读，阶段记录比历史状态新。上一轮完整交接文档保留为 `prompt-2026-09-13-previous.md`（内含更早的架构决策、已通过验收项、证据清单）。以工作区文件为准，保留已有实现和用户修改，不重新制定整体计划。
 
-核心执行功能已实现并有真实调用证据，但不能称全部产品验收完成。真实浏览器曾发现 JSX 构建配置导致 `React is not defined`，现已修复；当前 workflow profile RPC 405 仍未解决。其余多次失败是测试定位、配置夹具或沙箱限制，不能统称产品缺陷。
+## 1. 仓库状态（已提交，不要重做）
 
-## 架构及范围
+| 仓库 | HEAD | 状态 |
+|---|---|---|
+| `dsh-codex-app-provider` | `a617deeb0a29aaf66821a62f3225f1bea55a55e4` | 本轮新建仓库并首次提交；`git status` clean；`.gitignore` = `node_modules/ lib/ dist/ *.tgz evidence/ .dsh-state/ .watch/` |
+| `dsh-workflow-kit` | `e6b5dda0c612227f86fa718e49c5bd46d1ed1da8` | 已提交 workflow profile 特性；`lib/` 已加入 `.gitignore` 并从索引移除（磁盘文件保留） |
+| `dsh-codex-kit` | 未改动 | 工作区 clean |
+| `deepseek-harness` | 用户原有约 103 项本地修改 | **不得提交、不得清理** |
 
-- provider 为一个 npm 包、一个 Host 插件入口、同包 `./client`；复用旧 kit 的 backend/provider/context，不另建执行引擎，不依赖旧 backend 插件。
-- `../dsh-workflow-kit` 是另一个业务包，已修改：负责 role/profile、配置选择、合同、提交及独立验收。它不计入“14 个协调包”。当前组合为 provider 1 包 + workflow 1 包 + 14 个现有 DSH 包的本地协调构建。
-- 14 包是 DSH 执行参数、原生 Session/侧栏公开接缝、工具目录和 Web 外壳需要一起安装的产物，不是新拆出的 14 个 provider 模块。`scripts/dsh-coordinated.json` 为准，最新阶段 `e4-verified`；版本仍是含本地修改的 rc.1。Web 静态嵌入 ui-slots，之前已实际完成 host/client/web 构建，无需为元数据重复构建。
-- 原生 Session、子代理、Conversation、输入、审批和侧栏必须复用；不复制聊天 UI，不导入其他插件私有组件。子代理位置使用原生 settings namespace，默认 sidebar，可选 main。
-- 保留 Codex 原生执行/权限/审批/幂等/恢复语义；不能证明旧执行停止时，不接管或重发。
-- 不部署、不发布、不推送、不删除旧数据/旧项目。只验证本包、workflow 和必要 DSH 接口；不运行 DSH 全量 GUI，不修复无关 WSL/Linux 基线。
-- 不手改 node_modules，不读取/复制认证文件，不用宽泛 pgrep。兄弟仓库写入需精确补丁、`git apply --check` 后按权限升级应用。用户明确允许必要验证使用 evidence_runner；不要另行启动无关子代理。
+- provider 仓按用户要求"干净"：evidence/（含 42 个协调包 tarball、截图、日志）**不入库**，只在磁盘保留。
+- workflow 仓 lib/ 不再入库；改源码后必须 `npm run build` 才能被 profile 使用。
+- 版本：Node 24.13.1、npm 11.8.0、Codex 0.154.0、DSH 0.1.5-rc.1（14 个本地协调包），协调清单 `scripts/dsh-coordinated.json`（阶段 `e4-verified`）。
 
-## 已完成及证据（均在 evidence/，除明确标注临时目录）
+## 2. 用户当前环境与最新要求
 
-- 原生 child 参数、profile 快照：`live-result.json`、`workflow-live-result.json`；真实 A=medium、B=high，删除配置/修改角色后 A 冷 Agent 恢复沿用快照。
-- 原生外部工具事件：`external-live-result.json`；按 thread/turn/item/sequence 去重，DSH tool/call 为零。
-- E3 公开 reasoning summary 已实现，仅保留公开摘要，过滤 raw reasoning；真实终态优先，未确认工具终态显示 unknown/Stop requested。`e3-native-turn-end-tests.log` 为模拟事件/服务及 bundle 34/34，不是所有摘要场景的真实模型证明。
-- E4 公开 reusable slot mount、显式 SessionProvider、原生视图 retain、sidebar tab 已实现。必要双语 README/架构决策已补，`e4-mount-docs.patch`、`e4-mount-doc-pairing.log`。此前接口聚焦检查已通过，不扩大 DSH 测试。
-- 实际浏览器设置 sidebar/main 持久化、原生 child tab、父子草稿隔离及关闭重开、Open in main、独立输入通过：`browser-live-final.log`、相关 browser-live 截图。
-- 实际工具 UI：`browser-tool-ui-result.json`、`browser-live-tool-ui.png`。要在 Chat 展开 Thought 和 item details；之前在 Trajectory/Calls 找输出是测试路径错误。
-- 整个 Host 冷恢复：`browser-host-recovery-result.json` 为 PASS_HOST_COLD_RECOVERY，沿用原 Session/thread 和角色/权限边界。仅对已确认结束的旧执行恢复。
-- 实际 child Stop：`browser-e5-install-host-result.json` 的 correctedStopAttempt、`browser-e5-child-stop-result.json`，backend turn interrupted，未虚构未完成 command 的终态。按钮名是 `Stop generating`，首次用 `Stop` 未命中是脚本问题。
-- 人工 Allow once/Reject：`browser-approval-interactive-final.json`、`browser-approval-reject-force-result.json`。仅隔离命令 wrapper 使用原生 `approvals_reviewer=user`；Allow 后 printf exit 0，Reject 后 item declined、无输出。自动审批结果单列 `browser-approval-result.json`。
-- 真实 workflow 完整成功路径：`workflow-contract-live-result.json` 为 PASS_WORKFLOW_CONTRACT_DELIVERY，`e5-workflow-contract.log`，隔离 `/tmp/dsh-app-live-LPleNC`。T001 只读及 T002 工作树修改任务经过 adopt/dispatch/record-result/accept/integrate/release，T002 独立 reviewer passed，三个真实执行 completed。并非所有故障分支验收。
-- workflow prepare/install/dev/watch/headless/pack 已迁移到新 provider；本包新增原子 watch，执行源码变动暂停本轮发布。dev 使用实际 provider checkout 绑定，保留原有 owner/overlay/进程身份语义，不为 provider 执行源码启用 Host HMR。
+- 用户**正在**运行 `dsh --profile workflow-kit-dev`，URL `http://127.0.0.1:3080/?token=…`（就是当前 GUI）。该 Host 加载的是 `~/.dsh/profiles/workflow-kit-dev/node_modules/` 里的**已安装拷贝**，不是源码 checkout。
+- 已确认：`node_modules/dsh-workflow-kit` 与 `node_modules/dsh-codex-app-provider` 都是真实目录（非 symlink），provider `lib/index.js`、workflow `lib/profile-rpc.js` 时间戳为 2026-09-13 16:14/16:15。
+  **结论：直接改源码不会生效，必须把源码构建进 profile，或改用 dev Host。**
+- 用户要求："利用 dsh 的热部署功能直接修改，插件都在开发中，并不会破坏什么东西。" 即：允许在本机开发 profile 上做真实热部署验证，不必新建隔离安装。
+- 用户同时要求生成本文件，因为上一轮权限不足，需要在新工作区工作。
 
-## 最新检查与候选
+### 热部署的正确入口（已核实）
 
-- 本包完整：`e5-provider-tests-escalated.log` 60/60、exit 0。沙箱首次 54/60 的失败日志保留，原因是 RPC/watch 子进程限制。无需无变化再跑全集。
-- workflow 完整首次 `e5-workflow-tests.log` 为 40/41；唯一 exports 旧断言已迁移，`e5-workflow-exports-tests.log` 单项 1/1。不能声称有新的统一 41/41 运行。
-- workflow dev 最新 15/15：`e23-dev-binding-tests.log`；两套 watch 各 4/4，均真实 Node 子进程夹具，不是真实模型。
-- `e4-verified-pack.log`：14 个协调包打包成功。源码差异为 `evidence/dsh-source.patch`。
-- `e5-pack-check.log`：provider-only 与 provider+workflow 两套独立安装/Cordis runtime 通过，staging `/tmp/dsh-workflow-kit-pack-yLO6jI`。
-- provider 最新候选 `/tmp/dsh-app-e5-candidate/dsh-codex-app-provider-0.1.0.tgz`。
-- workflow 后续补充 RPC webServer 注入的候选 `/tmp/dsh-workflow-e5-rpc/dsh-workflow-kit-0.1.0.tgz`；build、模拟 profile-rpc 2/2、pack 通过，但真实浏览器仍 405。上述 pack-check staging 早于这一注入补充。
+workflow 仓自带 dev 编排（`scripts/dev.mjs` + `scripts/dev-host.mjs`），只有它启用 HMR：
 
-## 当前唯一明确待解决的核心集成故障
+```bash
+cd /home/slepher/project/agents/dsh/dsh-workflow-kit
+npm run dev -- --profile workflow-kit-dev \
+  --app-provider /home/slepher/project/agents/dsh/dsh-codex-app-provider
+# 等价：DSH_CODEX_APP_PROVIDER_CHECKOUT=/home/slepher/project/agents/dsh/dsh-codex-app-provider
+```
 
-隔离 `/tmp/dsh-app-live-ZLL7JJ`，官方 Web Host + 新 provider/workflow。两个真实原生 Session 已完成 PROFILE_UI_READY，profile 控件能渲染，但 POST `/workflow/profiles` 和 `/workflow/reload-configuration` 返回 HTTP 405、空响应，无法完成 UI profile 选择/刷新验收。
+- 它会校验 profile manifest 的 bundle 顺序必须是 `dsh-codex-app-provider` → `dsh-workflow-kit`，用 `--app-provider` checkout 绑定身份与 owner/stateDir 语义。
+- HMR `root` 只覆盖 workflow 自己的 `lib/`（`expectedRoots = [<workflow>/lib]`）；`ignored: **/node_modules`、`**/.*`，`debounce: 100`。
+- provider 源码改动**不**进 Host HMR：provider `scripts/watch.mjs` 走原子暂存构建/发布，且"执行源码变动"（backend/provider 等 core）会永久暂停本轮发布。provider 的 client-only 改动能发布。
+- 因此：**405 的修复在 workflow 侧最省事**（`src/profile-rpc.ts` 改完 build，dev Host 经 HMR 重载）。若要改 provider，预期要重装/重启，先确认再动手。
 
-已保留 `e5-workflow-rpc-browser.log` 和临时目录中的 `browser-workflow-profile-ui-run.mjs`、`browser-workflow-profile-refresh.mjs`、`workflow-service-events.jsonl`。`../dsh-workflow-kit/src/profile-rpc.ts` 的内部注入已从 connection 改成 connection/webServer（`e5-profile-rpc-dependency.patch`），尚未解决 405。不要把这一假设写成已证实根因。
+## 3. 当前唯一核心故障：`/workflow` 路由没有注册（HTTP 405）
 
-已观察到 tools/agents/sessions/subagents/codexExecution/connection/webServer 都 ready；诊断路由表未见 /workflow。早期 workflow ctx.get(connection) 为空的样本发生在 connection ready 前，不能据此证明隔离作用域有错。Connection.rpc 是 getter，每次返回新对象；给单次对象 handle 打补丁无法证明注册是否调用。不要继续基于无效探针改产品。
+### 现象（真实、已复现，不是测试脚本问题）
 
-诊断过程中隔离安装曾回退到旧 tarball，后固定 manifest 到新候选；也曾违反约束手改隔离 node_modules 作诊断，已通过正式 tarball 安装恢复。临时诊断插件位于该隔离目录，不属于产品。下一步从真实失败链确定根因并作最小修复，保留 headless 可用，不能把 Web 服务变成外层必需注入。
+- workflow 的同包客户端在原生 Session header 渲染 profile 选择器成功，但 `POST /workflow/profiles` 与 `POST /workflow/reload-configuration` 返回 **HTTP 405、空响应**；同进程 `/api/*` 全部 200。
+- 405 来自 Web 外壳的 SPA fallback（非 GET 到静态兜底），含义是：**`/workflow` 这个 prefix 路由根本没注册到 `webServer`**。
 
-## 收尾及待验证项
+### 本轮新增的硬证据
 
-- workflow 诊断 Host 67446 已停止，诊断 exec cell 349 已终止；代理确认没有它遗留的 Host。最新结论及日志 `e5-workflow-host-diagnostic.log`：workflow apply 已进入、fiber state 2、await 成功；稳定的 ready 后 context/isolate 比较未完成，不作为根因。两个验证代理均已收尾，不要继续等待旧验证。
-- `/tmp/dsh-app-live-lkvASx` 审批测试 Host 37446 已停止。一个旧测试 Session `codex:session-accb254f-7ec9-49cb-b712-12e590c02463`，request `19ba2308-1dbd-4fbc-8dea-e9d0f18b0e40`，原生 cancel 返回 session/not-found (not attached)，终态仍 unknown/unconfirmed。保留状态，不重发/接管/删除；详见 `browser-approval-cleanup-result.json`。
-- 图片验证未完成。原 UI 截图上传被自动审批拒绝，未执行模型请求，见 `browser-image-live-result.json`；之后改用无元数据纯红 32×32 PNG `evidence/attachment-red.png`。安全替代尝试在 workspace/session 定位阶段被用户停止，未确认上传、未发起模型请求；Host 93093 已停止。隔离目录 `/tmp/dsh-app-live-lR5NTz` 保留。不要将附件记为产品失败或外部阻塞，也不要优先继续该边角。
-- Queue/Steer、分页、one-shot/父不可用等更广交互尚未全面验收；不因此扩展本轮范围。
-- 旧 kit 最后 `git status --short` 为空。DSH 原有五文件修改仍保留：session-controller commands.ts/types.ts/agent.host.spec.ts/session-models.host.spec.ts，以及 tool-cordis api-catalog.ts 的 persistDefault/liveOnly。DSH 原 HEAD `183f08e9c6dde7e36cd2318eaee70b0da08fb35e`；workflow 原 HEAD `ab8b10e55b85bdf7957ba88a7500abc7ea659e14`。workflow src/host.ts 尾部空行提示不要扩大清理。
-- Node 24.13.1、npm 11.8.0、Codex 0.154.0；npm cache `/tmp/dsh-app-npm-cache`。Playwright 使用兄弟 inspector 已装版本，浏览器使用 `/home/slepher/.cache/ms-playwright/chromium-1200/chrome-linux64/chrome`，无需下载或添加产品依赖。
-- `scripts/test-live.mjs --browser` 只做隔离安装/dump-config，不启动服务/浏览器。可用 `DSH_PROVIDER_TEST_TARBALL`、`DSH_WORKFLOW_TEST_TARBALL` 指定候选，`DSH_LIVE_EVIDENCE_PREFIX` 避免覆盖证据；PASS_ISOLATED_INSTALLATION 不能当浏览器通过。
+隔离复现脚本（未使用、也未改动真实 profile；`DSH_HOME` 指向工作区内副本，端口 4512x）：
 
-本轮按用户要求暂停开发和新验证，仅保存文档与已获得的证据。下一轮完成阶段后更新 EXECUTION.md，明确模拟、真实 Node、真实模型和真实浏览器各自证明的范围。
+- `evidence/probe-405/probe.yml`、`probe-plugin.mjs`、`probe-host.log`、`probe-405.mjs`（纯 cordis 最小 harness）。
+- `probe-405.mjs`（最小 harness）：把 workflow `apply` 挂到一个普通 plugin 上下文，inner `ctx.inject(["connection","webServer"], …)` **会触发**，`connection.rpc.handle("/workflow", …)` **会被调用**。→ cordis 的 inner-inject 机制与 product 写法本身没问题。
+- 真实 profile 复现（`probe-host.log`）关键行：
 
-## 保存后用户追加：已安装日常开发 profiles
+```text
+PROBE405 workflow ctx has inject=function connection=true webServer=true
+PROBE405 A inner callback fired; connection=true webServer=true
+PROBE405 A rpc.handle threw: cannot get property "webServer" without inject
+PROBE405 A after 1200ms: state=ACTIVE uid=176 prefixes=["/plugins","/api","/open-in-app/icon"] effects=[] routesBefore=2
+PROBE405 B pending fiber state check done; prefixes=["/plugins","/api","/open-in-app/icon"]
+```
 
-用户随后明确授权安装，现 `~/.dsh/profiles/codex-dev` 为 app-provider + Web，`~/.dsh/profiles/workflow-kit-dev` 为 app-provider + workflow + Web。均使用最新候选和 14 协调包；候选持久保存于本项目 `evidence/dev-profile-packages/`。原 codex-dev 全目录备份至 `~/.dsh/backups/profiles/codex-dev-1789287335221`，旧数据/其他 profile 保留。各 profile 使用 `~/.dsh/state/<profile>/codex` 独立 provider 状态，workflow 另有 workflow 状态子目录；providerCwd 沿用启动目录。默认主模型为 gpt-5.6-luna。
+由此确认：
 
-七角色及 workflow-default 已显式安装至 `~/.dsh/workflow-kit-dev`。npm 安装和最终 `dsh --profile <name> --dump-config` 均成功，未启动 Host/模型。证据 `evidence/dev-profiles-install-result.json`。启动命令 `dsh --profile codex-dev` 或 `dsh --profile workflow-kit-dev`。已知 workflow profile UI 405 仍在，不能把安装成功写成该问题已解决。
+1. workflow entry fiber `state=ACTIVE`，`connection/webServer/sessions/tools/agents/subagents/codexExecution` 在 **workflow fiber 自己的 ctx** 上都可解析（`fiberCtx.get(...) !== undefined`）。
+2. boot 完成后 `webServer.prefixes` 只有 `/plugins`、`/api`、`/open-in-app/icon`，**没有 `/workflow`**；`effects=[]` 说明没有留下 route 注册 effect。
+3. 用 workflow fiber 的 context **复刻**同样的 `ctx.inject(["connection","webServer"], …)`：回调确实触发，但回调体内访问 **`scope.webServer` 抛错**：`cannot get property "webServer" without inject`（即该 inner fiber 的依赖解析里 `webServer` 找不到，而 `connection` 找得到）。
+4. 上一轮把根因写成"workflow 包缺 `webServer` 注入声明"是**过早结论**，已被本条推翻；`e5-profile-rpc-dependency.patch` 那次修改（connection → connection/webServer）不解决 405。
+
+### 待查的关键点（下一轮从这里开始，不要重跑 DSH 全量回归）
+
+- 为什么同一个 `ctx.inject([...])` 里 `connection` 可解析而 `webServer` 在 inner fiber 上解析失败：沿 cordis 4.0.2 的 `Fiber._checkImpl` / `ReflectService._getImpl(name)` / `ctx[symbols.isolate][name]` / `fiber.store` 对照 `provide()` 注册路径，确认两处用的 isolate 符号是否一致（`webServer` 由 `@deepseek-ai/dsh-host-webserver` 的 `webserver` entry 提供，该 entry 声明 `inject: [webStartup]`；`connection` 由 `client-connection` entry 提供，声明 `inject: [webRuntime]`）。
+- 参考同进程工作正常的样例：`@deepseek-ai/dsh-api-gateway` 的 `TypertGatewayService` 构造函数里同时做了 `ctx.inject(["connection"], …)` 与 `ctx.inject(["connection","webServer"], …)`，实机可用。对比它与 workflow 的差异（它是 Service 类、在 entry fiber 构造期注入；workflow 是 `apply(ctx)` 函数里注入）。
+- 注意 cordis `getTraceable`/`symbols.shadow` 语义：非 noShadow 服务的方法会把 `this.ctx` 还原为**调用者** ctx；访问 `scope.webServer` 报错说明是 shadow ctx 的解析问题，而不是 `webServer` 根本不存在。
+- 最小修复后，先跑 `probe-405.mjs` + 隔离 probe（秒级、可反复），再在 dev Host + 真实浏览器上做 profile 选择/刷新验收。
+- 诊断口径要求：区分"模拟/真实 Node/真实模型/真实浏览器"各自证明了什么，不要把模拟结论写成浏览器通过。
+
+### 复现命令（新工作区可直接复用）
+
+```bash
+# 1) 纯 cordis 最小 harness（证明 inner-inject 机制没问题）
+cd /home/slepher/project/agents/dsh/dsh-codex-app-provider
+node evidence/probe-405/probe-405.mjs
+
+# 2) 真实 profile 隔离复现（副本 DSH_HOME，端口 45125，不碰真实 profile/状态）
+rm -rf evidence/probe-405/state && mkdir -p evidence/probe-405/state
+DSH_HOME="$PWD/evidence/probe-405/home" \
+PROBE_STATE_DIR="$PWD/evidence/probe-405/state/codex" \
+PROBE_WORKFLOW_STATE_DIR="$PWD/evidence/probe-405/state/workflow" \
+dsh --profile workflow-kit-dev --patch evidence/probe-405/probe.yml --port 45125 --no-open \
+  > evidence/probe-405/probe-host.log 2>&1
+grep -a PROBE405 evidence/probe-405/probe-host.log
+```
+
+`evidence/probe-405/home/profiles/workflow-kit-dev/` 是真实 profile 的小副本（只复制了 4 个配置文件），`node_modules` 是 symlink 到真实 profile，`cordis.patch.yml` 里 stateDir 改成了 `!!js process.env.PROBE_*_DIR`。每次跑前清 `evidence/probe-405/state/`，否则会撞 `stateDir is already owned by pid`。
+
+浏览器侧脚本（上一轮 405 现场，保留可用）：`evidence/browser-workflow-profile-ui-run.mjs`、`evidence/browser-workflow-profile-refresh.mjs`；相关日志 `e5-workflow-rpc-browser.log`、`e5-workflow-host-browser-response.log`、`e5-workflow-host-diagnostic.log`。
+
+## 4. 约束（沿用，不扩大）
+
+- 不部署、不发布、不推送、不删除旧数据/旧项目；不启动 DSH 全量 GUI 回归；不运行无关 DSH 测试。
+- 不手改 `node_modules` 做产品结论；诊断期的临时 instrumentation 只能用于定位，且必须在结论里标明，不得据此修改产品；完成后用正式 build/安装恢复。
+- 不读取/复制认证文件；不用宽泛 `pgrep`。
+- 兄弟仓库写入用精确补丁 + `git apply --check`，按权限升级执行；用户已明确允许在开发 profile 上做真实热部署验证。
+- 用户强调"不要纠结于边角"：审批/附件/Queue-Steer/分页等场景不优先，先修 405 这条核心调用链。
+- 保留已通过的真实闭环证据（合同交付、Host 冷恢复、子会话 Stop、人工 Allow/Reject、工具 UI、设置持久化）；引用时保留其原始范围，不声称更多。
+
+## 5. 交付与记录
+
+- 修好后：更新 `EXECUTION.md`（新增阶段小节，明确模拟/真实 Node/真实模型/真实浏览器各自证明范围）、必要时更新 `README.md` 状态行。
+- 证据放 `evidence/`，沿用现有命名风格（`e5-…`、`browser-…`、patch 文件）。
+- 两个仓库各自提交；provider 的 `evidence/` 继续不入库。
+- 未解决就如实标注"405 仍存在"和已排除的假设，不要把假设写成根因。
+
+## 6. 快速索引
+
+- provider 源码：`src/`（`index.ts` 入口、`provider.ts`、`context.ts`、`backend.ts`、`rpc.ts`、`store.ts`、`client/`）
+- workflow 源码：`../dsh-workflow-kit/src/`（本次故障点 `profile-rpc.ts`；`host.ts` 的 `inject = ["tools","agents","sessions","subagents","codexExecution"]`）
+- 已安装 profile：`~/.dsh/profiles/workflow-kit-dev/`（另有 `~/.dsh/profiles/codex-dev/`）；状态目录 `~/.dsh/state/<profile>/…`
+- 启动：`npm run dev -- --profile workflow-kit-dev --app-provider <provider-checkout>`（热部署）；或 `dsh --profile workflow-kit-dev`（无 HMR，加载安装拷贝）
+- 既有诊断 patch：`evidence/e5-profile-rpc-dependency.patch`（未被证实有效，勿当作修复）
+- 既有 405 记录：`evidence/e5-workflow-host-diagnostic.log`、`e5-workflow-rpc-browser.log`
