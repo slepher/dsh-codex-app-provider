@@ -5,10 +5,12 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 
 test("shipped client loads through DSH module loader and registers native settings and external execution node", () => {
+  // `react-dom` is a shell platform module: the loader supplies it, the bundle never carries a copy.
+  const PLATFORM = ["react", "react/jsx-runtime", "react-dom"];
   const require = createRequire(import.meta.url);
   let module;
   runInNewContext(readFileSync(new URL("../lib/client.js", import.meta.url), "utf8"), {
-    window: { __ModuleLoader__: { load(value) { assert.equal(value.id, "dsh-codex-app-provider"); module = value.factory(name => { assert.ok(["react", "react/jsx-runtime"].includes(name)); return require(name); }); } } },
+    window: { __ModuleLoader__: { load(value) { assert.equal(value.id, "dsh-codex-app-provider"); module = value.factory(name => { assert.ok(PLATFORM.includes(name)); return require(name); }); } } },
   });
   const effects = [], rows = [], definitions = [], opened = [], navigated = [];
   const components = new Map();
@@ -79,8 +81,18 @@ test("shipped client styles the subagent-position row like the native settings r
   assert.ok(source.includes('className: "codex-setting-row"'));
   assert.ok(source.includes('className: "codex-setting-selector"'));
   assert.ok(source.includes('className: "codex-setting-text"'));
-  assert.ok(source.includes('className: "codex-setting-control"'));
   assert.ok(source.includes('className: "codex-setting-chevron"'));
-  assert.ok(source.includes('"aria-hidden": "true"'), "the visible value must not duplicate the select's own options");
-  assert.ok(source.includes('aria-label') && source.includes('"aria-busy"'), "the native select keeps the accessible name and busy state");
+  // The menu mirrors the native Menu card and cells instead of a native select popup.
+  for (const menu of [/border-radius:\s*20px/, /padding:\s*4px/, /background:\s*var\(--dsw-specific-menu\)/,
+    /box-shadow:\s*var\(--dsw-elevation-prominent\)/, /min-height:\s*40px/, /border-radius:\s*10px/]) {
+    assert.match(source, menu, `menu style ${String(menu)} is missing`);
+  }
+  assert.ok(source.includes('className: "codex-setting-menu"'));
+  assert.ok(source.includes('className: "codex-setting-option"'));
+  assert.ok(source.includes('className: "codex-setting-check"'));
+  assert.ok(source.includes('role: "menu"') && source.includes('role: "menuitemradio"'));
+  assert.ok(source.includes('"aria-expanded"') && source.includes('"aria-checked"'));
+  assert.ok(source.includes('"aria-haspopup": "menu"'));
+  assert.ok(source.includes('aria-label') && source.includes('"aria-busy"'), "the trigger keeps the accessible name and busy state");
+  assert.ok(!source.includes("codex-setting-control"), "the native select popup is gone");
 });

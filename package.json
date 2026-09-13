@@ -39,6 +39,7 @@
     "@deepseek-ai/dsh-client-ui-settings": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-locale": "0.1.5-rc.1",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1"
   },
   "devDependencies": {
@@ -49,7 +50,9 @@
     "@deepseek-ai/dsh-client-ui-settings": "0.1.5-rc.1",
     "@deepseek-ai/dsh-client-locale": "0.1.5-rc.1",
     "react": "18.3.1",
+    "react-dom": "18.3.1",
     "@types/react": "18.3.1",
+    "@types/react-dom": "18.3.1",
     "esbuild": "0.25.12",
     "@deepseek-ai/dsh-client-ui-renderer": "file:evidence/dsh-packages/e4-sidebar/deepseek-ai-dsh-client-ui-renderer-0.1.5-rc.1.tgz",
     "@deepseek-ai/dsh-llm": "file:evidence/dsh-packages/e4-sidebar/deepseek-ai-dsh-llm-0.1.5-rc.1.tgz",

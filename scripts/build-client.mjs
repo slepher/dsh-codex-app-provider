@@ -5,7 +5,9 @@ await build({
   entryPoints: [`${root}src/client/index.ts`], outfile: `${root}lib/client.js`,
   tsconfig: `${root}tsconfig.client.json`,
   bundle: true, format: "cjs", platform: "browser", target: "es2022",
-  external: ["react", "react/jsx-runtime"],
+  // Shell platform modules: the client module table supplies these, so they stay
+  // one browser identity instead of a second bundled copy.
+  external: ["react", "react/jsx-runtime", "react-dom"],
   banner: { js: 'window.__ModuleLoader__.load({ id: "dsh-codex-app-provider", factory: (require) => { var module = { exports: {} }; var exports = module.exports;' },
   footer: { js: "return module.exports; } });" },
 });

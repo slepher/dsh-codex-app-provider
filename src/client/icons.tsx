@@ -7,3 +7,13 @@ export function ChevronDownIcon({ size = 14, className }: { size?: number; class
     />
   </svg>;
 }
+
+/** Trailing selected marker inside a menu row; same geometry as the native menu check. */
+export function CheckIcon({ size = 16, className }: { size?: number; className?: string }) {
+  return <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M13.3535 4.85352L6.35352 11.8535C6.25975 11.9473 6.13261 12 6 12C5.8674 12 5.74025 11.9473 5.64649 11.8535L2.64649 8.85352L3.35352 8.14649L6 10.793L12.6465 4.14649L13.3535 4.85352Z"
+      fill="currentColor"
+    />
+  </svg>;
+}

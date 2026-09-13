@@ -3,9 +3,10 @@
  *
  * The same-package client half is bundled by esbuild without a CSS pipeline, so
  * the styles are injected once at first render instead of shipping a separate
- * stylesheet the deployment loader would never fetch. The row geometry, tokens
- * and selector pill mirror the native settings rows (`settings.general.item`),
- * which own their own padding and separator.
+ * stylesheet the deployment loader would never fetch. The row geometry, tokens,
+ * selector pill and menu card mirror the native settings rows and menu
+ * (`settings.general.item`, ui-primitives Menu): the contributor owns its own
+ * padding and separator.
  */
 const PLUGIN_CSS_ID = "dsh-codex-app-provider";
 
@@ -44,50 +45,79 @@ const CSS = `
   color: var(--dsw-alias-label-error);
 }
 .codex-setting-selector {
-  position: relative;
   display: inline-flex;
   flex: none;
   align-items: center;
   gap: 12px;
   height: 36px;
   padding: 0 14px;
+  border: none;
   border-radius: 18px;
   background: var(--dsw-alias-bg-module-platform);
   font: inherit;
   font-size: 14px;
   line-height: 22px;
   color: var(--dsw-alias-label-primary);
-}
-.codex-setting-selector:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.codex-setting-selector:focus-within {
-  outline: 2px solid var(--dsw-alias-border-focus, var(--dsw-alias-label-primary));
-  outline-offset: 2px;
-}
-.codex-setting-selector[data-disabled='true'] {
-  color: var(--dsw-alias-label-tertiary);
-}
-/* The native select keeps its keyboard, wheel and assistive behavior; only its
- * own chrome is hidden so the pill above is what the user sees. */
-.codex-setting-control {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  border: 0;
-  padding: 0;
-  opacity: 0;
-  appearance: none;
   cursor: pointer;
 }
-.codex-setting-control:disabled {
+.codex-setting-selector:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.codex-setting-selector:disabled {
   cursor: default;
+  color: var(--dsw-alias-label-tertiary);
 }
 .codex-setting-chevron {
   flex: none;
-  color: var(--dsw-alias-label-tertiary);
+}
+/* Menu card (ui-primitives Menu): r20, 4px inset padding, prominent elevation. */
+.codex-setting-menu {
+  position: fixed;
+  z-index: 1100;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-width: 218px;
+  max-width: calc(100vw - 24px);
+  padding: 4px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--dsw-specific-menu);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  outline: none;
+}
+/* Menu cell (ui-primitives Menu .item): min-h 40, r10, 8/10 padding, trailing check. */
+.codex-setting-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+}
+.codex-setting-option[data-active='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.codex-setting-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-setting-check {
+  flex: none;
+  color: var(--dsw-alias-label-primary);
 }
 `;
 
