@@ -23,7 +23,9 @@
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "node --test test/*.test.mjs",
-    "test:live": "node scripts/test-live.mjs"
+    "test:live": "node scripts/test-live.mjs",
+    "publish": "node scripts/publish.mjs",
+    "publish:watch": "node scripts/publish.mjs --watch"
   },
   "engines": {
     "node": ">=22.19.0"
