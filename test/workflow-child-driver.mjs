@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { writeFile, mkdir, unlink } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { WorkflowConfiguration, WorkflowStore, WorkflowWorkers, configurationDirectory } from "dsh-workflow-kit";
+import { WorkflowConfiguration, WorkflowStore, WorkflowWorkers } from "dsh-workflow-kit";
 import { setTimeout } from "node:timers/promises";
 
 export const name = "codex-app-workflow-child-test";
@@ -35,18 +35,21 @@ export function apply(ctx) {
         await setTimeout(20, undefined, { signal });
       }
     };
-    const directory = configurationDirectory("workflow-live-test");
-    await mkdir(join(directory, "roles"), { recursive: true });
-    await mkdir(join(directory, "profiles"), { recursive: true });
     const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
+    const efforts = { A: "medium", B: "high" };
+    let marker = "DSH_ROLE_A";
+    // The shipped layer is synthetic: one reviewer role per profile, and a
+    // resolver that composes the role instructions captured at dispatch time.
+    const builtin = Object.fromEntries(Object.entries(efforts).map(([role, reasoningEffort]) => [role.toLowerCase(), {
+      roles: { reviewer: { provider: "codex", model, reasoningEffort } },
+    }]));
+    const catalog = new WorkflowConfiguration(builtin,
+      () => `Your role marker is ${marker}. Reply with only this marker when asked. Do not run tools.`);
     const store = new WorkflowStore(join(process.env.DSH_HOME, "workflow-live-state"));
-    const catalog = new WorkflowConfiguration("workflow-live-test");
-    const workers = new WorkflowWorkers(ctx, store, catalog);
+    const workers = new WorkflowWorkers(ctx, store, catalog, () => "a");
     for (const role of ["A", "B"]) {
-      const effort = role === "A" ? "medium" : "high";
-      await writeFile(join(directory, "roles/reviewer.md"), `Your role marker is DSH_ROLE_${role}. Reply with only this marker when asked. Do not run tools.`);
-      await writeFile(join(directory, `profiles/${role.toLowerCase()}.json`), JSON.stringify({ roles: { reviewer: { model, reasoningEffort: effort } } }));
-      catalog.reload();
+      const effort = efforts[role];
+      marker = `DSH_ROLE_${role}`;
       store.selectProfile(String(parent.id), role.toLowerCase());
       const child = await workers.run(parent, signal, async () => {
         const captured = workers.captureRole("reviewer");
@@ -65,9 +68,9 @@ export function apply(ctx) {
         assert.equal(facts.model, model); assert.equal(facts.effort, effort);
       });
     }
-    await unlink(join(directory, "profiles/a.json"));
-    await writeFile(join(directory, "roles/reviewer.md"), "Changed role instructions. Existing children must retain their original instructions.");
-    catalog.reload();
+    // Changing the role instructions after dispatch must not rewrite a child
+    // that already captured its own.
+    marker = "DSH_ROLE_CHANGED";
     await workers.run(parent, signal, async () => {
       await workers.append(String(parent.id), children[0].id, "Reply with your role marker again.", true, `${children[0].id}:second`);
     });
