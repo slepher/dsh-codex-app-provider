@@ -8,6 +8,7 @@ import test from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import LlmRuntime from "@deepseek-ai/dsh-llm";
 import * as plugin from "../lib/index.js";
+import { SessionStore } from "../lib/store.js";
 import { executeWorkerAction } from "../lib/worker-actions.js";
 import { installWorkerDelivery } from "../lib/worker-delivery.js";
 
@@ -219,4 +220,50 @@ test("report notices are claimed once per parent and never fabricated as a decis
   const again = await handler({ agent, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [] }));
   assert.deepEqual(again.messages, []);
   delivery.close();
+});
+
+test("the restored entry serves legacy worker data without migrating or re-identifying it", async t => {
+  const fixture = setup();
+  // Data written by the previous entry: one Session with no worker block at all,
+  // and one bound worker with a durable report. repair.md §4.5: legacy data is
+  // neither migrated nor re-identified, and the old entry may only be retired
+  // once real consumers can still reach that history.
+  const store = new SessionStore(fixture.stateDir);
+  store.put({ ownerId: "parent", sessionId: "legacy-session", threadId: "legacy-thread", cwd: fixture.cwd,
+    state: "idle", approvals: [], events: [], nextEventSequence: 1, reports: [] });
+  store.put({ ownerId: "parent", sessionId: "legacy-worker", threadId: "worker-thread", cwd: fixture.cwd,
+    state: "idle", approvals: [], events: [], nextEventSequence: 1,
+    reports: [{ workerId: "legacy-worker", threadId: "worker-thread", turnId: "turn-legacy", status: "completed",
+      result: "legacy deliverable", usage: null, createdAt: Date.now(), acceptance: "pending" }],
+    worker: { parentSessionId: "parent", owner: "agent", name: "legacy worker", detached: false } });
+  store.close();
+
+  const ctx = new Context();
+  new LlmRuntime(ctx);
+  const { parent } = host(ctx, fixture.cwd);
+  const registered = [];
+  ctx.provide("tools", { register(definition) { registered.push(definition); return () => {}; } });
+  ctx.provide("systemPrompt", { section() { return () => {}; }, getSectionOrder: () => 10 });
+  t.after(async () => { await ctx.fiber.dispose(); fixture.restore(); rmSync(fixture.stateDir, { recursive: true, force: true }); rmSync(fixture.cwd, { recursive: true, force: true }); });
+  await ctx.plugin(plugin, { stateDir: fixture.stateDir, command: FAKE, providerCwd: fixture.cwd });
+  const tool = registered.find(definition => definition.name === "codex_workers");
+
+  const listed = JSON.parse(await tool.execute({ action: "list" }, exec(parent)));
+  assert.deepEqual(listed.map(worker => worker.id), ["legacy-worker"],
+    "a Session with no worker block stays unbound: it is not adopted into the group by being read");
+  const worker = JSON.parse(await tool.execute({ action: "get", workerId: "legacy-worker" }, exec(parent)));
+  assert.equal(worker.name, "legacy worker");
+  assert.equal(worker.threadId, "worker-thread", "the historical thread identity is preserved, not rewritten");
+
+  const reports = JSON.parse(await tool.execute({ action: "reports" }, exec(parent)));
+  assert.deepEqual(reports.map(report => report.turnId), ["turn-legacy"], "the old entry's durable report is still reachable");
+  const accepted = JSON.parse(await tool.execute({ action: "accept", workerId: "legacy-worker", turnId: "turn-legacy", acceptance: "accepted" }, exec(parent)));
+  assert.equal(accepted.acceptance, "accepted");
+  await tool.execute({ action: "close", workerId: "legacy-worker" }, exec(parent));
+  assert.deepEqual(JSON.parse(await tool.execute({ action: "list" }, exec(parent))), []);
+
+  // The unbound Session is still readable history, and adoption is the explicit,
+  // reviewed path that gives it an identity — never an implicit migration.
+  const execution = await ctx.codexExecution.read("legacy-session");
+  assert.equal(execution, undefined, "an unbound legacy Session outside the provider owner is not claimed");
 });

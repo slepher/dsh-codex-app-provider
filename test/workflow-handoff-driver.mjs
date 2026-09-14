@@ -232,7 +232,15 @@ export function apply(ctx) {
           // request header depending on the core; what must hold is that the
           // worker ran the role it was dispatched with.
           assert.ok(events.some(event => event.type === "request/header"), "the worker logged its requests");
-          assert.equal(events.filter(event => event.type === "tool/call").length, 0, "native tools are not dispatched twice");
+          // Only a Codex execution must not replay its own tools through the DSH
+          // dispatcher. A cross-provider successor runs *on* DSH, so its session
+          // legitimately records the DSH tool calls it made.
+          if (execution.source === "provider") {
+            assert.equal(events.filter(event => event.type === "tool/call").length, 0, "Codex native tools are not dispatched twice");
+          } else {
+            assert.ok(events.filter(event => event.type === "tool/call").length > 0,
+              "the DSH-executed successor records the DSH tool calls it made");
+          }
         } finally { await handle.close(); }
       }
       report.base = base; report.target = await git("rev-parse", "HEAD");
