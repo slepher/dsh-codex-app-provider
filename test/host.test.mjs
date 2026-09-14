@@ -17,10 +17,12 @@ test("headless Host registers one route, releases ownership on unload, and reloa
   const first = await ctx.plugin(plugin, { stateDir });
   assert.equal(ctx.llm.listProviders().some(p => p.id === "codex"), true);
   assert.equal(await ctx.codexExecution.read("nonexistent-native-session"), undefined);
+  assert.equal(await ctx.codexHandoff.read("nonexistent-native-session"), undefined, "thread ownership reads are published for the trusted Host");
   assert.equal(existsSync(join(stateDir, "owner.lock")), true);
   await first.dispose();
   assert.equal(ctx.llm.listProviders().some(p => p.id === "codex"), false);
   assert.equal(ctx.get("codexExecution"), undefined);
+  assert.equal(ctx.get("codexHandoff"), undefined);
   assert.equal(existsSync(join(stateDir, "owner.lock")), false);
   const second = await ctx.plugin(plugin, { stateDir });
   assert.equal(ctx.llm.listProviders().filter(p => p.id === "codex").length, 1);

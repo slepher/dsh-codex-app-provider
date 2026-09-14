@@ -413,6 +413,7 @@ export class CodexSessionBackend implements CodexBackend {
 
   async resumeSession(owner: string | Caller, sessionId: string, confirmedStopped = false): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
+    this.assertThreadOwnership(record, "resume its thread");
     this.store.assertWritable(record);
     if (record.worker !== undefined && confirmedStopped && typeof owner !== "string" && owner.source !== "ui") {
       throw new Error("Only UI callers can confirm a stopped worker");
@@ -469,6 +470,7 @@ export class CodexSessionBackend implements CodexBackend {
    */
   async restartSession(owner: string | Caller, sessionId: string, options: TurnOptions = {}): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
+    this.assertThreadOwnership(record, "rebuild its thread");
     this.store.assertWritable(record);
     if (record.worker?.main) throw new Error("Main conversation binding is fixed");
     if (record.state !== "idle" && record.state !== "saved") throw new Error(`Cannot rebuild a Session while it is ${record.state}`);
@@ -513,6 +515,7 @@ export class CodexSessionBackend implements CodexBackend {
 
   async configureSession(owner: string | Caller, sessionId: string, options: TurnOptions): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
+    this.assertThreadOwnership(record, "configure its thread");
     this.store.assertWritable(record);
     const managed = this.managed(record, owner, "configure");
     if (typeof owner !== "string" && owner.source !== "ui" && !managed) throw new Error("Only UI callers can configure a worker");
@@ -642,8 +645,9 @@ export class CodexSessionBackend implements CodexBackend {
    * Hand one Codex thread from a stopped source record to a reserved successor.
    *
    * The source keeps its history, reports and usage but is de-authorized for
-   * start, resume, configure, compact and restart, so no path can take the
-   * thread back. The successor record carries the original thread identity, the
+   * start, resume, configure, compact, review, steer, interrupt and restart, so
+   * no path can take the thread back; its live App Server runtime is closed by
+   * the handover. The successor record carries the original thread identity, the
    * target model/effort and the full execution inputs its first request will
    * send, and is persisted before the successor's first model call. A repeated
    * request with the same identity reuses its recorded handover, and a handover
@@ -651,8 +655,9 @@ export class CodexSessionBackend implements CodexBackend {
    * @param ownerId - the provider's own owner identity.
    * @param request - source, reserved successor, target configuration and request identity.
    * @returns the successor's recorded thread binding.
-   * @throws when the source is still live, its thread is active or changed, the
-   *   request conflicts with a recorded handover, or the successor identity is taken.
+   * @throws when the source is still executing or its ownership is unknown, its
+   *   thread is active or changed, the request conflicts with a recorded
+   *   handover, or the successor identity is taken.
    */
   async handoffThread(ownerId: string, request: ThreadHandoffRequest): Promise<ThreadHandoffResult> {
     const fields = [request?.requestId, request?.fromSessionId, request?.toSessionId, request?.model];
@@ -669,7 +674,12 @@ export class CodexSessionBackend implements CodexBackend {
     }
     if (recorded === undefined) {
       const live = this.live.get(request.fromSessionId);
-      if (live !== undefined) throw new Error("Source Session is still live; stop it before handing over its thread");
+      // The source must be confirmed stopped, not merely released: an in-flight
+      // or unknown execution still owns the thread. An idle record may keep its
+      // live App Server runtime; this handover closes it below.
+      if (live?.uncertain === true) {
+        throw new Error("Source execution ownership is unknown; resolve it before handing over its thread");
+      }
       if (!["idle", "saved"].includes(from.state)) {
         throw new Error(`Source Session is ${from.state}; stop it before handing over its thread`);
       }
@@ -699,6 +709,10 @@ export class CodexSessionBackend implements CodexBackend {
         from.handedOff = { toSessionId: request.toSessionId, requestId: request.requestId, at: Date.now() };
         this.store.put(from);
       }
+      // No path can operate the thread after the marker, so the source's live
+      // runtime is detached before the successor exists. A crash here leaves a
+      // revoked source whose handover is completed by a repeated request.
+      await this.detach(request.fromSessionId);
       const target: StoredSession = { ownerId, sessionId: request.toSessionId, threadId: from.threadId, cwd: from.cwd, state: "idle",
         model: request.model, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
         approvals: [], options, events: [], nextEventSequence: 1, reports: [],
@@ -706,11 +720,23 @@ export class CodexSessionBackend implements CodexBackend {
       this.store.put(target);
       return { toSessionId: target.sessionId, threadId: from.threadId, state: target.state };
     }
+    // The successor already exists: an earlier attempt wrote the source marker
+    // and this repeated request only needs the source runtime gone.
+    await this.detach(request.fromSessionId);
     return { toSessionId: existing.sessionId, threadId: existing.threadId ?? from.threadId, state: existing.state };
+  }
+
+  /** Close one record's live App Server runtime without touching its thread. */
+  private async detach(sessionId: string): Promise<void> {
+    const live = this.live.get(sessionId);
+    if (live === undefined) return;
+    this.live.delete(sessionId);
+    await live.rpc.close().catch(() => {});
   }
 
   async startTurn(owner: string | Caller, sessionId: string, input: string | readonly TurnInput[], options: StartTurnOptions = {}): Promise<TurnSnapshot> {
     const record = this.required(owner, sessionId);
+    this.assertThreadOwnership(record, "start a turn on its thread");
     this.store.assertWritable(record);
     const ownerId = ownerIdentity(owner);
     const items = turnInput(input);
@@ -774,6 +800,7 @@ export class CodexSessionBackend implements CodexBackend {
 
   async compactSession(owner: string | Caller, sessionId: string): Promise<void> {
     const record = this.required(owner, sessionId);
+    this.assertThreadOwnership(record, "compact its thread");
     this.store.assertWritable(record);
     if (record.state !== "idle") throw new Error("Wait for the current turn before compacting");
     const managed = this.managed(record, owner, "compact");
@@ -798,6 +825,7 @@ export class CodexSessionBackend implements CodexBackend {
 
   async reviewSession(owner: string | Caller, sessionId: string): Promise<TurnSnapshot> {
     const record = this.required(owner, sessionId);
+    this.assertThreadOwnership(record, "start a review on its thread");
     this.store.assertWritable(record);
     if (record.state !== "idle") throw new Error(`Cannot review while Session is ${record.state}`);
     const managed = this.managed(record, owner, "review");
@@ -844,6 +872,7 @@ export class CodexSessionBackend implements CodexBackend {
     const turnId = typeof owner === "string" ? workerOrTurnId : turnOrInput as string;
     const input = typeof owner === "string" ? turnOrInput as string | readonly TurnInput[] : contextualInput!;
     const record = typeof owner === "string" ? this.byTurn(owner, turnId) : this.required(owner, workerOrTurnId);
+    this.assertThreadOwnership(record, "steer its thread");
     this.store.assertWritable(record);
     if (record.turnId !== turnId) throw new Error("Turn not found");
     const ownerId = ownerIdentity(owner);
@@ -863,6 +892,7 @@ export class CodexSessionBackend implements CodexBackend {
   async interruptTurn(owner: string | Caller, workerOrTurnId: string, contextualTurnId?: string): Promise<void> {
     const turnId = typeof owner === "string" ? workerOrTurnId : contextualTurnId!;
     const record = typeof owner === "string" ? this.byTurn(owner, turnId) : this.required(owner, workerOrTurnId);
+    this.assertThreadOwnership(record, "interrupt its thread");
     this.store.assertWritable(record);
     if (record.turnId !== turnId) throw new Error("Turn not found");
     const ownerId = ownerIdentity(owner);
@@ -1068,6 +1098,22 @@ export class CodexSessionBackend implements CodexBackend {
     const record = this.store.list(ownerId).find(item => item.turnId === turnId);
     if (record === undefined) throw new Error("Turn not found");
     return record;
+  }
+
+  /**
+   * Refuse every path that operates the native thread once a record handed it
+   * to a successor.
+   *
+   * The source keeps its history, reports and usage, but it is no longer the
+   * thread's owner: start, resume, configure, compact, review, steer, interrupt
+   * and restart all fail here, including cold recovery, so nothing can take the
+   * thread back from the successor.
+   * @param record - the record about to operate its thread.
+   * @param action - the refused operation, named in the error.
+   */
+  private assertThreadOwnership(record: StoredSession, action: string): void {
+    if (record.handedOff === undefined) return;
+    throw new Error(`This Session handed its Codex thread to ${record.handedOff.toSessionId}; it can no longer ${action}`);
   }
 
   private async runtime(record: StoredSession, owner: string | Caller = record.ownerId): Promise<Runtime> {

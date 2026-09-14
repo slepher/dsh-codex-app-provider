@@ -401,6 +401,10 @@ export interface CodexBackend {
   searchThreads(ownerId: string, search?: string, cursor?: string): Promise<ThreadPage>;
   importSession(ownerId: string, sessionId: SessionId, threadId: ThreadId): Promise<SessionSnapshot>;
   occupiedThreads(): Promise<readonly ThreadId[]>;
+  /** Read-only thread ownership for trusted-Host reconciliation. */
+  threadOwnership(ownerId: string, sessionId: SessionId): Promise<ThreadOwnership | undefined>;
+  /** Transfer one stopped record's thread to a reserved successor. */
+  handoffThread(ownerId: string, request: ThreadHandoffRequest): Promise<ThreadHandoffResult>;
   startTurn(owner: string | AccessCaller, sessionId: SessionId, input: string | readonly TurnInput[], options?: StartTurnOptions): Promise<TurnSnapshot>;
   steerTurn(ownerId: string, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
   steerTurn(caller: AccessCaller, workerId: SessionId, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;

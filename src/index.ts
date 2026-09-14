@@ -6,8 +6,12 @@ import { resolve } from "node:path";
 import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
-import { CODEX_PROVIDER, CodexProviderAdapter, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
+import { dshSessionId, nativeSessionId } from "./handoff.js";
+import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
+export type {
+  CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
+} from "./handoff.js";
 
 export interface Config {
   stateDir?: string;
@@ -58,6 +62,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.provide("codexExecution", {
       read: nativeSessionId => provider!.readExecution(nativeSessionId),
       facts: nativeSessionId => provider!.facts(nativeSessionId),
+    });
+    // The controlled thread handover stays a trusted-Host capability: ordinary
+    // children receive neither this service nor arbitrary thread authority.
+    ctx.provide("codexHandoff", {
+      handoff: request => backend.handoffThread(CODEX_OWNER_ID, {
+        ...request,
+        fromSessionId: nativeSessionId(request.fromSessionId),
+        toSessionId: nativeSessionId(request.toSessionId),
+      }).then(result => ({ ...result, toSessionId: dshSessionId(result.toSessionId) })),
+      read: async session => {
+        const ownership = await backend.threadOwnership(CODEX_OWNER_ID, nativeSessionId(session));
+        if (ownership === undefined) return undefined;
+        const { sessionId, threadId, handedOffTo, handoffFrom } = ownership;
+        return { sessionId: dshSessionId(sessionId), ...(threadId === undefined ? {} : { threadId }),
+          ...(handedOffTo === undefined ? {} : { handedOffTo: dshSessionId(handedOffTo) }),
+          ...(handoffFrom === undefined ? {} : { handoffFrom: dshSessionId(handoffFrom) }) };
+      },
     });
     unfilter = installCodexContextFilter(ctx);
   }, "dsh-codex-app-provider: execution lifecycle");

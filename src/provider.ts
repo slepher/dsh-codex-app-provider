@@ -42,10 +42,14 @@ import type {
 import { isCodexVisible, isInjectedContext } from "./context.js";
 
 export const CODEX_PROVIDER = "codex";
-const OWNER_ID = "dsh-codex-provider";
+/** Owner identity of every native Session this provider records. */
+export const CODEX_OWNER_ID = "dsh-codex-provider";
+const OWNER_ID = CODEX_OWNER_ID;
 const AUXILIARY_PREFIX = "codex-aux:";
 const CATALOG_TTL_MS = 30_000;
 const TERMINAL_STATES = new Set<TurnSnapshot["state"]>(["completed", "failed", "interrupted"]);
+/** Opening text of one projected DSH history segment (`importedInput`). */
+const HISTORY_IMPORT_MARKER = "[DSH history import";
 
 export type ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
 
@@ -349,6 +353,44 @@ export class CodexProviderAdapter extends LlmAdapter {
     return this.catalogFlight;
   }
 
+  /**
+   * Bind a prepared record's first request to the thread it was handed.
+   *
+   * A record that already owns a native thread must resume that exact thread.
+   * For a successor this also reconciles the recorded handover — the source
+   * still points at the same thread and the successor runs the target
+   * configuration — and a mismatch fails with its own reason. The provider
+   * never falls back to `thread/start`: a missing or unverifiable binding is an
+   * error, not a new thread.
+   * @param record - the prepared record, already carrying its thread identity.
+   * @param options - the request's model/effort, which must match the binding.
+   * @returns whether this record continues a handed-over thread.
+   */
+  private async bindPreparedThread(record: SessionSnapshot, options: GenerateOptions): Promise<boolean> {
+    const owner = OWNER_ID, backendId = record.sessionId, backend = this.deps.backend;
+    const ownership = await backend.threadOwnership(owner, backendId);
+    const source = ownership?.handoffFrom;
+    if (source === undefined) {
+      await backend.resumeSession(owner, backendId).catch(error => { throw providerError(error); });
+      return false;
+    }
+    if (record.model !== undefined && record.model !== options.model
+      || options.reasoningEffort !== undefined && record.reasoningEffort !== options.reasoningEffort) {
+      throw new LlmError("The continuation request does not match the handed-over thread configuration", "EXECUTION_MISMATCH");
+    }
+    // The source record keeps the thread reference after de-authorization, so
+    // it still proves which thread this successor was handed.
+    const origin = await backend.threadOwnership(owner, source);
+    if (origin?.threadId === undefined || origin.threadId !== record.threadId) {
+      throw new LlmError("The handed-over Codex thread changed before its successor started", "EXECUTION_MISMATCH");
+    }
+    // `thread/resume` is the only admitted first call: it verifies the thread
+    // identity, the target model/effort and the execution boundary against the
+    // prepared record, and it never creates a replacement thread.
+    await backend.resumeSession(owner, backendId).catch(error => { throw providerError(error); });
+    return true;
+  }
+
   private async *streamMain(options: GenerateOptions, sessionId: string, signal: AbortSignal): AsyncIterable<StreamChunk> {
     if (signal.aborted) throw new LlmError("Codex turn aborted before start", "ABORTED");
     const cwd = this.sessionCwd(sessionId);
@@ -384,7 +426,13 @@ export class CodexProviderAdapter extends LlmAdapter {
         ...(record.options?.boundary === undefined ? {} : { boundary: record.options?.boundary }),
       }, execution ?? {},
     )) throw new LlmError("Native execution instructions or boundary changed; create a new child", "EXECUTION_MISMATCH");
+    // A record that already owns a thread and never ran a turn is a prepared
+    // binding: the successor a controlled handover created, a rebuilt thread, or
+    // an imported one. Its first request must resume that exact thread.
+    const prepared = record !== undefined && record.turnId === undefined && record.threadId !== undefined && record.state === "idle";
+    const successor = prepared ? await this.bindPreparedThread(record!, options) : false;
     const plan = await planInput(options.messages, record?.threadId, this.cursors.get(sessionId), this.imageResolver);
+    if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
       record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...execution });
     } else if (record.state === "unknown") {
@@ -763,9 +811,25 @@ async function importedInput(
   return parts;
 }
 
+/**
+ * Refuse a successor's first input that replays the source thread.
+ *
+ * The resumed thread already carries the original context, so the continuation
+ * prompt is the only new user input. A DSH history import here would duplicate
+ * work the thread performed and re-present executed tool calls as instructions.
+ * @param input - the planned first input of a handed-over successor.
+ */
+function assertFreshSuccessorInput(input: string | readonly TurnInput[]): void {
+  const text = typeof input === "string"
+    ? input
+    : input.filter(part => part.type === "text").map(part => (part as { text: string }).text).join("\n");
+  if (text.includes(HISTORY_IMPORT_MARKER)) {
+    throw new LlmError("A successor must continue the handed-over Codex thread instead of replaying its history", "EXECUTION_MISMATCH");
+  }
+}
+
 /** Collapse rendered parts into the legacy string form unless the turn carries images. */
-function represent(parts: readonly TurnInput[]): string | TurnInput[] {
-  if (!parts.some(part => part.type !== "text")) return textOf(parts);
+function represent(parts: readonly TurnInput[]): string | TurnInput[] {  if (!parts.some(part => part.type !== "text")) return textOf(parts);
   const values: TurnInput[] = [];
   for (const part of parts) if (part.type !== "text" || part.text !== "") values.push(part);
   return values;
@@ -903,7 +967,7 @@ function approvalReason(request: ApprovalRequest): string | undefined {
   return undefined;
 }
 
-function backendSessionId(sessionId: string): string {
+export function backendSessionId(sessionId: string): string {
   return `codex:${sessionId}`;
 }
 
