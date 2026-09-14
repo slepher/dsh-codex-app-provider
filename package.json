@@ -83,9 +83,15 @@
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-chat"
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-subagent",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-api-session-controller"
       ],
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@deepseek-ai/dsh-api-session-controller/client"
+      ]
     }
   },
   "overrides": {

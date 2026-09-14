@@ -4,18 +4,40 @@ import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 
-test("shipped client loads through DSH module loader and registers native settings and external execution node", () => {
-  // `react-dom` is a shell platform module: the loader supplies it, the bundle never carries a copy.
-  const PLATFORM = ["react", "react/jsx-runtime", "react-dom"];
+const PLATFORM = ["react", "react/jsx-runtime", "react-dom"];
+/** The one declared non-baseline request; the shell answers it from its module table. */
+const EXTERNAL = "@deepseek-ai/dsh-api-session-controller/client";
+/** Stand-in for the externally supplied stream class. */
+class FakeSessionEventStream {
+  constructor(remote, address, options) { this.remote = remote; this.address = address; this.options = options; }
+  async open() {}
+  async prepend() {}
+  restart() {}
+  async dispose() {}
+}
+
+/** Load the shipped bundle with a recording module table. */
+function loadBundle() {
   const require = createRequire(import.meta.url);
   let module;
   runInNewContext(readFileSync(new URL("../lib/client.js", import.meta.url), "utf8"), {
-    window: { __ModuleLoader__: { load(value) { assert.equal(value.id, "dsh-codex-app-provider"); module = value.factory(name => { assert.ok(PLATFORM.includes(name)); return require(name); }); } } },
+    window: { __ModuleLoader__: { load(value) {
+      assert.equal(value.id, "dsh-codex-app-provider");
+      module = value.factory(name => {
+        if (name === EXTERNAL) return { SessionEventStream: FakeSessionEventStream };
+        assert.ok(PLATFORM.includes(name), `unexpected module request ${name}`);
+        return require(name);
+      });
+    } } },
   });
-  const effects = [], rows = [], definitions = [], opened = [], navigated = [];
+  return module;
+}
+
+/** A minimal client context that records registrations. */
+function harness() {
+  const effects = [], rows = [], definitions = [], opened = [], navigated = [], handlers = new Map();
   const components = new Map();
-  const handlers = new Map();
-  let position = "sidebar", retained = 0, released = 0;
+  let position = "sidebar";
   const scope = { getSnapshot: () => ({ status: "ready", mode: "host", value: { subagentOpenPosition: position } }) };
   const runEffect = fn => {
     const result = fn();
@@ -23,7 +45,7 @@ test("shipped client loads through DSH module loader and registers native settin
     else if (result?.next) for (const dispose of result) effects.push(dispose);
   };
   const ctx = {
-    inject(names, fn) { assert.ok(["uiConversation", "sessions"].includes(names[0])); fn(ctx); },
+    inject(names, fn) { fn(ctx); },
     uiConversation: { events: { register(value) { definitions.push(value); } } },
     effect(fn) { runEffect(fn); },
     on(name, handler) { handlers.set(name, handler); return () => handlers.delete(name); },
@@ -31,68 +53,84 @@ test("shipped client loads through DSH module loader and registers native settin
     settingsScope: { bind(spec) { assert.equal(spec.namespace, "dsh-codex-app-provider"); return scope; } },
     sessions: {
       list: { getSnapshot: () => ({ current: "parent" }) },
-      retainSubagent() { retained++; return () => { released++; }; },
+      subagentAddress(id) { return id.startsWith("child") ? { parentSessionId: "parent", childSessionId: id, mode: "continuable" } : undefined; },
       openSubagent(address) { navigated.push(address); },
     },
+    remote: { $stream() {}, session: {}, subagents: { prompt: async () => ({ ok: true, value: {} }), interruptByParent: async () => ({ ok: true, value: {} }) } },
     sidebarRight: { openResource(address, options) { opened.push({ address, options }); } },
     sidebarRightTabs: { register(definition) { assert.equal(definition.kind, "codex-child"); return () => {}; } },
-    slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id, component); return () => {}; } },
+    slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
   };
+  return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components, setPosition: value => { position = value; } } };
+}
+
+test("shipped client registers the child pane, the lineage entry and the execution node", () => {
+  const module = loadBundle();
+  const { ctx, state } = harness();
   module.apply(ctx);
-  assert.equal(definitions.length, 2);
-  const rendered = components.get("codex-execution")({ node: { data: { kind: "commandExecution", status: "completed", text: "ok" } }, useTurnData: () => undefined, t: key => key });
-  assert.equal(rendered.type, "details", "shipped JSX uses the shared runtime without a global React");
-  assert.equal(rows.length, 3);
-  assert.equal(rows.find(row => row.name === "settings.general.item").inject().hooks.settings, scope);
-  const address = { parentSessionId: "parent", childSessionId: "child", mode: "continuable" };
-  const open = handlers.get("subagent/open");
-  assert.equal(open({ address, originSessionId: "parent" }), true);
-  assert.equal(opened.length, 1);
-  assert.equal(opened[0].options.params, address);
-  position = "main";
-  assert.equal(open({ address, originSessionId: "parent" }), undefined);
-  position = "sidebar";
-  assert.equal(open({ address, originSessionId: "old-parent" }), undefined);
-  assert.equal(opened.length, 1);
-  const panel = rows.find(row => row.key === "codex-child");
-  assert.equal(panel.children["codex.child.conversation"].mount, "main.conversation");
+  assert.equal(state.definitions.length, 2, "both Codex conversation node definitions are registered");
+
+  // The execution node still renders through the shared JSX runtime.
+  const rendered = state.components.get("codex-execution")({ node: { data: { kind: "commandExecution", status: "completed", text: "ok" } }, useTurnData: () => undefined, t: key => key });
+  assert.equal(rendered.type, "details");
+
+  // The lineage seat is taken at a lower priority than the official occupant, so
+  // the plugin owns the child entry without adding a second additive seat.
+  const lineage = state.rows.find(row => row.name === "conversation.session.header.lineage");
+  assert.equal(lineage.priority, -1);
+  const lineageFace = lineage.inject();
+  const address = lineageFace.addressOf("child-1");
+  assert.deepEqual(address, { parentSessionId: "parent", childSessionId: "child-1", mode: "continuable" });
+  assert.equal(lineageFace.addressOf("unrelated"), undefined, "a non-child crumb keeps the core rendering");
+
+  const lineageNode = state.components.get("conversation.session.header.lineage");
+  // A non-child crumb renders the plain title and never navigates.
+  const plain = lineageNode({ lineageSessionId: "unrelated", displayTitle: "Parent", openTitle: () => state.navigated.push("openTitle"), addressOf: lineageFace.addressOf, position: lineageFace.position, openSidebar: lineageFace.openSidebar, t: key => key });
+  assert.equal(plain.type, Symbol.for("react.fragment"), "a non-child crumb is a plain fragment with no navigation of its own");
+  // A child crumb opens the plugin pane while the sidebar position is configured.
+  const crumb = lineageNode({ lineageSessionId: "child-1", displayTitle: "Child", openTitle: () => state.navigated.push("openTitle"), addressOf: lineageFace.addressOf, position: lineageFace.position, openSidebar: lineageFace.openSidebar, t: key => key });
+  assert.equal(crumb.type, "button");
+  crumb.props.onClick();
+  assert.equal(state.opened.length, 1);
+  assert.equal(state.opened[0].address, "dsh-resource://codex-child/parent/child-1/continuable");
+  assert.deepEqual(state.opened[0].options.params, address);
+  assert.deepEqual(state.navigated, [], "the sidebar route does not touch the main area");
+
+  // With the main-area position configured the same click uses the core entry.
+  state.setPosition("main");
+  crumb.props.onClick();
+  assert.deepEqual(state.navigated, ["openTitle"]);
+  assert.equal(state.opened.length, 1, "no sidebar resource is opened for the main-area position");
+  state.setPosition("sidebar");
+
+  // The pane registers a tab type and a body; no mount field is invented.
+  const panel = state.rows.find(row => row.key === "codex-child");
+  assert.equal(panel.children, undefined, "the pane owns its own view instead of declaring a mount");
   const face = panel.inject();
-  const lifetime = new AbortController();
-  face.retainView(address, lifetime.signal); face.retainView(address, lifetime.signal);
-  assert.equal(retained, 1); assert.equal(released, 0);
-  face.openMain(address); assert.equal(navigated[0], address);
-  lifetime.abort(); assert.equal(released, 1);
-  const other = new AbortController(); face.retainView(address, other.signal);
-  effects.reverse().forEach(dispose => dispose());
-  assert.equal(released, 2); assert.equal(handlers.size, 0);
+  let published;
+  const handle = face.attach(address, snapshot => { published = snapshot; });
+  assert.equal(typeof handle.getSnapshot, "function");
+  assert.equal(handle.getDraft(), "", "a fresh tab starts with an empty draft");
+  handle.setDraft("half typed");
+  handle.release();
+  assert.equal(published.rows.length, 0);
+  face.openMain(address);
+  assert.deepEqual(state.navigated.at(-1), address);
+
+  state.effects.reverse().forEach(dispose => dispose());
 });
 
-test("shipped client styles the subagent-position row like the native settings rows", () => {
+test("shipped client styles the child pane from the shared tokens", () => {
   const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
-  // Geometry and tokens copied from the native settings rows; the row owns its padding and separator.
-  for (const frame of [/display:\s*flex/, /align-items:\s*center/, /gap:\s*8px/, /padding:\s*16px 0/,
-    /border-bottom:\s*0\.5px solid var\(--dsw-alias-border-l2\)/]) {
-    assert.match(source, frame, `row frame ${String(frame)} is missing`);
+  for (const frame of [/\.codex-child\s*\{/, /\.codex-child-log/, /\.codex-child-row/, /\.codex-child-composer/, /\.codex-child-lineage/]) {
+    assert.match(source, frame, `child pane style ${String(frame)} is missing`);
   }
-  for (const pill of [/height:\s*36px/, /border-radius:\s*18px/, /padding:\s*0 14px/]) {
-    assert.match(source, pill, `selector pill ${String(pill)} is missing`);
+  for (const token of [/var\(--dsw-alias-bg-module-platform\)/, /var\(--dsw-alias-label-primary\)/, /var\(--dsw-alias-border-l2\)/]) {
+    assert.match(source, token, `shared token ${String(token)} is missing`);
   }
   assert.match(source, /data-plugin-css/);
-  assert.ok(source.includes('className: "codex-setting-row"'));
-  assert.ok(source.includes('className: "codex-setting-selector"'));
-  assert.ok(source.includes('className: "codex-setting-text"'));
-  assert.ok(source.includes('className: "codex-setting-chevron"'));
-  // The menu mirrors the native Menu card and cells instead of a native select popup.
-  for (const menu of [/border-radius:\s*20px/, /padding:\s*4px/, /background:\s*var\(--dsw-specific-menu\)/,
-    /box-shadow:\s*var\(--dsw-elevation-prominent\)/, /min-height:\s*40px/, /border-radius:\s*10px/]) {
-    assert.match(source, menu, `menu style ${String(menu)} is missing`);
-  }
-  assert.ok(source.includes('className: "codex-setting-menu"'));
-  assert.ok(source.includes('className: "codex-setting-option"'));
-  assert.ok(source.includes('className: "codex-setting-check"'));
-  assert.ok(source.includes('role: "menu"') && source.includes('role: "menuitemradio"'));
-  assert.ok(source.includes('"aria-expanded"') && source.includes('"aria-checked"'));
-  assert.ok(source.includes('"aria-haspopup": "menu"'));
-  assert.ok(source.includes('aria-label') && source.includes('"aria-busy"'), "the trigger keeps the accessible name and busy state");
-  assert.ok(!source.includes("codex-setting-control"), "the native select popup is gone");
+  assert.ok(source.includes('className: "codex-child"'));
+  assert.ok(source.includes('className: "codex-child-log"'));
+  assert.ok(source.includes('"aria-label"') || source.includes("aria-label"), "the composer keeps an accessible name");
+  assert.ok(source.includes('role: "log"'), "the transcript is a live log region");
 });

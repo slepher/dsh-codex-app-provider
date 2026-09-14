@@ -10,6 +10,10 @@ export const zh = {
   loading: "正在加载设置…",
   unavailable: "当前无法保存设置",
   saving: "正在保存…",
+  childStop: "停止", childApprovalWaiting: "有原生审批等待处理", childLoadEarlier: "加载更早记录",
+  childEmpty: "暂无记录", childPrompt: "向子会话发送", childSend: "发送", childSteer: "插入当前步骤",
+  childQueue: "排队下一轮", childReload: "重载", childExecuted: "已执行", childOpen: "打开子会话",
+  roleUser: "用户", roleAssistant: "助手", roleTool: "工具", roleApproval: "审批",
 };
 export const en: Record<keyof typeof zh, string> = {
   childLoading: "Opening child…", childUnavailable: "Child conversation unavailable", openMain: "Open in main area",
@@ -23,4 +27,8 @@ export const en: Record<keyof typeof zh, string> = {
   loading: "Loading settings…",
   unavailable: "Settings cannot be saved here",
   saving: "Saving…",
+  childStop: "Stop", childApprovalWaiting: "A native approval is waiting", childLoadEarlier: "Load earlier",
+  childEmpty: "Nothing here yet", childPrompt: "Prompt the child", childSend: "Send", childSteer: "Steer this step",
+  childQueue: "Queue next turn", childReload: "Reload", childExecuted: "Executed", childOpen: "Open child session",
+  roleUser: "User", roleAssistant: "Assistant", roleTool: "Tool", roleApproval: "Approval",
 };
