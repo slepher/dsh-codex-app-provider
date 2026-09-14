@@ -8,8 +8,9 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const browser = process.argv.includes("--browser");
 const externalEvents = process.argv.includes("--external-events");
 const workflowContract = process.argv.includes("--workflow-contract");
-const workflowChild = workflowContract || process.argv.includes("--workflow-child");
-const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
+const workflowHandoff = process.argv.includes("--workflow-handoff");
+const workflowChild = workflowContract || workflowHandoff || process.argv.includes("--workflow-child");
+const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : workflowHandoff ? "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
 const nativeChild = externalEvents || workflowChild || process.argv.includes("--native-child");
 const installedOnly = browser || process.argv.includes("--install-only");
 const evidence = join(root, "evidence");
@@ -48,7 +49,20 @@ const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
 await writeFile(join(profile, "cordis.patch.yml"), `- id: agent-default-model\n  config:\n    provider: codex\n    model: ${JSON.stringify(model)}\n- id: dsh-codex-app-provider\n  config:\n    stateDir: ${JSON.stringify(join(dir, "state"))}\n    providerCwd: ${JSON.stringify(workspace)}\n`);
 if (workflowChild) {
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
-  await writeFile(join(profile, "cordis.patch.yml"), patch + `- id: dsh-workflow-kit\n  config:\n    stateDir: ${JSON.stringify(join(dir, "workflow-host-state"))}\n    subdir: workflow-live-test\n${workflowContract ? "    defaultProfile: live\n" : ""}`);
+  await writeFile(join(profile, "cordis.patch.yml"), patch + `- id: dsh-workflow-kit\n  config:\n    stateDir: ${JSON.stringify(join(dir, "workflow-host-state"))}\n    subdir: workflow-live-test\n${workflowContract ? "    defaultProfile: live\n" : workflowHandoff ? "    defaultProfile: gpt-workflow\n" : ""}`);
+}
+if (workflowHandoff) {
+  // The current workflow Host reads the configurations shipped inside its own
+  // package and the stored strategy defaults, so the real bootstrap strategy is
+  // selected through the settings namespace. The managed `coding_worker` role
+  // protocol is read from the installed skill, so the isolated profile points at
+  // the adjacent skill checkout.
+  const skillDir = process.env.DSH_WORKFLOW_SKILL_DIR ?? resolve(root, "../../codex-workflow/skills/codex-workflow");
+  await writeFile(join(home, "settings.yaml"), `dsh-workflow-kit:\n  defaultConfig: gpt-workflow\n  codingStrategy: bootstrap\n  integrateStrategy: economy\n  configs: {}\n`);
+  const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
+  await writeFile(join(profile, "cordis.patch.yml"), patch.replace(
+    "    defaultProfile: gpt-workflow\n",
+    `    defaultProfile: gpt-workflow\n    workflowSkillDir: ${JSON.stringify(skillDir)}\n    implementationStandardDir: ${JSON.stringify(resolve(skillDir, "..", "audit-implementation-simplicity"))}\n`));
 }
 if (workflowContract) {
   const directory = join(home, "workflow-live-test");
@@ -61,11 +75,11 @@ if (workflowContract) {
   await writeFile(join(directory, "profiles/live.json"), JSON.stringify({ roles }));
 }
 if (nativeChild) {
-  await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
+  await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, workflowHandoff ? "test/workflow-handoff-driver.mjs" : workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch + `- insert:\n    - id: native-child-test\n      name: ${JSON.stringify(join(profile, "native-child-driver.mjs"))}\n`);
 }
-const env = { ...process.env, DSH_EXTERNAL_EVENTS_TEST: externalEvents ? "1" : "0", DSH_HOME: home, DSH_NATIVE_CHILD_RESULT: join(dir, "native-child-result.json") };
+const env = { ...process.env, DSH_EXTERNAL_EVENTS_TEST: externalEvents ? "1" : "0", DSH_HOME: home, DSH_NATIVE_CHILD_RESULT: join(dir, "native-child-result.json"), ...(workflowHandoff ? { DSH_HANDOFF_DRIVER_EVIDENCE: join(evidence, `${prefix}-driver.json`) } : {}) };
 const report = { status: "UNRUN", directory: dir, profile, workspace, model, dshVersion: coordinated.version, dshSourceCommit: coordinated.sourceCommit, pluginVersion: version };
 await writeFile(join(evidence, `${prefix}-result.json`), JSON.stringify(report, null, 2));
 try {
@@ -95,10 +109,10 @@ try {
     report.terminal = main.reports.at(-1).status;
     report.status = "PASS_BASIC_MAIN_SESSION";
     if (nativeChild) {
-      if (nativeResult.status !== (workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_PROFILES_COLD_AGENT_RESUME" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_SPAWN_COLD_AGENT_RESUME")) throw new Error("Native child assertions failed");
+      if (nativeResult.status !== (workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_PROFILES_COLD_AGENT_RESUME" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_SPAWN_COLD_AGENT_RESUME")) throw new Error("Native child assertions failed");
       report.nativeChild = nativeResult;
-      report.status = workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_NATIVE_CHILD_PROFILES" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_CHILD_PARAMETER_CHAIN";
-      report.childBackendRecords = records.filter(record => (workflowContract ? nativeResult.executions.map(value => value.nativeSessionId) : report.nativeChild.children.map(child => child.id)).some(id => record.sessionId === `codex:${id}`)).map(record => ({ sessionId: record.sessionId, threadId: record.threadId, turnId: record.turnId, model: record.model, reasoningEffort: record.reasoningEffort, options: record.options, reports: record.reports }));
+      report.status = workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_NATIVE_CHILD_PROFILES" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_CHILD_PARAMETER_CHAIN";
+      report.childBackendRecords = records.filter(record => ((workflowContract || workflowHandoff) ? nativeResult.executions.map(value => value.nativeSessionId) : report.nativeChild.children.map(child => child.id)).some(id => record.sessionId === `codex:${id}`)).map(record => ({ sessionId: record.sessionId, threadId: record.threadId, turnId: record.turnId, model: record.model, reasoningEffort: record.reasoningEffort, options: record.options, reports: record.reports }));
     }
   }
 } catch (error) {
