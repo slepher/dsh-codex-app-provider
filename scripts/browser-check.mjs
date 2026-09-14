@@ -16,6 +16,17 @@
  *
  * Usage:
  *   node scripts/browser-check.mjs --url "http://127.0.0.1:3999/?token=..."
+ *   node scripts/browser-check.mjs --url ... --expect dsh-workflow-kit
+ *
+ * `--expect <package id>` (repeatable) asserts another installed client plugin
+ * is part of the composed client, so a combined UI+backend+Workflow deployment
+ * can be checked in one run. The plugin's own id is always expected.
+ *
+ * Two signals are reported for every expected id: whether the shell's boot graph
+ * (window.__DSH_BOOT__.entries) contains its client bundle, and whether its
+ * stylesheet reached the document. The boot graph is the composition fact and
+ * works on any screen; the stylesheet proves `apply` ran, which only an eager
+ * installer can show before its own UI renders.
  *
  * Environment:
  *   DSH_CHROME      browser binary; defaults to the cached Playwright headless
@@ -37,11 +48,15 @@ function parseArguments(argv) {
     const index = argv.indexOf(`--${name}`);
     return index === -1 ? undefined : argv[index + 1];
   };
-  return { url: value("url"), evidence: value("evidence") };
+  const expected = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--expect" && typeof argv[index + 1] === "string") expected.push(argv[index + 1]);
+  }
+  return { url: value("url"), evidence: value("evidence"), expected: [PLUGIN, ...expected.filter(id => id !== PLUGIN)] };
 }
 
-const { url, evidence } = parseArguments(process.argv.slice(2));
-if (url === undefined) {
+const { url, evidence, expected } = parseArguments(process.argv.slice(2));
+if (url === undefined || url === "") {
   console.error("usage: node scripts/browser-check.mjs --url <serving URL> [--evidence <path>]");
   process.exit(2);
 }
@@ -51,7 +66,7 @@ if (binary === undefined) {
   process.exit(2);
 }
 const waitMs = Number(process.env.DSH_CHROME_WAIT ?? 12_000);
-const report = { url, chrome: binary, waitMs, status: "UNRUN" };
+const report = { url, chrome: binary, waitMs, expected, status: "UNRUN" };
 const browser = await launch(binary);
 const cdp = await connect(browser.webSocketUrl);
 try {
@@ -65,16 +80,21 @@ try {
     expression: `JSON.stringify({
       htmlLength: document.documentElement.outerHTML.length,
       bodyChildren: document.body.children.length,
-      pluginApplied: [...document.querySelectorAll('style[data-plugin-css]')].some(node => node.getAttribute('data-plugin-css') === ${JSON.stringify(PLUGIN)}),
+      applied: [...document.querySelectorAll('style[data-plugin-css]')].map(node => node.getAttribute('data-plugin-css')).filter(id => ${JSON.stringify(expected)}.includes(id)),
+      loaded: ((window.__DSH_BOOT__ ?? {}).entries ?? []).map(entry => entry.id).filter(id => ${JSON.stringify(expected)}.includes(id)),
       boot: typeof window.__DSH_BOOT__,
       moduleLoader: typeof window.__ModuleLoader__
     })`,
   });
   const observed = JSON.parse(probe.result.value);
   report.observed = observed;
+  // Every expected plugin must be in the composed client; the plugin's own
+  // stylesheet must also be present, because it installs styles at apply time.
+  report.missing = expected.filter(id => !observed.loaded.includes(id));
+  report.withoutStyles = observed.loaded.filter(id => !observed.applied.includes(id));
   report.errors = cdp.entries.filter(entry => entry.level === "error" || entry.level === "exception").map(entry => entry.text.slice(0, 300));
-  report.status = observed.pluginApplied && observed.boot === "object" && report.errors.length === 0
-    ? "PASS_CLIENT_APPLIED" : "FAIL";
+  report.status = report.missing.length === 0 && observed.applied.includes(PLUGIN)
+    && observed.boot === "object" && report.errors.length === 0 ? "PASS_CLIENT_APPLIED" : "FAIL";
 } catch (error) {
   report.status = "FAIL";
   report.error = String(error);

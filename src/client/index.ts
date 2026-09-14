@@ -40,6 +40,12 @@ const asSessionId = (value: string): SessionId => value as unknown as SessionId;
 interface ChildSessionFace {
   subagentAddress(sessionId: string): SubagentAddress | undefined;
   openSubagent(address: SubagentAddress): void;
+  binding(id: SessionId): {
+    session: {
+      getSnapshot(): { running?: boolean; subagent?: { parentAvailable?: boolean } | null };
+      subscribe(listener: () => void): () => void;
+    };
+  } | undefined;
 }
 
 /** The tab kind this plugin registers for one child conversation. */
@@ -107,6 +113,19 @@ export function apply(ctx: Context): void {
           openMain: address => (sidebar.sessions as unknown as ChildSessionFace).openSubagent(address),
           attach: (address, listener) => views.attach(address, listener),
           approvals,
+          // The child's own native Session state carries the official
+          // availability facts this pane mirrors in its composer policy.
+          nativeState: (address, listener) => {
+            const face = (sidebar.sessions as unknown as ChildSessionFace).binding(asSessionId(address.childSessionId))?.session;
+            if (face === undefined) { listener({}); return () => {}; }
+            const report = (): void => {
+              const state = face.getSnapshot();
+              listener({ ...(state.subagent?.parentAvailable === undefined ? {} : { parentAvailable: state.subagent.parentAvailable }),
+                ...(state.running === undefined ? {} : { running: state.running }) });
+            };
+            report();
+            return face.subscribe(report);
+          },
         }),
       }, ChildConversation);
     }));

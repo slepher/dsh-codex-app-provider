@@ -26,6 +26,8 @@ let pendingApprovals: unknown[] = [];
 let pendingQuestions: unknown[] = [];
 let failNextPrompt = false;
 
+const nativeStates: Record<string, { parentAvailable?: boolean; running?: boolean }> = {};
+const nativeListeners = new Map<string, Set<() => void>>();
 const views = createChildViews({
   create: (address, options) => {
     streams.set(key(address), options);
@@ -70,6 +72,14 @@ function Pane({ which }: { which: "a" | "b" | "oneShot" }) {
     openMain,
     attach,
     approvals: approvals as never,
+    nativeState: (_address: unknown, listener: (state: { parentAvailable?: boolean; running?: boolean }) => void) => {
+      const set = nativeListeners.get(which) ?? new Set();
+      nativeListeners.set(which, set);
+      const report = () => listener(nativeStates[which] ?? {});
+      set.add(report);
+      report();
+      return () => { set.delete(report); };
+    },
     t: translate,
   });
 }
@@ -89,5 +99,9 @@ render(true);
   hideB: () => render(false),
   showB: () => render(true),
   showOneShot: () => render(true, true),
+  setNative: (which: "a" | "b" | "oneShot", value: { parentAvailable?: boolean; running?: boolean }) => {
+    nativeStates[which] = value;
+    for (const listener of nativeListeners.get(which) ?? []) listener();
+  },
   failNextPrompt: () => { failNextPrompt = true; },
 };

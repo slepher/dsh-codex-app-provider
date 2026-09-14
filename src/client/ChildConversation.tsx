@@ -24,6 +24,12 @@ export interface ChildConversationInjected {
   };
   /** The plugin's own approval channel for this child's Codex execution. */
   approvals: CodexApprovalRpc;
+  /**
+   * Read the child's own native Session state, as the official subagent surfaces
+   * do. The pane applies the same interaction policy: a one-shot child, or one
+   * whose direct parent is unavailable while it is not running, is read-only.
+   */
+  nativeState(address: SubagentAddress, listener: (state: { parentAvailable?: boolean; running?: boolean }) => void): () => void;
 }
 
 type Props = PropsRuntime<"sidebar.right.pane.tab"> & PropsLocale<"dsh-codex-app-provider"> &
@@ -40,7 +46,7 @@ const EMPTY: ChildJournalSnapshot = { rows: [], running: false, pendingApprovals
  * child with the delivery the user chose; stopping asks the parent to interrupt
  * that child rather than closing the DSH Session.
  */
-export function ChildConversation({ useTabInfo, openMain, attach, approvals: approvalRpc, t }: Props) {
+export function ChildConversation({ useTabInfo, openMain, attach, approvals: approvalRpc, nativeState, t }: Props) {
   const { tab } = useTabInfo();
   const address = tab.navigation.params as SubagentAddress | undefined;
   const valid = address !== undefined && typeof address.parentSessionId === "string" && typeof address.childSessionId === "string"
@@ -53,6 +59,7 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
   const [pending, setPending] = useState<readonly CodexApprovalView[]>([]);
   const [questions, setQuestions] = useState<readonly CodexQuestionView[]>([]);
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [native, setNative] = useState<{ parentAvailable?: boolean; running?: boolean }>({});
   const handle = useRef<ReturnType<ChildConversationInjected["attach"]> | undefined>(undefined);
 
   useEffect(() => {
@@ -70,6 +77,10 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
   }, [key, attach, tab.signal, valid]);
 
   const childSessionId = valid ? address.childSessionId : "";
+  useEffect(() => {
+    if (!valid || tab.signal.aborted) return undefined;
+    return nativeState(address, setNative);
+  }, [key, nativeState, address, tab.signal, valid]);
   const refreshApprovals = useCallback(async (): Promise<void> => {
     if (childSessionId === "" || tab.signal.aborted) return;
     try {
@@ -104,6 +115,10 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
 
   if (!valid) return <div role="alert">{t("childUnavailable")}</div>;
   const { rows, running, pendingApprovals, hasMore, loading } = snapshot;
+  // The official subagent policy: a one-shot child cannot be continued, and a
+  // child whose direct parent is gone is read-only unless its turn is running.
+  const readOnly = address.mode === "one-shot" ? "oneShot"
+    : native.parentAvailable === false && native.running !== true ? "parentUnavailable" : undefined;
   return <div className="codex-child">
     <div className="codex-child-head">
       <span className="codex-child-title" title={address.childSessionId}>{address.childSessionId}</span>
@@ -159,19 +174,20 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
       </article>)}
       {!loading && rows.length === 0 && <div role="status">{t("childEmpty")}</div>}
     </div>
+    {readOnly !== undefined && <div className="codex-child-readonly" role="status">{t(readOnly === "oneShot" ? "childOneShot" : "childParentUnavailable")}</div>}
     <form className="codex-child-composer" onSubmit={event => {
       event.preventDefault();
       const text = draft;
       if (text.trim() === "") return;
       void act(async () => { await handle.current!.send(text, running ? "steer" : "queue"); setDraft(handle.current!.getDraft()); });
     }}>
-      <textarea className="codex-child-input" aria-label={t("childPrompt")} value={draft} rows={2}
+      <textarea className="codex-child-input" aria-label={t("childPrompt")} value={draft} rows={2} disabled={readOnly !== undefined}
         onChange={event => { setDraft(handle.current?.setDraft(event.target.value) ?? event.target.value); }} />
       <div className="codex-child-actions">
-        <button type="submit" className="codex-child-action" disabled={busy || draft.trim() === ""}>
+        <button type="submit" className="codex-child-action" disabled={readOnly !== undefined || busy || draft.trim() === ""}>
           {running ? t("childSteer") : t("childSend")}
         </button>
-        <button type="button" className="codex-child-action" disabled={!running || busy}
+        <button type="button" className="codex-child-action" disabled={readOnly !== undefined || !running || busy}
           onClick={() => { if (draft.trim() === "") return; void act(async () => { await handle.current!.send(draft, "queue"); setDraft(handle.current!.getDraft()); }); }}>
           {t("childQueue")}
         </button>

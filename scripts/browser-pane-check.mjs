@@ -166,14 +166,35 @@ try {
   calls = await evaluate(`__PANE__.calls.slice()`);
   record("closing a tab stops exercising no model request", calls.filter(call => call.kind === "prompt").length === 2, calls.filter(call => call.kind === "prompt"));
 
-  // A one-shot child cannot be continued, so its Stop control is unavailable.
+  // The official subagent policy: a one-shot child is read-only, and so is a
+  // child whose direct parent is unavailable while it is not running.
   await evaluate(`__PANE__.showOneShot()`);
   await new Promise(resolveWait => setTimeout(resolveWait, 400));
-  const oneShotStop = await evaluate(`(() => {
+  const composerState = (which) => `(() => {
+    const pane = document.querySelector("#pane-${which}");
+    const field = pane.querySelector(".codex-child-input");
+    const send = [...pane.querySelectorAll("button")].find(node => node.textContent === "childSend");
+    return JSON.stringify({ disabled: field.disabled, send: send === undefined ? "missing" : send.disabled,
+      notice: pane.querySelector(".codex-child-readonly")?.textContent ?? "" });
+  })()`;
+  record("a one-shot child is read-only", (await evaluate(composerState("oneshot"))).includes('"disabled":true')
+    && (await evaluate(composerState("oneshot"))).includes("childOneShot"), await evaluate(composerState("oneshot")));
+  record("an ordinary child is writable", (await evaluate(composerState("a"))).includes('"disabled":false'), await evaluate(composerState("a")));
+  record("a one-shot child offers no stop", (await evaluate(`(() => {
     const button = [...document.querySelectorAll("#pane-oneshot button")].find(node => node.textContent === "childStop");
     return button === undefined ? "missing" : String(button.disabled);
-  })()`);
-  record("a one-shot child offers no stop", oneShotStop === "true", oneShotStop);
+  })()`)) === "true");
+
+  await evaluate(`__PANE__.setNative("a", { parentAvailable: false, running: false })`);
+  await new Promise(resolveWait => setTimeout(resolveWait, 300));
+  record("a child whose parent is gone is read-only", (await evaluate(composerState("a"))).includes("childParentUnavailable"),
+    await evaluate(composerState("a")));
+  await evaluate(`__PANE__.setNative("a", { parentAvailable: false, running: true })`);
+  await new Promise(resolveWait => setTimeout(resolveWait, 300));
+  record("a running turn stays steerable while its parent is gone", (await evaluate(composerState("a"))).includes('"disabled":false'),
+    await evaluate(composerState("a")));
+  await evaluate(`__PANE__.setNative("a", { parentAvailable: true, running: false })`);
+  await new Promise(resolveWait => setTimeout(resolveWait, 300));
 
   // Opening or interacting with a pane never selects a Session: the plugin only
   // ever adds a right-pane resource, so the main area cannot move under it and

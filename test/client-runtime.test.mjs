@@ -61,13 +61,14 @@ function load() {
 test("the pane renders its transcript, composer and stop control", async () => {
   const { components } = load();
   const ChildConversation = components.get("codex-child");
+  const nativeState = () => () => {};
   const attach = () => ({ getSnapshot: () => ({ rows: [], running: false, pendingApprovals: 0, hasMore: false, loading: true }),
     getDraft: () => "", setDraft: value => value, loadMore: async () => {}, restart() {}, send: async () => {}, stop: async () => {}, release() {} });
   const approvals = createCodexApprovalRpc({ rpc: { call: async (_channel, method) => ({ ok: true, value: method === "questions" ? { questions: [] } : { approvals: [] } }) } });
   const address = { parentSessionId: "parent", childSessionId: "child-1", mode: "continuable" };
   const html = renderToStaticMarkup(React.createElement(ChildConversation, {
     useTabInfo: () => ({ tab: { navigation: { params: address }, signal: new AbortController().signal } }),
-    openMain() {}, attach, approvals, t: key => key,
+    openMain() {}, attach, approvals, nativeState, t: key => key,
   }));
   assert.match(html, /codex-child-log/, "the transcript is a log region");
   assert.match(html, /role="log"/);
@@ -80,7 +81,7 @@ test("the pane renders its transcript, composer and stop control", async () => {
   // A tab without a child address renders the unavailable state instead of the pane.
   const unavailable = renderToStaticMarkup(React.createElement(ChildConversation, {
     useTabInfo: () => ({ tab: { navigation: { params: undefined }, signal: new AbortController().signal } }),
-    openMain() {}, attach, approvals, t: key => key,
+    openMain() {}, attach, approvals, nativeState, t: key => key,
   }));
   assert.match(unavailable, /childUnavailable/);
   assert.doesNotMatch(unavailable, /codex-child-log/);
