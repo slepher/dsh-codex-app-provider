@@ -8,6 +8,11 @@ import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
+import { defineTool } from "@deepseek-ai/dsh-tools";
+import type { Agent } from "@deepseek-ai/dsh-agent";
+import { agentCaller, assertAgentIdentity, captureAgentIdentity } from "./identity.js";
+import { executeWorkerAction, type WorkerAction } from "./worker-actions.js";
+import { installWorkerDelivery, type WorkerDelivery } from "./worker-delivery.js";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
   CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
@@ -42,10 +47,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     let provider: CodexProviderAdapter | undefined;
     let unregister: (() => void) | undefined;
     let unfilter: (() => void) | undefined;
+    let untool: (() => void) | undefined;
+    let delivery: WorkerDelivery | undefined;
     yield async () => {
       provider?.close();
       unregister?.();
       unfilter?.();
+      untool?.();
+      delivery?.close();
       await backend.close();
     };
     provider = new CodexProviderAdapter({
@@ -95,8 +104,53 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     });
     unfilter = installCodexContextFilter(ctx);
+    // Ordinary delegation is a tool surface, so it is registered only where a
+    // tool registry exists; the provider itself stays usable without one.
+    ctx.inject(["tools", "systemPrompt"], tools => {
+      const callerIdentity = (agent: Agent | undefined) => captureAgentIdentity(ctx, agent);
+      untool = tools.tools.register(defineTool({
+        name: "codex_workers",
+        description: "Create, query, and control persistent Codex workers owned by this parent Session. Reports are durable; acknowledgement and acceptance are separate.",
+        parameters: {
+          action: { type: "string", required: true, enum: [...WORKER_ACTIONS] },
+          role: { type: "string" },
+          workerId: { type: "string" },
+          name: { type: "string" },
+          cwd: { type: "string" },
+          model: { type: "string" },
+          effort: { type: "string" },
+          text: { type: "string" },
+          turnId: { type: "string" },
+          acceptance: { type: "string", enum: ["pending", "accepted", "changes-requested"] },
+        },
+        output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
+        async execute(args, execution) {
+          const identity = callerIdentity(execution.agent);
+          const value = await executeWorkerAction(backend, agentCaller(identity), String(identity.session.header.cwd),
+            args as WorkerAction, () => assertAgentIdentity(ctx, identity));
+          return JSON.stringify(value);
+        },
+        presentCall: args => ({
+          card: "generic",
+          title: `Codex workers: ${String((args as { action?: unknown }).action ?? "")}`,
+          kind: WORKER_READ_ACTIONS.has(String((args as { action?: unknown }).action)) ? "read" : "execute",
+        }),
+      }));
+      delivery = installWorkerDelivery(ctx, backend);
+      tools.systemPrompt.section({
+        name: "tool:codex-workers",
+        order: tools.systemPrompt.getSectionOrder("TOOL_JOBS"),
+        text: "codex_workers manages persistent Codex workers. Process reports independently; acknowledge or accept after handling. Do not poll, repeat unknown work, or treat interrupt acceptance as completion.",
+      });
+    });
   }, "dsh-codex-app-provider: execution lifecycle");
 }
+
+/** Actions that only read worker state; everything else mutates it. */
+const WORKER_READ_ACTIONS = new Set(["roles", "list", "get", "reports"]);
+
+/** Every `codex_workers` action, in the order the tool documents them. */
+const WORKER_ACTIONS = ["create", "roles", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"] as const;
 
 /**
  * The registered DSH Session's workspace, when it is still readable.

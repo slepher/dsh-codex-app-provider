@@ -2,13 +2,14 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Message } from "@deepseek-ai/dsh-llm";
 
+import { isExecutionFactId } from "./facts.js";
+
 const INJECTED_FORMS = new Set(["instructions", "catalog", "snapshot"]);
 const DSH_SYSTEM_PROMPT = "@deepseek-ai/dsh-system-prompt";
 const COMPACT_CHECKPOINT = "compact";
-/** The provider's own executed-fact import; already in the Codex thread. */
-const CODEX_FACTS_PLUGIN = "dsh-codex-app-provider";
 
 interface SourceFace {
+  id?: unknown;
   kind?: unknown;
   plugin?: unknown;
   form?: unknown;
@@ -27,7 +28,8 @@ export function isInjectedContext(message: Message): boolean {
   if (source.kind === "plugin" && source.plugin === COMPACT_CHECKPOINT) return false;
   // Executed Codex facts are already in the native thread; re-sending them would
   // duplicate work the thread performed and re-present it as an instruction.
-  if (source.kind === "plugin" && source.plugin === CODEX_FACTS_PLUGIN) return true;
+  // Worker-report notices from the same plugin are real model input and stay.
+  if (isExecutionFactId(source.id)) return true;
   if (source.kind === "plugin" && source.plugin === DSH_SYSTEM_PROMPT) return true;
   if (source.kind === "plugin" && source.plugin === "agent-instructions") return true;
   if (source.kind === "agent-instructions" || source.kind === "skill-catalog") return true;

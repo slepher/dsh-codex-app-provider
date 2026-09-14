@@ -23,6 +23,19 @@ export const FACT_PLUGIN = "dsh-codex-app-provider";
 /** Prefix that makes an imported fact message recognizable in the session log. */
 const FACT_ID_PREFIX = "codex-executed:";
 
+/**
+ * True when a message identity is one of this plugin's imported facts.
+ *
+ * The identity, not the plugin name, is the discriminator: the same plugin also
+ * delivers worker-report notices as model-visible input, and those must not be
+ * mistaken for facts that are already in the native thread.
+ * @param id - the message identity under test.
+ * @returns whether the message is an imported executed fact.
+ */
+export function isExecutionFactId(id: unknown): boolean {
+  return typeof id === "string" && id.startsWith(FACT_ID_PREFIX);
+}
+
 /** One native item's rendered facts, ready to persist as one DSH message. */
 export interface CodexFactMessage {
   /** Stable DSH message identity derived from the native item. */

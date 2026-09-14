@@ -1,0 +1,115 @@
+/**
+ * The ordinary Codex worker action surface.
+ *
+ * One `codex_workers` call is one action over workers owned by the calling
+ * parent Session. The backend owns identity, ownership, state and report
+ * durability; this module only names the actions and maps arguments onto it, so
+ * a caller cannot reach a worker its Session does not own and cannot skip a
+ * state precondition.
+ * @module dsh-codex-app-provider/worker-actions
+ */
+
+import type { Caller, CodexBackend, ReportAcceptance, TurnInput } from "./browser-types.js";
+
+/** The actions `codex_workers` accepts. */
+export type WorkerActionName =
+  | "create" | "roles" | "list" | "get" | "reports" | "append" | "steer" | "interrupt" | "resume" | "accept" | "ack" | "close";
+
+/** One ordinary delegation request. */
+export interface WorkerAction {
+  action: WorkerActionName;
+  workerId?: string;
+  role?: string;
+  name?: string;
+  cwd?: string;
+  model?: string;
+  effort?: string;
+  text?: string;
+  turnId?: string;
+  acceptance?: ReportAcceptance;
+  skills?: readonly TurnInput[];
+}
+
+/**
+ * Execute one worker action against the backend.
+ * @param backend - the single Codex backend that owns worker records.
+ * @param caller - the contextual caller derived from the live parent Agent.
+ * @param parentCwd - the parent Session's workspace, used when a create omits one.
+ * @param input - the validated action arguments.
+ * @param revalidate - asked to re-prove the parent identity before each mutation.
+ * @returns the action's canonical result, JSON-serializable.
+ * @throws when a required field is missing or the backend refuses the action.
+ */
+export async function executeWorkerAction(
+  backend: CodexBackend,
+  caller: Caller,
+  parentCwd: string,
+  input: WorkerAction,
+  revalidate: () => void = () => {},
+): Promise<unknown> {
+  switch (input.action) {
+    case "roles": return backend.workflowRoles();
+    case "list": return backend.listWorkers(caller);
+    case "reports": return backend.pendingReports(caller);
+    case "create": {
+      revalidate();
+      return backend.createWorker(caller, {
+        ...(input.workerId === undefined ? {} : { id: input.workerId }),
+        name: required(input.name, "name"),
+        cwd: input.cwd ?? parentCwd,
+        ...(input.role === undefined || input.role === "" ? {} : { role: input.role }),
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.effort === undefined ? {} : { reasoningEffort: input.effort }),
+      });
+    }
+  }
+  const workerId = required(input.workerId, "workerId");
+  switch (input.action) {
+    case "get": return backend.getWorker(caller, workerId);
+    case "append": {
+      const worker = await backend.getWorker(caller, workerId);
+      if (worker.state !== "idle") throw new Error(`Worker is ${worker.state}; use steer for an active turn`);
+      revalidate();
+      await backend.startTurn(caller, workerId, turnInput(required(input.text, "text"), input.skills));
+      return { worker: await backend.getWorker(caller, workerId) };
+    }
+    case "steer":
+      revalidate();
+      await backend.steerTurn(caller, workerId, required(input.turnId, "turnId"), turnInput(required(input.text, "text"), input.skills));
+      return backend.getWorker(caller, workerId);
+    case "interrupt":
+      revalidate();
+      await backend.interruptTurn(caller, workerId, required(input.turnId, "turnId"));
+      return backend.getWorker(caller, workerId);
+    case "resume":
+      revalidate();
+      await backend.resumeSession(caller, workerId);
+      return backend.getWorker(caller, workerId);
+    case "ack":
+      revalidate();
+      return backend.acknowledgeReport(caller, workerId, required(input.turnId, "turnId"));
+    case "accept":
+      revalidate();
+      return backend.acceptReport(caller, workerId, required(input.turnId, "turnId"), acceptance(input.acceptance));
+    case "close":
+      revalidate();
+      await backend.closeSession(caller, workerId);
+      return { id: workerId, closed: true };
+    default: throw new Error("Unknown worker action");
+  }
+}
+
+/** One turn's input: the task text, followed by any native skill bindings. */
+function turnInput(text: string, skills: readonly TurnInput[] | undefined): string | readonly TurnInput[] {
+  return skills !== undefined && skills.length > 0 ? [{ type: "text", text }, ...skills] : text;
+}
+
+function required(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${field} must be a non-empty string`);
+  return value;
+}
+
+function acceptance(value: unknown): ReportAcceptance {
+  if (value === "pending" || value === "accepted" || value === "changes-requested") return value;
+  throw new Error("Invalid report acceptance");
+}
