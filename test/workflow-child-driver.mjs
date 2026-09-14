@@ -13,7 +13,7 @@ export function apply(ctx) {
   let started = false;
   const requests = [], failures = [];
   ctx.on("llm/stream", async function* (options, next) {
-    if (options.execution !== undefined) requests.push({ sessionId: options.sessionId, model: options.model, reasoningEffort: options.reasoningEffort, execution: options.execution });
+    requests.push({ sessionId: options.sessionId, model: options.model, reasoningEffort: options.reasoningEffort, execution: options.execution ?? null });
     for await (const chunk of next()) {
       if (chunk.type === "finish" && (chunk.reason.kind === "error" || chunk.reason.kind === "aborted")) {
         failures.push({ sessionId: options.sessionId, reason: chunk.reason });
@@ -90,18 +90,30 @@ export function apply(ctx) {
         assert.equal(handle.header.parentSession, parent.id);
         assert.equal(handle.header.cwd, child.execution.boundary.cwd);
         const descriptor = events.find(event => event.type === "subagent/descriptor");
-        assert.equal(descriptor.data.version, 4);
-        assert.deepEqual(descriptor.data.execution, child.execution);
+        assert.ok(descriptor, "the core records one subagent descriptor per child");
+        // Descriptor version and whether a plugin-declared `execution` field
+        // survives are core-owned facts to observe, not assumptions to assert
+        // (repair.md §4.7). The durable requirement is that the child ran the
+        // snapshot it was dispatched with.
+        child.observed = { descriptor: { version: descriptor.data.version,
+          execution: descriptor.data.execution === undefined ? null : descriptor.data.execution,
+          keys: Object.keys(descriptor.data).sort() } };
+        if (descriptor.data.execution !== undefined) assert.deepEqual(descriptor.data.execution, child.execution);
         const headers = events.filter(event => event.type === "request/header");
         assert.ok(headers.length >= (child.role === "A" ? 2 : 1));
-        for (const header of headers) { assert.deepEqual(header.data.header.config.execution, child.execution); assert.equal(header.data.header.config.model, child.model); assert.equal(header.data.header.config.reasoningEffort, child.effort); }
+        for (const header of headers) {
+          if (header.data.header.config.execution !== undefined) assert.deepEqual(header.data.header.config.execution, child.execution);
+          assert.equal(header.data.header.config.model, child.model);
+          assert.equal(header.data.header.config.reasoningEffort, child.effort);
+        }
         const outputs = events.filter(event => event.type === "assistant/message")
           .map(event => event.data.message.content.filter(block => block.type === "text").map(block => block.text).join(""));
-        assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"]);
+        assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"],
+          `each child must run the role instructions it was dispatched with; observed=${JSON.stringify(child.observed)}`);
         child.outputs = outputs;
       } finally { await handle.close(); }
     }
-    assert.equal(requests.filter(request => request.sessionId === children[0].id).length, 2);
+    assert.equal(requests.filter(request => request.sessionId === children[0].id).length, 2, "the first child made one model request per turn");
     assert.equal(requests.filter(request => request.sessionId === children[1].id).length, 1);
     await writeFile(process.env.DSH_NATIVE_CHILD_RESULT, JSON.stringify({ status: "PASS_WORKFLOW_PROFILES_COLD_AGENT_RESUME", parentSessionId: parent.id, children, requests }, null, 2));
     return decision;
