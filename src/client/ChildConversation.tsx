@@ -4,7 +4,7 @@ import type {} from "@deepseek-ai/dsh-client-ui-sidebar-right/client";
 import type { SubagentAddress } from "@deepseek-ai/dsh-subagent/client";
 import type { ChildJournalSnapshot } from "./child-view.js";
 import type { CodexApprovalRpc } from "./approval-rpc.js";
-import type { CodexApprovalView } from "../approval-rpc.js";
+import type { CodexApprovalView, CodexQuestionView } from "../approval-rpc.js";
 
 declare module "@deepseek-ai/dsh-client-ui-sidebar-right/client" {
   interface SidebarRightResourceParamsMap { "codex-child": SubagentAddress }
@@ -51,6 +51,8 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<readonly CodexApprovalView[]>([]);
+  const [questions, setQuestions] = useState<readonly CodexQuestionView[]>([]);
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const handle = useRef<ReturnType<ChildConversationInjected["attach"]> | undefined>(undefined);
 
   useEffect(() => {
@@ -72,10 +74,12 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
     if (childSessionId === "" || tab.signal.aborted) return;
     try {
       setPending(await approvalRpc.pending(childSessionId, tab.signal));
+      setQuestions(await approvalRpc.questions(childSessionId, tab.signal));
     } catch {
-      // A composition without the channel has no pane-answerable approvals; the
-      // transcript still renders, so this is not an error state of its own.
+      // A composition without the channel has no pane-answerable interactions;
+      // the transcript still renders, so this is not an error state of its own.
       setPending([]);
+      setQuestions([]);
     }
   }, [approvalRpc, childSessionId, tab.signal]);
 
@@ -123,7 +127,28 @@ export function ChildConversation({ useTabInfo, openMain, attach, approvals: app
           })}>{t("childDeny")}</button>
       </div>)}
     </section>}
-    {pending.length === 0 && pendingApprovals > 0 && <div className="codex-child-approval" role="status">{t("childApprovalWaiting")}</div>}
+    {questions.map(request => <section key={request.requestId} className="codex-child-questions" aria-label={t("childQuestion")}>
+      {request.questions.map(question => <div key={question.id} className="codex-child-question">
+        <span className="codex-child-question-text">{question.header === "" ? question.question : `${question.header}: ${question.question}`}</span>
+        <div className="codex-child-actions">
+          {question.options.map(option => <button key={option.label} type="button" className="codex-child-action" disabled={busy}
+            title={option.description}
+            onClick={() => void act(async () => {
+              await approvalRpc.answer(childSessionId, request.requestId, { [question.id]: [option.label] }, tab.signal);
+              await refreshApprovals();
+            })}>{option.label}</button>)}
+        </div>
+        <input className="codex-child-input" aria-label={t("childAnswer")} value={(answers[question.id] ?? []).join(" ")}
+          onChange={event => setAnswers(current => ({ ...current, [question.id]: event.target.value === "" ? [] : [event.target.value] }))} />
+        <button type="button" className="codex-child-action" disabled={busy || (answers[question.id] ?? []).length === 0}
+          onClick={() => void act(async () => {
+            await approvalRpc.answer(childSessionId, request.requestId, { [question.id]: answers[question.id] ?? [] }, tab.signal);
+            setAnswers(current => ({ ...current, [question.id]: [] }));
+            await refreshApprovals();
+          })}>{t("childSendAnswer")}</button>
+      </div>)}
+    </section>)}
+    {pending.length === 0 && questions.length === 0 && pendingApprovals > 0 && <div className="codex-child-approval" role="status">{t("childApprovalWaiting")}</div>}
     <div className="codex-child-log" role="log">
       {hasMore && <button type="button" className="codex-child-action" disabled={loading}
         onClick={() => void act(() => handle.current!.loadMore())}>{t("childLoadEarlier")}</button>}

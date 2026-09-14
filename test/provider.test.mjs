@@ -602,32 +602,34 @@ test("answers permissions requests with the pane's decision, turn-scoped", async
   assert.deepEqual(responded[1], { id: 32, result: { permissions: {}, scope: "turn" } });
 });
 
-test("maps native user-input requests onto DSH structured questions", async t => {
+test("leaves a native question for the pane and answers it with the real values", async t => {
   const fixture = setup("dsh-provider-userinput-");
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
   const agents = new Map([["s1", { id: "s1", session: sessions.get("s1") }]]);
-  const asked = [];
-  const questions = { async ask(request) { asked.push(request); return { answers: [{ id: "q1", selected: ["Yes"], custom: "note" }] }; } };
-  const adapter = adapterFor(fixture, { sessions, agents, questions });
+  const adapter = adapterFor(fixture, { sessions, agents, approvals: { interactive: true } });
   await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "ask me")]), async server => {
     server.ask(41, "item/tool/requestUserInput", {
       threadId: server.threadId, turnId: server.turnId, itemId: "i1", isBlocking: true, autoResolutionMs: null,
       questions: [{ id: "q1", header: "Pick", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }, { label: "No", description: "stop" }] }],
     });
+    await waitFor(async () => (await fixture.backend.pendingUserInputs(OWNER, "codex:s1")).length > 0, "pending question");
+    // Codex owns the interaction: nothing is invented or dropped while a client
+    // can still answer.
+    assert.deepEqual(server.responded ?? [], []);
+    const [pending] = await fixture.backend.pendingUserInputs(OWNER, "codex:s1");
+    assert.equal(pending.turnId, server.turnId);
+    assert.deepEqual(pending.questions.map(question => question.id), ["q1"]);
+    assert.deepEqual(pending.questions[0].options.map(option => option.label), ["Yes", "No"]);
+    await fixture.backend.answerUserInput(OWNER, pending.requestId, { q1: { answers: ["Yes", "note"] } });
     await waitFor(() => server.responded?.length > 0, "user-input answer");
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "answered" } });
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
-  assert.equal(asked.length, 1);
-  assert.equal(asked[0].agent.id, "s1");
-  assert.deepEqual(asked[0].questions, [{
-    id: "q1", header: "Pick", question: "Proceed?",
-    options: [{ label: "Yes", description: "go" }, { label: "No", description: "stop" }],
-  }]);
   assert.deepEqual(sessionServer(fixture.hub).responded, [
     { id: 41, result: { answers: { q1: { answers: ["Yes", "note"] } } } },
   ]);
+  assert.deepEqual(await fixture.backend.pendingUserInputs(OWNER, "codex:s1"), []);
 });
 
 test("fails closed for user input without a seam and for MCP elicitation", async t => {

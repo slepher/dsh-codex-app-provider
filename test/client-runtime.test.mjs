@@ -63,7 +63,7 @@ test("the pane renders its transcript, composer and stop control", async () => {
   const ChildConversation = components.get("codex-child");
   const attach = () => ({ getSnapshot: () => ({ rows: [], running: false, pendingApprovals: 0, hasMore: false, loading: true }),
     getDraft: () => "", setDraft: value => value, loadMore: async () => {}, restart() {}, send: async () => {}, stop: async () => {}, release() {} });
-  const approvals = createCodexApprovalRpc({ rpc: { call: async () => ({ ok: true, value: { approvals: [] } }) } });
+  const approvals = createCodexApprovalRpc({ rpc: { call: async (_channel, method) => ({ ok: true, value: method === "questions" ? { questions: [] } : { approvals: [] } }) } });
   const address = { parentSessionId: "parent", childSessionId: "child-1", mode: "continuable" };
   const html = renderToStaticMarkup(React.createElement(ChildConversation, {
     useTabInfo: () => ({ tab: { navigation: { params: address }, signal: new AbortController().signal } }),
@@ -90,14 +90,20 @@ test("the client approval calls use the plugin's own channel", async () => {
   const calls = [];
   const rpc = createCodexApprovalRpc({ rpc: { call: async (channel, method, payload, signal) => {
     calls.push({ channel, method, payload, signal });
-    return method === "pending" ? { ok: true, value: { approvals: [{ requestId: "req-1", turnId: "turn-1", method: "m", reason: "run ls" }] } } : { ok: true, value: { decided: true } };
+    if (method === "pending") return { ok: true, value: { approvals: [{ requestId: "req-1", turnId: "turn-1", method: "m", reason: "run ls" }] } };
+    if (method === "questions") return { ok: true, value: { questions: [] } };
+    return { ok: true, value: { decided: true } };
   } } });
   const controller = new AbortController();
   const pending = await rpc.pending("child-1", controller.signal);
+  await rpc.questions("child-1", controller.signal);
+  await rpc.answer("child-1", "req-2", { q1: ["Yes"] }, controller.signal);
+  assert.deepEqual(calls[1], { channel: "/codex-approval", method: "questions", payload: { sessionId: "child-1" }, signal: controller.signal });
+  assert.deepEqual(calls[2], { channel: "/codex-approval", method: "answer", payload: { sessionId: "child-1", requestId: "req-2", answers: { q1: ["Yes"] } }, signal: controller.signal });
   assert.deepEqual(pending.map(entry => entry.requestId), ["req-1"]);
   assert.deepEqual(calls[0], { channel: "/codex-approval", method: "pending", payload: { sessionId: "child-1" }, signal: controller.signal });
   await rpc.decide("child-1", "req-1", "decline", controller.signal);
-  assert.deepEqual(calls[1].payload, { sessionId: "child-1", requestId: "req-1", decision: "decline" });
+  assert.deepEqual(calls[3].payload, { sessionId: "child-1", requestId: "req-1", decision: "decline" });
 
   const failing = createCodexApprovalRpc({ rpc: { call: async () => ({ ok: false, error: { message: "Approval is no longer pending for this Session" } }) } });
   await assert.rejects(failing.decide("child-1", "req-1", "accept"), /no longer pending/,

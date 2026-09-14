@@ -26,10 +26,13 @@ async function call(route, method, payload, { rpcId = "r1", path, headers = { "c
  * it was asked to do instead of re-implementing the state machine.
  */
 function harness({ reject } = {}) {
-  const routes = [], decisions = [];
+  const routes = [], decisions = [], answered = [];
   const state = { interactive: false };
   const pending = [{ requestId: "req-1", sessionId: "codex:parent", threadId: "thread-1", turnId: "turn-1",
     method: "item/commandExecution/requestApproval", params: { command: "ls" } }];
+  const asked = [{ requestId: "q-1", sessionId: "codex:parent", threadId: "thread-1", turnId: "turn-1",
+    questions: [{ id: "q1", header: "Pick", question: "Proceed?", isOther: true, isSecret: false,
+      options: [{ label: "Yes", description: "go" }, { label: "No", description: "stop" }] }] }];
   const backend = {
     readSession: async (_owner, id) => (id === "codex:parent" ? { sessionId: id } : undefined),
     pendingApprovals: async (_owner, id) => (id === "codex:parent"
@@ -37,6 +40,12 @@ function harness({ reject } = {}) {
     decideApproval: async (_owner, requestId, decision) => {
       if (!pending.some(request => request.requestId === requestId)) throw new Error("Approval no longer pending");
       decisions.push({ requestId, decision });
+    },
+    pendingUserInputs: async (_owner, id) => (id === "codex:parent" && !answered.includes("q-1") ? asked : []),
+    answerUserInput: async (_owner, requestId, answers) => {
+      if (!asked.some(request => request.requestId === requestId)) throw new Error("Question no longer pending");
+      answered.push(requestId);
+      decisions.push({ requestId, answers });
     },
   };
   const ctx = {
@@ -74,6 +83,33 @@ test("the approval channel mounts, lists native approvals and applies a real dec
     dispose();
     assert.equal(state.interactive, false, "unmounting the channel removes the interactive path");
   })();
+});
+
+test("the channel lists native questions and returns the pane's answers", async () => {
+  const { ctx, backend, routes, state, decisions } = harness();
+  installApprovalRpc(ctx, backend, state);
+  const route = routes.find(candidate => candidate.path === "/codex-approval");
+
+  const listed = await call(route, "questions", { sessionId: "parent" });
+  assert.deepEqual(listed.body.result, { ok: true, value: { questions: [
+    { requestId: "q-1", turnId: "turn-1", questions: [
+      { id: "q1", header: "Pick", question: "Proceed?", isOther: true,
+        options: [{ label: "Yes", description: "go" }, { label: "No", description: "stop" }] },
+    ] },
+  ] } });
+
+  const answered = await call(route, "answer", { sessionId: "parent", requestId: "q-1", answers: { q1: ["Yes"] } });
+  assert.deepEqual(answered.body.result, { ok: true, value: { answered: true } });
+  assert.deepEqual(decisions, [{ requestId: "q-1", answers: { q1: { answers: ["Yes"] } } }]);
+  assert.deepEqual((await call(route, "questions", { sessionId: "parent" })).body.result.value.questions, []);
+
+  const stale = await call(route, "answer", { sessionId: "parent", requestId: "q-1", answers: { q1: ["No"] } });
+  assert.equal(stale.body.result.ok, false);
+  assert.match(stale.body.result.error.message, /no longer pending/);
+  const malformed = await call(route, "answer", { sessionId: "parent", requestId: "q-1", answers: { q1: "Yes" } });
+  assert.equal(malformed.body.result.ok, false);
+  assert.match(malformed.body.result.error.message, /list of strings/);
+  assert.deepEqual(decisions.length, 1, "a stale or malformed answer never reaches the backend");
 });
 
 test("the approval channel refuses unauthenticated, malformed and cross-Session calls", async () => {

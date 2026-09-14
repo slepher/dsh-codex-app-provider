@@ -20,7 +20,7 @@ import { clientRequestSchema, serverResponseSchema } from "@deepseek-ai/dsh-clie
 import type {} from "@deepseek-ai/dsh-session-persistence";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
-import type { ApprovalDecision, ApprovalRequest, CodexBackend } from "./browser-types.js";
+import type { ApprovalDecision, ApprovalRequest, CodexBackend, UserInputAnswer, UserInputRequest } from "./browser-types.js";
 import { CODEX_OWNER_ID, backendSessionId } from "./provider.js";
 
 const CHANNEL = "/codex-approval";
@@ -35,6 +35,19 @@ export interface CodexApprovalView {
   method: string;
   /** Human-readable account of what Codex is asking about. */
   reason: string;
+}
+
+/** One pending native question as the child pane renders it. */
+export interface CodexQuestionView {
+  requestId: string;
+  turnId: string;
+  questions: readonly {
+    id: string;
+    header: string;
+    question: string;
+    isOther: boolean;
+    options: readonly { label: string; description: string }[];
+  }[];
 }
 
 /** Whether this composition can reach an interactive client for a decision. */
@@ -97,8 +110,23 @@ function approvalView(request: ApprovalRequest): CodexApprovalView {
   return { requestId: request.requestId, turnId: request.turnId, method: request.method, reason: approvalReason(request) };
 }
 
+/** Project one pending question request into the pane's view. */
+function questionView(request: UserInputRequest): CodexQuestionView {
+  return { requestId: request.requestId, turnId: request.turnId, questions: request.questions.map(question => ({
+    id: question.id,
+    header: question.header,
+    question: question.question,
+    isOther: question.isOther,
+    options: (question.options ?? []).map(option => ({ label: option.label, description: option.description ?? "" })),
+  })) };
+}
+
 /**
- * Mount the approval channel for one backend.
+ * Mount the native-interaction channel for one backend.
+ *
+ * Codex owns its approval decisions and its questions alike, so the plugin never
+ * routes either through a DSH policy. Requests that reach the client are listed
+ * here and answered from the child pane with the real decision.
  *
  * Registers the route only when the composition has both a Connection trust
  * fence and a web server; the returned disposer clears the channel state so a
@@ -159,10 +187,14 @@ export function installApprovalRpc(ctx: Context, backend: CodexBackend, state: A
   function dispatch(endpoint: string, payload: unknown, signal: AbortSignal): Promise<ConnectionRpcResult<unknown>> {
     const operation = (async () => {
       signal.throwIfAborted();
-      if (endpoint !== "pending" && endpoint !== "decide") throw new Error("Unknown approval endpoint");
+      if (endpoint !== "pending" && endpoint !== "decide" && endpoint !== "questions" && endpoint !== "answer") {
+        throw new Error("Unknown approval endpoint");
+      }
       if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid approval request");
       const value = payload as Record<string, unknown>;
-      const fields = endpoint === "pending" ? ["sessionId"] : ["sessionId", "requestId", "decision"];
+      const fields = endpoint === "pending" || endpoint === "questions" ? ["sessionId"]
+        : endpoint === "decide" ? ["sessionId", "requestId", "decision"]
+        : ["sessionId", "requestId", "answers"];
       if (Object.keys(value).some(key => !fields.includes(key)) || typeof value.sessionId !== "string" || !value.sessionId) {
         throw new Error("A native Session address is required; caller identities are not accepted");
       }
@@ -177,6 +209,24 @@ export function installApprovalRpc(ctx: Context, backend: CodexBackend, state: A
       if (session === undefined) throw new Error("This Session has no Codex execution");
       const pending = () => backend.pendingApprovals(CODEX_OWNER_ID, backendSessionId(sessionId));
       if (endpoint === "pending") return { approvals: (await pending()).map(approvalView) };
+      const questions = () => backend.pendingUserInputs(CODEX_OWNER_ID, backendSessionId(sessionId));
+      if (endpoint === "questions") return { questions: (await questions()).map(questionView) };
+      if (endpoint === "answer") {
+        if (typeof value.requestId !== "string" || !value.requestId) throw new Error("requestId is required");
+        if (value.answers === null || typeof value.answers !== "object" || Array.isArray(value.answers)) throw new Error("answers must map each question to its selected values");
+        const answers: Record<string, { answers: string[] }> = {};
+        for (const [id, selected] of Object.entries(value.answers as Record<string, unknown>)) {
+          if (!Array.isArray(selected) || selected.some(entry => typeof entry !== "string")) throw new Error("each answer is a list of strings");
+          answers[id] = { answers: [...selected] as string[] };
+        }
+        // The request must still be pending for this Session; the backend keeps
+        // it bound to the live turn, so a stale answer cannot reach a later one.
+        if (!(await questions()).some(request => request.requestId === value.requestId)) {
+          throw new Error("Question is no longer pending for this Session");
+        }
+        await backend.answerUserInput(CODEX_OWNER_ID, value.requestId, answers as UserInputAnswer);
+        return { answered: true };
+      }
       if (typeof value.requestId !== "string" || !value.requestId) throw new Error("requestId is required");
       if (value.decision !== "accept" && value.decision !== "decline" && value.decision !== "cancel") throw new Error("Unknown approval decision");
       // The decision must name a request this Session still has pending; the

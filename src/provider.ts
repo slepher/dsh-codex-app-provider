@@ -591,7 +591,7 @@ export class CodexProviderAdapter extends LlmAdapter {
           if (event.type === "approval.requested") {
             void this.bridgeApproval(owner, event.request);
           } else if (event.type === "userInput.requested") {
-            void this.bridgeUserInput(owner, sessionId, event.request, signal);
+            void this.bridgeUserInput(owner, sessionId, event.request);
           } else if (event.type === "turn.output" && event.turnId === turn.turnId) {
             if (typeof event.item === "string") {
               text += event.item;
@@ -727,28 +727,22 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   /**
-   * Codex `request_user_input` maps onto DSH structured questions. Without an
-   * agent or the seam (or when the question is aborted) the turn receives an
-   * empty answer set, matching the upstream error path, never fabricated input.
+   * Leave one native question for the plugin's own pane, or fail closed.
+   *
+   * Like an approval, a question that reaches this client is one Codex decided it
+   * cannot settle itself. With an interactive channel the request stays pending
+   * and the child pane answers it with the real values. Otherwise the turn
+   * receives an empty answer set — the upstream mapping of "the client could not
+   * answer" — rather than blocking the native turn forever or inventing input.
+   * @param owner - the provider's own owner identity.
+   * @param sessionId - the DSH Session the question belongs to.
+   * @param request - the native question request.
    */
-  private async bridgeUserInput(owner: string, sessionId: string, request: UserInputRequest, signal?: AbortSignal): Promise<void> {
-    const agent = this.deps.agents.get(sessionId), questions = this.deps.questions;
-    let answers: UserInputAnswer = null;
-    if (agent !== undefined && questions !== undefined) {
-      const controller = new AbortController();
-      const onAbort = (): void => controller.abort();
-      signal?.addEventListener("abort", onAbort, { once: true });
-      try {
-        const outcome = await questions.ask({ agent, questions: request.questions.map(providerQuestion), signal: controller.signal });
-        answers = userInputAnswers(outcome.answers);
-      } catch (error) {
-        this.deps.logger.warn(`Codex user-input bridge failed: ${String(error)}`);
-      } finally {
-        signal?.removeEventListener("abort", onAbort);
-      }
-    }
+  private async bridgeUserInput(owner: string, sessionId: string, request: UserInputRequest): Promise<void> {
+    if (this.deps.approvals?.interactive === true) return;
+    this.deps.logger.warn(`No Codex interaction channel is mounted in this composition; the native question for ${sessionId} was answered empty fail-closed`);
     try {
-      await this.deps.backend.answerUserInput(owner, request.requestId, answers);
+      await this.deps.backend.answerUserInput(owner, request.requestId, null);
     } catch (error) {
       this.deps.logger.warn(`Codex user-input response failed: ${String(error)}`);
     }

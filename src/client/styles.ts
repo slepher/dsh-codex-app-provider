@@ -174,6 +174,24 @@ const CSS = `
   font-size: 12px;
   color: var(--dsw-alias-label-secondary);
 }
+.codex-child-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.codex-child-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+.codex-child-question-text {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
 .codex-child-log {
   flex: 1;
   min-height: 0;

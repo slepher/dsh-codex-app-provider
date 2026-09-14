@@ -1,5 +1,5 @@
 import type { ConnectionHandle } from "@deepseek-ai/dsh-client-connection/client";
-import type { CodexApprovalView } from "../approval-rpc.js";
+import type { CodexApprovalView, CodexQuestionView } from "../approval-rpc.js";
 
 /** One native approval decision the pane can return. */
 export type CodexApprovalDecision = "accept" | "decline" | "cancel";
@@ -10,6 +10,10 @@ export interface CodexApprovalRpc {
   pending(sessionId: string, signal?: AbortSignal): Promise<readonly CodexApprovalView[]>;
   /** Return the real decision for one pending request. */
   decide(sessionId: string, requestId: string, decision: CodexApprovalDecision, signal?: AbortSignal): Promise<void>;
+  /** Native questions this Session's Codex execution is still waiting on. */
+  questions(sessionId: string, signal?: AbortSignal): Promise<readonly CodexQuestionView[]>;
+  /** Answer one pending question with the values the user chose. */
+  answer(sessionId: string, requestId: string, answers: Readonly<Record<string, readonly string[]>>, signal?: AbortSignal): Promise<void>;
 }
 
 /**
@@ -29,5 +33,7 @@ export function createCodexApprovalRpc(connection: ConnectionHandle): CodexAppro
   return {
     pending: async (sessionId, signal) => (await call<{ approvals: CodexApprovalView[] }>("pending", { sessionId }, signal)).approvals,
     decide: async (sessionId, requestId, decision, signal) => { await call("decide", { sessionId, requestId, decision }, signal); },
+    questions: async (sessionId, signal) => (await call<{ questions: CodexQuestionView[] }>("questions", { sessionId }, signal)).questions,
+    answer: async (sessionId, requestId, answers, signal) => { await call("answer", { sessionId, requestId, answers }, signal); },
   };
 }
