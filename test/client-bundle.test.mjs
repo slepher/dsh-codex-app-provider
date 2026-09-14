@@ -57,6 +57,7 @@ function harness() {
       openSubagent(address) { navigated.push(address); },
     },
     remote: { $stream() {}, session: {}, subagents: { prompt: async () => ({ ok: true, value: {} }), interruptByParent: async () => ({ ok: true, value: {} }) } },
+    connection: { rpc: { call: async () => ({ ok: true, value: { approvals: [] } }) } },
     sidebarRight: { openResource(address, options) { opened.push({ address, options }); } },
     sidebarRightTabs: { register(definition) { assert.equal(definition.kind, "codex-child"); return () => {}; } },
     slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
@@ -64,7 +65,7 @@ function harness() {
   return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components, setPosition: value => { position = value; } } };
 }
 
-test("shipped client registers the child pane, the lineage entry and the execution node", () => {
+test("shipped client registers the child pane, the lineage entry and the execution node", async () => {
   const module = loadBundle();
   const { ctx, state } = harness();
   module.apply(ctx);
@@ -108,6 +109,9 @@ test("shipped client registers the child pane, the lineage entry and the executi
   assert.equal(panel.children, undefined, "the pane owns its own view instead of declaring a mount");
   const face = panel.inject();
   let published;
+  assert.equal(typeof face.approvals.pending, "function", "the pane answers native approvals on the plugin's own channel");
+  assert.equal(typeof face.approvals.decide, "function");
+  await face.approvals.pending("child-1");
   const handle = face.attach(address, snapshot => { published = snapshot; });
   assert.equal(typeof handle.getSnapshot, "function");
   assert.equal(handle.getDraft(), "", "a fresh tab starts with an empty draft");

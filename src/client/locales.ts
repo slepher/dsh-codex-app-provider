@@ -14,6 +14,7 @@ export const zh = {
   childEmpty: "暂无记录", childPrompt: "向子会话发送", childSend: "发送", childSteer: "插入当前步骤",
   childQueue: "排队下一轮", childReload: "重载", childExecuted: "已执行", childOpen: "打开子会话",
   roleUser: "用户", roleAssistant: "助手", roleTool: "工具", roleApproval: "审批",
+  childAllow: "允许一次", childDeny: "拒绝",
 };
 export const en: Record<keyof typeof zh, string> = {
   childLoading: "Opening child…", childUnavailable: "Child conversation unavailable", openMain: "Open in main area",
@@ -31,4 +32,5 @@ export const en: Record<keyof typeof zh, string> = {
   childEmpty: "Nothing here yet", childPrompt: "Prompt the child", childSend: "Send", childSteer: "Steer this step",
   childQueue: "Queue next turn", childReload: "Reload", childExecuted: "Executed", childOpen: "Open child session",
   roleUser: "User", roleAssistant: "Assistant", roleTool: "Tool", roleApproval: "Approval",
+  childAllow: "Allow once", childDeny: "Deny",
 };

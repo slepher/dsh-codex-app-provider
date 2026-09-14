@@ -40,10 +40,17 @@ await mkdir(profile, { recursive: true }); await mkdir(workspace);
 const version = JSON.parse(await readFile(join(root, "package.json"), "utf8")).version;
 const tarball = resolve(root, process.env.DSH_PROVIDER_TEST_TARBALL ?? `dsh-codex-app-provider-${version}.tgz`);
 const workflowTarball = resolve(root, process.env.DSH_WORKFLOW_TEST_TARBALL ?? "../dsh-workflow-kit/dsh-workflow-kit-0.1.0.tgz");
+// The composed app is the official DSH release. `scripts/dsh-coordinated.json`
+// describes a locally modified core ("0.1.5-rc.1 with local changes; not
+// registry rc.1"), so its tarballs are applied only when a run explicitly asks
+// for that environment: a default run must prove the plugins work on the
+// unmodified core.
 const pins = JSON.parse(await readFile(join(root, "scripts/dsh-baseline.json"), "utf8"));
-const coordinated = JSON.parse(await readFile(join(root, "scripts/dsh-coordinated.json"), "utf8"));
+const coordinated = process.env.DSH_LIVE_COORDINATED === "1"
+  ? JSON.parse(await readFile(join(root, "scripts/dsh-coordinated.json"), "utf8"))
+  : undefined;
 if (workflowChild) pins["dsh-codex-app-provider"] = `file:${tarball}`;
-for (const [name, path] of Object.entries(coordinated.packages)) pins[name] = `file:${resolve(root, path)}`;
+for (const [name, path] of Object.entries(coordinated?.packages ?? {})) pins[name] = `file:${resolve(root, path)}`;
 await writeFile(join(profile, "package.json"), JSON.stringify({
   name: "codex-app-isolated-test", private: true, type: "module",
   dependencies: { "@deepseek-ai/dsh": "0.1.5-rc.1", "dsh-codex-app-provider": `file:${tarball}`, ...(workflowChild ? { "dsh-workflow-kit": `file:${workflowTarball}` } : {}) },
@@ -105,7 +112,9 @@ if (nativeChild) {
   await writeFile(join(profile, "cordis.patch.yml"), patch + `- insert:\n    - id: native-child-test\n      name: ${JSON.stringify(join(profile, "native-child-driver.mjs"))}\n`);
 }
 const env = { ...process.env, DSH_EXTERNAL_EVENTS_TEST: externalEvents ? "1" : "0", DSH_HOME: home, DSH_NATIVE_CHILD_RESULT: join(dir, "native-child-result.json"), ...(workflowHandoff ? { DSH_HANDOFF_DRIVER_EVIDENCE: join(evidence, `${prefix}-driver.json`) } : {}), ...(fake ? { DSH_FAKE_CODEX_LOG: join(dir, "fake-codex-requests.jsonl"), DSH_FAKE_CODEX_STATE: join(dir, "fake-codex-threads") } : {}) };
-const report = { status: "UNRUN", directory: dir, profile, workspace, model, dshVersion: coordinated.version, dshSourceCommit: coordinated.sourceCommit, pluginVersion: version };
+const report = { status: "UNRUN", directory: dir, profile, workspace, model,
+  dshVersion: coordinated?.version ?? "registry 0.1.5-rc.1", core: coordinated === undefined ? "official" : "coordinated",
+  ...(coordinated === undefined ? {} : { dshSourceCommit: coordinated.sourceCommit }), pluginVersion: version };
 await writeFile(join(evidence, `${prefix}-result.json`), JSON.stringify(report, null, 2));
 try {
   const args = ["install", "--ignore-scripts", "--fetch-retries=0", "--prefer-offline"];

@@ -20,6 +20,8 @@ import { openPosition } from "./settings.js";
 import { ChildConversation, type ChildConversationInjected } from "./ChildConversation.js";
 import { ChildLineage, type ChildLineageInjected } from "./ChildLineage.js";
 import { createChildViews } from "./child-view.js";
+import { createCodexApprovalRpc } from "./approval-rpc.js";
+import type { ConnectionHandle } from "@deepseek-ai/dsh-client-connection/client";
 import { installClientStyles } from "./styles.js";
 
 declare module "@deepseek-ai/dsh-client-ui-slots" {
@@ -28,6 +30,17 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
 
 /** Branded identities are compile-time only; the plugin owns no runtime brand constructors. */
 const asSessionId = (value: string): SessionId => value as unknown as SessionId;
+
+/**
+ * The client Session services the pane needs.
+ *
+ * The controller face carries child-address helpers the injected `SessionStore`
+ * typing does not declare, so they are read structurally instead of assumed.
+ */
+interface ChildSessionFace {
+  subagentAddress(sessionId: string): SubagentAddress | undefined;
+  openSubagent(address: SubagentAddress): void;
+}
 
 /** The tab kind this plugin registers for one child conversation. */
 const CHILD_TAB_KIND = "codex-child";
@@ -56,14 +69,17 @@ export function apply(ctx: Context): void {
     scope.slots.inject("conversation.session.header.lineage", () => scope.slots.register({
       name: "conversation.session.header.lineage", priority: -1, locale: SETTINGS_NAMESPACE,
       inject: (): ChildLineageInjected => ({
-        addressOf: sessionId => scope.sessions.subagentAddress(asSessionId(sessionId)),
+        addressOf: sessionId => (scope.sessions as unknown as ChildSessionFace).subagentAddress(asSessionId(sessionId)),
         position: () => openPosition(settings.getSnapshot()),
         openSidebar: address => openPosition(settings.getSnapshot()) === "sidebar" && openChildTab(scope.sidebarRight, address),
       }),
     }, ChildLineage));
   });
   ctx.effect(() => ctx.locale.register(SETTINGS_NAMESPACE, { zh, en }), "Codex settings locales");
-  ctx.inject(["sessions", "sidebarRight", "sidebarRightTabs", "remote", "remote.subagents"], sidebar => {
+  ctx.inject(["sessions", "sidebarRight", "sidebarRightTabs", "remote", "remote.subagents", "connection"], sidebar => {
+    // Codex approvals are answered on the plugin's own authenticated channel,
+    // never through DSH's approval policy.
+    const approvals = createCodexApprovalRpc(sidebar.connection as unknown as ConnectionHandle);
     const views = createChildViews({
       create: (address, options) => new SessionEventStream(sidebar.remote, { kind: "subagent",
         parentSessionId: asSessionId(address.parentSessionId), childSessionId: asSessionId(address.childSessionId), mode: address.mode }, options),
@@ -87,8 +103,9 @@ export function apply(ctx: Context): void {
       yield sidebar.slots.register({
         name: "sidebar.right.pane.tab", key: CHILD_TAB_KIND, locale: SETTINGS_NAMESPACE,
         inject: (): ChildConversationInjected => ({
-          openMain: address => sidebar.sessions.openSubagent(address),
+          openMain: address => (sidebar.sessions as unknown as ChildSessionFace).openSubagent(address),
           attach: (address, listener) => views.attach(address, listener),
+          approvals,
         }),
       }, ChildConversation);
     }));

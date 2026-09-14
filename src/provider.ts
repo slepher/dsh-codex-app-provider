@@ -57,17 +57,11 @@ const TERMINAL_STATES = new Set<TurnSnapshot["state"]>(["completed", "failed", "
 /** Opening text of one projected DSH history segment (`importedInput`). */
 const HISTORY_IMPORT_MARKER = "[DSH history import";
 
-export type ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
-
 /** The subset of the DSH Session a provider needs: the workspace default. */
 export interface ProviderSessionFace {
   append?: Session["append"];
   snapshotEvents?: Session["snapshotEvents"];
   header?: { cwd?: string };
-}
-
-export interface ProviderApprovalSeam {
-  request(request: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }): Promise<ApprovalOutcome>;
 }
 
 export interface ProviderQuestionOption {
@@ -125,8 +119,12 @@ export interface CodexProviderDeps {
   backend: CodexBackend;
   sessions: { get(id: string): ProviderSessionFace | undefined };
   agents: { get(id: string): Agent | undefined };
-  /** Optional DSH user-approval seam (`ctx.approval`); absent means fail closed. */
-  approval?: ProviderApprovalSeam | undefined;
+  /**
+   * Whether this composition can reach an interactive client for a native
+   * approval decision. Absent or inactive means the plugin fails closed rather
+   * than asking DSH's approval policy to decide for Codex.
+   */
+  approvals?: { readonly interactive: boolean } | undefined;
   /** Optional DSH structured-question seam (`ctx.userQuestions`); absent means empty answers. */
   questions?: ProviderQuestionSeam | undefined;
   /** Optional durable-attachment seam (`ctx.attachments`); absent keeps the provider text-only. */
@@ -573,7 +571,7 @@ export class CodexProviderAdapter extends LlmAdapter {
           if (signal?.aborted) break;
           if (event.type === "session.uncertain") throw new LlmError(event.error, "EXECUTION_UNKNOWN");
           if (event.type === "approval.requested") {
-            void this.bridgeApproval(owner, sessionId, event.request, signal);
+            void this.bridgeApproval(owner, event.request);
           } else if (event.type === "userInput.requested") {
             void this.bridgeUserInput(owner, sessionId, event.request, signal);
           } else if (event.type === "turn.output" && event.turnId === turn.turnId) {
@@ -687,30 +685,23 @@ export class CodexProviderAdapter extends LlmAdapter {
     }
   }
 
-  private async bridgeApproval(owner: string, sessionId: string, request: ApprovalRequest, signal?: AbortSignal): Promise<void> {
-    const agent = this.deps.agents.get(sessionId), approval = this.deps.approval;
-    if (agent === undefined || approval === undefined) {
-      await this.decide(owner, request.requestId, "decline");
-      return;
-    }
-    const controller = new AbortController();
-    const onAbort = (): void => controller.abort();
-    signal?.addEventListener("abort", onAbort, { once: true });
-    try {
-      const outcome = await approval.request({
-        agent,
-        toolName: approvalToolName(request.method),
-        ...(approvalReason(request) === undefined ? {} : { reason: approvalReason(request) }),
-        signal: controller.signal,
-      });
-      const decision: ApprovalDecision = outcome === "allowed-once" ? "accept" : outcome === "cancelled" ? "cancel" : "decline";
-      await this.decide(owner, request.requestId, decision);
-    } catch (error) {
-      this.deps.logger.warn(`Codex approval bridge failed: ${String(error)}`);
-      await this.decide(owner, request.requestId, "decline").catch(() => {});
-    } finally {
-      signal?.removeEventListener("abort", onAbort);
-    }
+  /**
+   * Hand one native approval to the plugin's own pane, or fail closed.
+   *
+   * Codex owns its approval configuration: the plugin never asks DSH's approval
+   * service, whose per-Session policy would decide for Codex. A request that
+   * reaches this client is one Codex could not settle itself, so with an
+   * interactive channel mounted it simply stays pending until the pane answers
+   * on the plugin's own approval channel. A composition with no client cannot
+   * obtain a real decision, so it fails closed instead of fabricating consent —
+   * the request and its recorded decline stay visible in the provider store.
+   * @param owner - the provider's own owner identity.
+   * @param request - the native request the App Server addressed to this client.
+   */
+  private async bridgeApproval(owner: string, request: ApprovalRequest): Promise<void> {
+    if (this.deps.approvals?.interactive === true) return;
+    this.deps.logger.warn("No Codex approval channel is mounted in this composition; the native approval was declined fail-closed");
+    await this.decide(owner, request.requestId, "decline").catch(() => {});
   }
 
   private async decide(owner: string, requestId: string, decision: ApprovalDecision): Promise<void> {
@@ -1046,13 +1037,6 @@ function turnOptions(options: GenerateOptions): { model: string; reasoningEffort
     model: options.model,
     ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
   };
-}
-
-function approvalToolName(method: string): string {
-  if (method === "item/commandExecution/requestApproval") return "codex:commandExecution";
-  if (method === "item/fileChange/requestApproval") return "codex:fileChange";
-  if (method === "item/permissions/requestApproval") return "codex:permissions";
-  return `codex:${method.split("/")[1] ?? "request"}`;
 }
 
 function providerQuestion(question: UserInputQuestion): ProviderQuestion {

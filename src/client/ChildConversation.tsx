@@ -3,6 +3,8 @@ import type { InjectFace, PropsLocale, PropsRuntime } from "@deepseek-ai/dsh-cli
 import type {} from "@deepseek-ai/dsh-client-ui-sidebar-right/client";
 import type { SubagentAddress } from "@deepseek-ai/dsh-subagent/client";
 import type { ChildJournalSnapshot } from "./child-view.js";
+import type { CodexApprovalRpc } from "./approval-rpc.js";
+import type { CodexApprovalView } from "../approval-rpc.js";
 
 declare module "@deepseek-ai/dsh-client-ui-sidebar-right/client" {
   interface SidebarRightResourceParamsMap { "codex-child": SubagentAddress }
@@ -20,6 +22,8 @@ export interface ChildConversationInjected {
     getDraft(): string;
     release(): void;
   };
+  /** The plugin's own approval channel for this child's Codex execution. */
+  approvals: CodexApprovalRpc;
 }
 
 type Props = PropsRuntime<"sidebar.right.pane.tab"> & PropsLocale<"dsh-codex-app-provider"> &
@@ -36,7 +40,7 @@ const EMPTY: ChildJournalSnapshot = { rows: [], running: false, pendingApprovals
  * child with the delivery the user chose; stopping asks the parent to interrupt
  * that child rather than closing the DSH Session.
  */
-export function ChildConversation({ useTabInfo, openMain, attach, t }: Props) {
+export function ChildConversation({ useTabInfo, openMain, attach, approvals: approvalRpc, t }: Props) {
   const { tab } = useTabInfo();
   const address = tab.navigation.params as SubagentAddress | undefined;
   const valid = address !== undefined && typeof address.parentSessionId === "string" && typeof address.childSessionId === "string"
@@ -46,6 +50,7 @@ export function ChildConversation({ useTabInfo, openMain, attach, t }: Props) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<readonly CodexApprovalView[]>([]);
   const handle = useRef<ReturnType<ChildConversationInjected["attach"]> | undefined>(undefined);
 
   useEffect(() => {
@@ -61,6 +66,25 @@ export function ChildConversation({ useTabInfo, openMain, attach, t }: Props) {
       view.release();
     };
   }, [key, attach, tab.signal, valid]);
+
+  const childSessionId = valid ? address.childSessionId : "";
+  const refreshApprovals = useCallback(async (): Promise<void> => {
+    if (childSessionId === "" || tab.signal.aborted) return;
+    try {
+      setPending(await approvalRpc.pending(childSessionId, tab.signal));
+    } catch {
+      // A composition without the channel has no pane-answerable approvals; the
+      // transcript still renders, so this is not an error state of its own.
+      setPending([]);
+    }
+  }, [approvalRpc, childSessionId, tab.signal]);
+
+  // Native approvals appear while a turn runs; re-read them when the journal
+  // moves so a request that arrives mid-turn is offered without a manual reload.
+  useEffect(() => {
+    if (!valid || !snapshot.running) return;
+    void refreshApprovals();
+  }, [valid, snapshot.running, snapshot.rows.length, refreshApprovals]);
 
   const act = useCallback(async (operation: () => Promise<void>): Promise<void> => {
     setBusy(true);
@@ -84,7 +108,22 @@ export function ChildConversation({ useTabInfo, openMain, attach, t }: Props) {
         onClick={() => void act(() => handle.current!.stop())}>{t("childStop")}</button>
     </div>
     {(error !== "" || snapshot.error !== undefined) && <div className="codex-child-error" role="alert">{error || snapshot.error}</div>}
-    {pendingApprovals > 0 && <div className="codex-child-approval" role="status">{t("childApprovalWaiting")}</div>}
+    {pending.length > 0 && <section className="codex-child-approvals" aria-label={t("childApprovalWaiting")}>
+      {pending.map(request => <div key={request.requestId} className="codex-child-approval" role="status">
+        <span className="codex-child-approval-text">{request.reason}</span>
+        <button type="button" className="codex-child-action" disabled={busy}
+          onClick={() => void act(async () => {
+            await approvalRpc.decide(childSessionId, request.requestId, "accept", tab.signal);
+            await refreshApprovals();
+          })}>{t("childAllow")}</button>
+        <button type="button" className="codex-child-action" disabled={busy}
+          onClick={() => void act(async () => {
+            await approvalRpc.decide(childSessionId, request.requestId, "decline", tab.signal);
+            await refreshApprovals();
+          })}>{t("childDeny")}</button>
+      </div>)}
+    </section>}
+    {pending.length === 0 && pendingApprovals > 0 && <div className="codex-child-approval" role="status">{t("childApprovalWaiting")}</div>}
     <div className="codex-child-log" role="log">
       {hasMore && <button type="button" className="codex-child-action" disabled={loading}
         onClick={() => void act(() => handle.current!.loadMore())}>{t("childLoadEarlier")}</button>}
