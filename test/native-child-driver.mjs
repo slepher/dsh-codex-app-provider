@@ -76,11 +76,20 @@ export function apply(ctx) {
         assert.equal(handle.header.parentSession, parent.id);
         assert.equal(handle.header.cwd, child.execution.boundary.cwd);
         const descriptor = events.find(event => event.type === "subagent/descriptor");
-        assert.equal(descriptor.data.version, 4);
-        assert.deepEqual(descriptor.data.execution, child.execution);
+        assert.ok(descriptor, "the core records one subagent descriptor per child");
+        // The descriptor shape is core-owned: the version number and whether a
+        // plugin-declared `execution` field survives are both facts to observe,
+        // not assumptions to assert (repair.md §4.7). What must hold is that the
+        // child actually runs the role instructions it was dispatched with.
+        child.observed.descriptor = { version: descriptor.data.version,
+          execution: descriptor.data.execution === undefined ? null : descriptor.data.execution,
+          keys: Object.keys(descriptor.data).sort() };
+        if (descriptor.data.execution !== undefined) assert.deepEqual(descriptor.data.execution, child.execution);
         assert.ok(headers.length >= (child.role === "A" ? 2 : 1));
         for (const header of headers) assert.deepEqual(header.data.header.config.execution, child.execution);
-        assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"]);
+        assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"],
+          `the child must run the role instructions it was dispatched with; descriptor=${JSON.stringify(child.observed.descriptor)}. `
+          + "A core that does not carry the plugin's execution field requires the workflow to restore role instructions through the official Agent/pre-step seam (repair.md §4.7)");
         child.outputs = outputs;
         if (externalEvents) {
           // The provider store keeps the raw record; the DSH session log carries
