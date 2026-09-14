@@ -5,3 +5,4 @@ dist/
 evidence/
 .dsh-state/
 .watch/
+.live/

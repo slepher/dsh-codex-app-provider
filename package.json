@@ -24,6 +24,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "node --test test/*.test.mjs",
     "test:live": "node scripts/test-live.mjs",
+    "test:live:handoff": "node scripts/live-hermetic.mjs",
+    "test:live:handoff:cross": "node scripts/live-hermetic.mjs --cross",
     "publish": "node scripts/publish.mjs",
     "publish:watch": "node scripts/publish.mjs --watch"
   },

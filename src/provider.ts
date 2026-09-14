@@ -115,10 +115,27 @@ export interface ProviderQuestionSeam {
   }): Promise<{ answers: readonly ProviderQuestionAnswer[] }>;
 }
 
+/**
+ * Optional durable session-log seam (`ctx.sessionPersistence`). Only the facts
+ * projection reads it, and only for a session whose live snapshot no longer
+ * carries its recorded execution events.
+ */
+export interface ProviderPersistenceSeam {
+  open(sessionId: string, mode: "read"): Promise<{
+    read(): Promise<{ events: readonly { type: string; data: unknown }[] }>;
+    close(): Promise<void>;
+  }>;
+}
+
 export interface CodexProviderDeps {
   backend: CodexBackend;
   sessions: { get(id: string): ProviderSessionFace | undefined };
   agents: { get(id: string): Agent | undefined };
+  /**
+   * Optional durable session-log seam (`ctx.sessionPersistence`); read only when
+   * a settled child's live snapshot no longer carries its execution events.
+   */
+  persistence?: (() => ProviderPersistenceSeam | undefined) | undefined;
   /** Optional DSH user-approval seam (`ctx.approval`); absent means fail closed. */
   approval?: ProviderApprovalSeam | undefined;
   /** Optional DSH structured-question seam (`ctx.userQuestions`); absent means empty answers. */
@@ -317,17 +334,43 @@ export class CodexProviderAdapter extends LlmAdapter {
    * Project the recorded native transcript into sourced history lines.
    *
    * Facts come from the DSH session's own `codex/execution` log, so the
-   * projection is durable and needs no native resume. Model-authored reasoning
-   * stays out; long output is shortened and points at its durable item.
+   * projection is durable and needs no native resume. The live snapshot is
+   * preferred while the child is resident; a settled child leaves the registry
+   * and its ignorable execution events need not survive the live snapshot, so
+   * the durable session log is read instead. Model-authored reasoning stays out;
+   * long output is shortened and points at its durable item.
    * @param nativeSessionId - DSH Session id whose native transcript to project.
    * @returns the sourced lines, oldest first.
    */
   async facts(nativeSessionId: string): Promise<readonly string[]> {
     if (!nativeSessionId) throw new Error("Native Session identity is required");
     const session = this.deps.sessions.get(nativeSessionId);
-    const recorded = (session?.snapshotEvents?.() ?? []).flatMap(event =>
+    const live = (session?.snapshotEvents?.() ?? []).flatMap(event =>
       event.type === "codex/execution" ? [event.data as CodexExecutionEvent] : []);
+    const recorded = live.length > 0 ? live : await this.durableExecutionEvents(nativeSessionId);
     return projectExecutionFacts(recorded).map(line => line.text);
+  }
+
+  /** Read one session's recorded execution events from its durable log. */
+  private async durableExecutionEvents(nativeSessionId: string): Promise<readonly CodexExecutionEvent[]> {
+    const persistence = this.deps.persistence?.();
+    if (persistence === undefined) return [];
+    let handle;
+    try {
+      handle = await persistence.open(nativeSessionId, "read");
+    } catch (error) {
+      this.deps.logger.warn(`Codex execution facts could not open the durable session log: ${String(error)}`);
+      return [];
+    }
+    try {
+      const { events } = await handle.read();
+      return events.flatMap(event => event.type === "codex/execution" ? [event.data as CodexExecutionEvent] : []);
+    } catch (error) {
+      this.deps.logger.warn(`Codex execution facts could not be projected from the durable log: ${String(error)}`);
+      return [];
+    } finally {
+      await handle.close().catch(() => {});
+    }
   }
 
   async readExecution(nativeSessionId: string): Promise<NativeExecution | undefined> {

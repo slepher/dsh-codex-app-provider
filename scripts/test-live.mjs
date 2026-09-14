@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +11,7 @@ const externalEvents = process.argv.includes("--external-events");
 const workflowContract = process.argv.includes("--workflow-contract");
 const workflowHandoff = process.argv.includes("--workflow-handoff");
 const workflowChild = workflowContract || workflowHandoff || process.argv.includes("--workflow-child");
-const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : workflowHandoff ? "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
+const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : workflowHandoff ? process.env.DSH_HANDOFF_CROSS === "1" ? "workflow-handoff-cross-live" : "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
 const nativeChild = externalEvents || workflowChild || process.argv.includes("--native-child");
 const installedOnly = browser || process.argv.includes("--install-only");
 const evidence = join(root, "evidence");
@@ -58,11 +59,30 @@ if (workflowHandoff) {
   // protocol is read from the installed skill, so the isolated profile points at
   // the adjacent skill checkout.
   const skillDir = process.env.DSH_WORKFLOW_SKILL_DIR ?? resolve(root, "../../codex-workflow/skills/codex-workflow");
-  await writeFile(join(home, "settings.yaml"), `dsh-workflow-kit:\n  defaultConfig: gpt-workflow\n  codingStrategy: bootstrap\n  integrateStrategy: economy\n  configs: {}\n`);
+  const cross = process.env.DSH_HANDOFF_CROSS === "1";
+  if (cross) {
+    // The other provider's own state lives in the harness home; the isolated
+    // home is a fresh directory, so its credentials and attachment index are
+    // installed here for the run and removed by the hermetic runner afterwards.
+    await cp(join(process.env.HOME ?? "", ".dsh", "llm-deepseek"), join(home, "llm-deepseek"), { recursive: true });
+    if (existsSync(join(process.env.HOME ?? "", ".dsh", ".credentials.yaml"))) {
+      await cp(join(process.env.HOME ?? "", ".dsh", ".credentials.yaml"), join(home, ".credentials.yaml"));
+    }
+  }
+  const roles = cross
+    ? `        planner: { provider: codex, model: gpt-6-astra, reasoningEffort: high }\n        reviewer: { provider: codex, model: gpt-5.6-sol, reasoningEffort: high }\n        context_collector: { provider: codex, model: gpt-5.6-luna, reasoningEffort: high }\n        def_coding_worker: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: high }\n        sup_coding_worker: { provider: codex, model: gpt-5.6-sol, reasoningEffort: medium }\n        evidence_runner: { provider: codex, model: gpt-5.6-luna, reasoningEffort: medium }\n        full_tester: { provider: codex, model: gpt-5.6-luna, reasoningEffort: medium }\n`
+    : "";
+  await writeFile(join(home, "settings.yaml"), cross
+    ? `dsh-workflow-kit:\n  defaultConfig: handoff\n  codingStrategy: bootstrap\n  integrateStrategy: economy\n  configs:\n    handoff:\n      roles:\n${roles}`
+    : `dsh-workflow-kit:\n  defaultConfig: gpt-workflow\n  codingStrategy: bootstrap\n  integrateStrategy: economy\n  configs: {}\n`);
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch.replace(
     "    defaultProfile: gpt-workflow\n",
-    `    defaultProfile: gpt-workflow\n    workflowSkillDir: ${JSON.stringify(skillDir)}\n    implementationStandardDir: ${JSON.stringify(resolve(skillDir, "..", "audit-implementation-simplicity"))}\n`));
+    `    defaultProfile: ${cross ? "handoff" : "gpt-workflow"}\n    workflowSkillDir: ${JSON.stringify(skillDir)}\n    implementationStandardDir: ${JSON.stringify(resolve(skillDir, "..", "audit-implementation-simplicity"))}\n`)
+    // The DeepSeek package-inventory request extension enumerates the whole
+    // loader graph, which an isolated profile cannot fully resolve; the cross
+    // run scopes it out instead of failing the successor's first turn.
+    + (cross ? "- id: plugin-package-inventory-deepseek\n  disabled: true\n" : ""));
 }
 if (workflowContract) {
   const directory = join(home, "workflow-live-test");

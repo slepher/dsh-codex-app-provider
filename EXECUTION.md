@@ -462,3 +462,18 @@ workflow RPC 修复后的 build 与模拟 RPC 2/2 通过，但真实浏览器仍
 - **日常三种操作互不绑定**：① 改完源码 → `npm run publish`（在改动所在的 checkout 跑一次，或 `publish:watch` 连续发布）；② 需要 Host 时 → `npm run dev:host`（或直接 `dsh --profile workflow-kit-dev`）；③ 想回到"校验+双 watch+Host"的自动流程 → `npm run dev`。
 - **边界**：Host 侧的模块改动经 `hmr` row 热 reload；纯客户端改动由 `dsh-client-hmr` 轮询后浏览器自换；provider 的**执行核心**（backend/provider/app-server 等）与 profile 配置仍需重启 Host，这一点两个 watch 脚本都会明确打印。
 - **附带清理**：`evidence/package.json`（一份早先的 JSON 数组配置转储）会被 Node 当作该目录的包声明并报 `ERR_INVALID_PACKAGE_CONFIG`，导致放在 `evidence/` 下的任何脚本都无法解析依赖；已重命名为 `evidence/package-dump.json`，内容未改。
+
+### 真实模型验证改为零审批的 hermetic 分层（2026-09-14）
+
+- **问题**：DSH 会话的文件沙箱按整棵进程树生效。真实测试必须让 Codex CLI 写自己的 home（`~/.codex`：`auth.json`、SQLite 线程/日志、`sessions/` rollout、`.tmp`、`~/.local/bin` PATH alias）并让 npm 写缓存，所以每次越界都要一次性提权审批。此前那批 `PASS_*` 证据其实是 **Codex agent 会话**跑的（transcript 见 `~/.codex/sessions/2026/09/13/rollout-*.jsonl`，`cwd` 指向本仓库），不经过 DSH 沙箱，因而从不弹窗。
+- **分层**：
+  - **L0 单元/集成**（零审批，常跑）：provider `npm test`（74 项）、workflow-kit `node --test`（88 项）。
+  - **L1 全栈确定性**（零审批）：隔离 Host + 真插件，`Config.command` 可指向脚本化 fake app server，把"首轮必须 `thread/resume`、不得 `thread/start`、撤权、facts 导入"变成断言。
+  - **L2 真实模型 hermetic**（零审批）：`npm run test:live:handoff` / `npm run test:live:handoff:cross`。
+  - **L3 装机**（需一次审批，工作区外）：把新包集装进 `~/.dsh/profiles/workflow-kit-dev` 并重启 Host。
+- **L2 做法**：`scripts/live-hermetic.mjs` 在仓库内建 `.live/<时间戳>/`，把 `HOME`、`CODEX_HOME`、`TMPDIR`、`npm_config_cache|logs_dir|prefix`、`GIT_CONFIG_GLOBAL` 全部指进去；`CODEX_HOME` 只读拷贝 `config.toml`、`auth.json`、`skills`，cross 模式再拷 `.dsh/.credentials.yaml` 与 `llm-deepseek` 索引；跑完删除所有凭据副本，`.live/` 已加入 `.gitignore`。
+- **实测结果**：
+  - **Codex → Codex**：`PASS_WORKFLOW_SUCCESSOR_HANDOFF`，全程零审批。断言覆盖：新 DSH child、同 `threadId`、def 模型、源记录 `handedOff`、后继 `handoffFrom`、candidate 归后继、release 处置前后两个 child。
+  - **Codex → DeepSeek**：交接绑定与事实导入已通过（continuation prompt 含 22 条 `[source: codex …]` 事实），deepseek 后继 turn 也能完成。端到端仍受两点影响：隔离 profile 的 `plugin-package-inventory-deepseek` 扩展无法在裁剪后的 loader 图上 prepare（cross 运行已 scope out 并在 `test-live.mjs` 注释说明），以及后继 turn 偶发超过等待预算（`DSH_HANDOFF_SETTLE_MS` 可调，默认 420s）。
+- **L2 暴露并修复的产品缺口**：`provider.facts()` 原先只读活体 `ctx.sessions` 快照；子 child 结算后会离开注册表，跨 provider 导入因此为空。现改为活体优先、缺失时经 `ctx.sessionPersistence` 读持久日志（新增 `ProviderPersistenceSeam`），实测导入从 0 → 22 条。
+- **驱动硬化**：`test/workflow-handoff-driver.mjs` 在真实模型漏掉结果字段的 `- ` 前缀时，用同一后继 `continue` 纠正一次并记录 `resultCorrection`；扩展 prepare 失败时记录底层 `cause`（`extensionFailure`）；等待预算可配。

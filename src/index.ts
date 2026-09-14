@@ -7,7 +7,7 @@ import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
-import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
+import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderPersistenceSeam, type ProviderQuestionSeam } from "./provider.js";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
   CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
@@ -55,6 +55,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       approval: ctx.get("approval") as ProviderApprovalSeam | undefined,
       questions: ctx.get("userQuestions") as ProviderQuestionSeam | undefined,
       attachments: ctx.get("attachments") as ProviderAttachmentSeam | undefined,
+      persistence: () => ctx.get("sessionPersistence") as ProviderPersistenceSeam | undefined,
       logger: ctx.logger,
       providerCwd: resolve(config.providerCwd ?? process.cwd()),
     });
