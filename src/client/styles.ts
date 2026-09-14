@@ -158,13 +158,17 @@ const CSS = `
   opacity: 0.5;
   cursor: default;
 }
-.codex-child-lineage {
+.codex-child-open {
   border: none;
   background: none;
-  padding: 0;
+  padding: 0 6px;
   font: inherit;
-  color: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
   cursor: pointer;
+}
+.codex-child-open:hover {
+  color: var(--dsw-alias-label-primary);
 }
 .codex-child-error {
   font-size: 12px;

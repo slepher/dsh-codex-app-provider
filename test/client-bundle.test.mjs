@@ -65,7 +65,7 @@ function harness() {
   return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components, setPosition: value => { position = value; } } };
 }
 
-test("shipped client registers the child pane, the lineage entry and the execution node", async () => {
+test("shipped client registers the child pane, the additive child entry and the execution node", async () => {
   const module = loadBundle();
   const { ctx, state } = harness();
   module.apply(ctx);
@@ -75,23 +75,25 @@ test("shipped client registers the child pane, the lineage entry and the executi
   const rendered = state.components.get("codex-execution")({ node: { data: { kind: "commandExecution", status: "completed", text: "ok" } }, useTurnData: () => undefined, t: key => key });
   assert.equal(rendered.type, "details");
 
-  // The lineage seat is taken at a lower priority than the official occupant, so
-  // the plugin owns the child entry without adding a second additive seat.
-  const lineage = state.rows.find(row => row.name === "conversation.session.header.lineage");
-  assert.equal(lineage.priority, -1);
-  const lineageFace = lineage.inject();
-  const address = lineageFace.addressOf("child-1");
+  // The entry is additive: the single lineage seat keeps its official catalog
+  // occupant, and this plugin contributes a header action instead.
+  assert.equal(state.rows.some(row => row.name === "conversation.session.header.lineage"), false,
+    "the official subagent catalog keeps its seat");
+  const open = state.rows.find(row => row.id === "codex-child-open");
+  assert.equal(open.name, "conversation.session.header.actions");
+  const openFace = open.inject();
+  const address = openFace.addressOf("child-1");
   assert.deepEqual(address, { parentSessionId: "parent", childSessionId: "child-1", mode: "continuable" });
-  assert.equal(lineageFace.addressOf("unrelated"), undefined, "a non-child crumb keeps the core rendering");
+  assert.equal(openFace.addressOf("unrelated"), undefined, "an ordinary Session gets no child entry");
 
-  const lineageNode = state.components.get("conversation.session.header.lineage");
-  // A non-child crumb renders the plain title and never navigates.
-  const plain = lineageNode({ lineageSessionId: "unrelated", displayTitle: "Parent", openTitle: () => state.navigated.push("openTitle"), addressOf: lineageFace.addressOf, position: lineageFace.position, openSidebar: lineageFace.openSidebar, t: key => key });
-  assert.equal(plain.type, Symbol.for("react.fragment"), "a non-child crumb is a plain fragment with no navigation of its own");
-  // A child crumb opens the plugin pane while the sidebar position is configured.
-  const crumb = lineageNode({ lineageSessionId: "child-1", displayTitle: "Child", openTitle: () => state.navigated.push("openTitle"), addressOf: lineageFace.addressOf, position: lineageFace.position, openSidebar: lineageFace.openSidebar, t: key => key });
-  assert.equal(crumb.type, "button");
-  crumb.props.onClick();
+  const action = state.components.get("codex-child-open");
+  assert.equal(action({ sessionId: "unrelated", addressOf: openFace.addressOf, position: openFace.position,
+    openSidebar: openFace.openSidebar, openMain: openFace.openMain, t: key => key }), null,
+    "an ordinary Session renders nothing");
+  const button = action({ sessionId: "child-1", addressOf: openFace.addressOf, position: openFace.position,
+    openSidebar: openFace.openSidebar, openMain: openFace.openMain, t: key => key });
+  assert.equal(button.type, "button");
+  button.props.onClick();
   assert.equal(state.opened.length, 1);
   assert.equal(state.opened[0].address, "dsh-resource://codex-child/parent/child-1/continuable");
   assert.deepEqual(state.opened[0].options.params, address);
@@ -99,8 +101,8 @@ test("shipped client registers the child pane, the lineage entry and the executi
 
   // With the main-area position configured the same click uses the core entry.
   state.setPosition("main");
-  crumb.props.onClick();
-  assert.deepEqual(state.navigated, ["openTitle"]);
+  button.props.onClick();
+  assert.deepEqual(state.navigated, [address]);
   assert.equal(state.opened.length, 1, "no sidebar resource is opened for the main-area position");
   state.setPosition("sidebar");
 
@@ -126,7 +128,7 @@ test("shipped client registers the child pane, the lineage entry and the executi
 
 test("shipped client styles the child pane from the shared tokens", () => {
   const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
-  for (const frame of [/\.codex-child\s*\{/, /\.codex-child-log/, /\.codex-child-row/, /\.codex-child-composer/, /\.codex-child-lineage/]) {
+  for (const frame of [/\.codex-child\s*\{/, /\.codex-child-log/, /\.codex-child-row/, /\.codex-child-composer/, /\.codex-child-open/]) {
     assert.match(source, frame, `child pane style ${String(frame)} is missing`);
   }
   for (const token of [/var\(--dsw-alias-bg-module-platform\)/, /var\(--dsw-alias-label-primary\)/, /var\(--dsw-alias-border-l2\)/]) {

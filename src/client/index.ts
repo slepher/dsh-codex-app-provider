@@ -18,7 +18,7 @@ import { SidebarSetting, type SidebarSettingInjected } from "./SidebarSetting.js
 import { savePosition } from "./settings.js";
 import { openPosition } from "./settings.js";
 import { ChildConversation, type ChildConversationInjected } from "./ChildConversation.js";
-import { ChildLineage, type ChildLineageInjected } from "./ChildLineage.js";
+import { ChildAction, type ChildActionInjected } from "./ChildAction.js";
 import { createChildViews } from "./child-view.js";
 import { createCodexApprovalRpc } from "./approval-rpc.js";
 import type { ConnectionHandle } from "@deepseek-ai/dsh-client-connection/client";
@@ -63,17 +63,18 @@ export function apply(ctx: Context): void {
     scope.slots.inject("conversation.chat.node", () => scope.slots.register({
       name: "conversation.chat.node", key: "codex-execution", locale: SETTINGS_NAMESPACE,
     }, ExecutionNode));
-    // The official lineage occupant opens every child in the main area. This
-    // plugin takes that single seat at a lower priority so a Codex child can be
-    // routed to its dedicated pane while the main-area entry stays explicit.
-    scope.slots.inject("conversation.session.header.lineage", () => scope.slots.register({
-      name: "conversation.session.header.lineage", priority: -1, locale: SETTINGS_NAMESPACE,
-      inject: (): ChildLineageInjected => ({
+    // The plugin's own entry is additive. The lineage slot is a single seat
+    // whose official occupant is the whole subagent catalog, so taking it would
+    // delete official parent/child navigation rather than extend it.
+    scope.slots.inject("conversation.session.header.actions", () => scope.slots.register({
+      name: "conversation.session.header.actions", id: "codex-child-open", order: 20, locale: SETTINGS_NAMESPACE,
+      inject: (): ChildActionInjected => ({
         addressOf: sessionId => (scope.sessions as unknown as ChildSessionFace).subagentAddress(asSessionId(sessionId)),
         position: () => openPosition(settings.getSnapshot()),
         openSidebar: address => openPosition(settings.getSnapshot()) === "sidebar" && openChildTab(scope.sidebarRight, address),
+        openMain: address => (scope.sessions as unknown as ChildSessionFace).openSubagent(address),
       }),
-    }, ChildLineage));
+    }, ChildAction));
   });
   ctx.effect(() => ctx.locale.register(SETTINGS_NAMESPACE, { zh, en }), "Codex settings locales");
   ctx.inject(["sessions", "sidebarRight", "sidebarRightTabs", "remote", "remote.subagents", "connection"], sidebar => {
