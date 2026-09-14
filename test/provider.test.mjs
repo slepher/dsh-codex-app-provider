@@ -1224,6 +1224,27 @@ test("refuses an unapplied native model before turn/start", async t => {
   assert.equal(fixture.hub.servers.flatMap(server => server.calls).filter(call => call.method === "turn/start").length, 0);
 });
 
+test("readExecution reports the execution cwd, not the host workspace", async t => {
+  const fixture = setup("dsh-provider-execution-cwd-");
+  const lane = mkdtempSync(join(tmpdir(), "dsh-provider-execution-lane-"));
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); rmSync(lane, { recursive: true, force: true }); });
+  const execution = { developerInstructions: "Role A", boundary: { cwd: lane, writableRoots: [lane], network: "disabled" } };
+  fixture.hub.threadResult = { cwd: lane, sandbox: {
+    type: "workspaceWrite", writableRoots: [lane], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+  const session = { id: "child", header: { cwd: fixture.cwd } };
+  const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+  const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+  await liveTurn(adapter, fixture, "child", options("child", [user("u1", "task")], { execution }), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const record = await fixture.backend.readSession(OWNER, "codex:child");
+  assert.equal(record.cwd, fixture.cwd, "the DSH Session keeps its host workspace");
+  assert.equal(record.executionCwd, lane, "the execution cwd is persisted separately");
+  assert.equal((await adapter.readExecution("child")).cwd, lane,
+    "a consumer reconciles the assignment against the directory the thread runs in");
+});
+
 test("a declaring execution is verified against native facts while approval policy stays Codex's", async t => {
   for (const mismatch of ["roots", "cwd", "network", "tmp"]) {
     const fixture = setup(`dsh-provider-boundary-${mismatch}-`);

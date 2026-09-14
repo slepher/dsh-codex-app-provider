@@ -3,6 +3,12 @@ export interface NativeExecution {
   nativeSessionId: string;
   threadId?: string;
   turnId?: string;
+  /**
+   * The directory this thread actually runs in. A Session that declares a task
+   * boundary (a lane) runs there, so a consumer reconciles this value against
+   * the assignment's own workspace rather than against the host workspace that
+   * owns the DSH Session.
+   */
   cwd: string;
   /** Last natively confirmed model/effort; the creation snapshot is not projected. */
   model?: string;

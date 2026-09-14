@@ -401,7 +401,11 @@ export class CodexProviderAdapter extends LlmAdapter {
     const id = backendSessionId(nativeSessionId);
     const snapshot = await this.deps.backend.readSession(OWNER_ID, id);
     if (snapshot === undefined) return undefined;
-    const { threadId, turnId, cwd, model, reasoningEffort, pending, state } = snapshot;
+    const { threadId, turnId, model, reasoningEffort, pending, state } = snapshot;
+    // The execution cwd, not the DSH Session's host workspace: a lane worker's
+    // thread runs in its lane, and that is the directory a consumer reconciles
+    // the assignment against.
+    const cwd = snapshot.executionCwd ?? snapshot.cwd;
     const reports = snapshot.reports.map(({ threadId, turnId, status, result, error, protocolError, usage, createdAt }) =>
       ({ threadId, turnId, status, result, error, protocolError, ...(usage?.last === undefined ? {} : { usage: usage.last }), createdAt }));
     return { nativeSessionId, threadId, turnId, cwd, model, reasoningEffort, ...(pending === undefined ? {} : { pending }), state, reports };

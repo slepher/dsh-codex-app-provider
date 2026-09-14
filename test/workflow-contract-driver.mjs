@@ -21,11 +21,35 @@ export function apply(ctx) {
     const actions = [], executions = [];
     const report = { status: "RUNNING", parentSessionId: parent.id, repository: repo, actions, executions };
     const save = () => writeFile(process.env.DSH_NATIVE_CHILD_RESULT, JSON.stringify(report, null, 2));
-    const action = async args => {
+    const call = async args => {
       const result = await ctx.tools.execute({ name: "codex_workflow", arguments: args, callId: `contract-${actions.length}`, agent: parent, signal });
       actions.push({ args, result }); await save();
-      assert.equal(result.isError, false, JSON.stringify(result));
-      return JSON.parse(result.content[0].text);
+      return { ok: !result.isError, result, value: result.isError ? undefined : JSON.parse(result.content[0].text) };
+    };
+    const action = async args => {
+      const outcome = await call(args);
+      assert.equal(outcome.ok, true, JSON.stringify(outcome.result));
+      return outcome.value;
+    };
+    /**
+     * Record one task's result, allowing the single report correction the
+     * workflow itself prescribes.
+     *
+     * A real worker occasionally writes its report without the contract's exact
+     * execution-result fields; the Host is right to reject that. Ask the same
+     * worker once for a corrected report and record that it happened, so a
+     * formatting miss never masquerades as a delivery failure.
+     */
+    const recordResult = async (task, workerId) => {
+      const first = await call({ action: "record-result", task });
+      if (first.ok) return first.value;
+      const retry = await call({ action: "continue", task, text: "Your report did not match the frozen contract's execution-result fields. Write the corrected report to the contract's result path, then reply with exactly those lines, each starting with '- '." });
+      assert.equal(retry.ok, true, JSON.stringify(retry.result));
+      report.corrections = [...(report.corrections ?? []), { task, rejected: first.result?.error?.message ?? null }]; await save();
+      await settled(workerId);
+      const second = await call({ action: "record-result", task });
+      assert.equal(second.ok, true, JSON.stringify(second.result));
+      return second.value;
     };
     const settled = async id => {
       const deadline = Date.now() + 180_000;
@@ -55,7 +79,7 @@ export function apply(ctx) {
         await settled(attempt.workerId);
         summary = await action({ action: "status" });
         assert.equal(summary.tasks.find(value => value.task === task).state, "running", "Native completion is not workflow acceptance");
-        summary = await action({ action: "record-result", task });
+        summary = await recordResult(task, attempt.workerId);
         attempt = summary.tasks.find(value => value.task === task);
         assert.equal(attempt.state, "candidate");
         if (attempt.review) await settled(attempt.review.worker);
