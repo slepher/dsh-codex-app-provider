@@ -28,7 +28,8 @@
     "test:live:handoff": "node scripts/live-hermetic.mjs",
     "test:live:handoff:cross": "node scripts/live-hermetic.mjs --cross",
     "publish": "node scripts/publish.mjs",
-    "publish:watch": "node scripts/publish.mjs --watch"
+    "publish:watch": "node scripts/publish.mjs --watch",
+    "test:browser": "node scripts/browser-check.mjs"
   },
   "engines": {
     "node": ">=22.19.0"
