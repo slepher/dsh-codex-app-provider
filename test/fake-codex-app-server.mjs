@@ -59,6 +59,7 @@ function applied(params) {
     cwd: params.cwd,
     model: params.model ?? "luna",
     reasoningEffort: params.config?.model_reasoning_effort,
+    developerInstructions: params.developerInstructions,
     ...(params.approvalPolicy === undefined ? {} : { approvalPolicy: params.approvalPolicy }),
     sandbox: permissions !== undefined ? {
       type: "workspaceWrite",
@@ -81,12 +82,25 @@ function threadResult(threadId, state) {
   };
 }
 
+/**
+ * The text one thread answers with.
+ *
+ * A role-verification child asks for a marker in its own developer
+ * instructions, which a real model echoes. The scripted server echoes the same
+ * marker so a hermetic run can assert per-child output instead of one global
+ * string.
+ */
+function finalTextFor(threadId) {
+  const marker = /DSH_ROLE_[A-Z0-9]+/.exec(recall(threadId)?.developerInstructions ?? "");
+  return marker?.[0] ?? finalText;
+}
+
 function completeTurn(threadId, id) {
   notify("turn/started", { threadId, turn: { id, status: "inProgress" } });
   notify("item/completed", { threadId, turnId: id, item: {
     id: `item-${id}`, type: "commandExecution", command: "run-fake-command", status: "completed",
     exitCode: 0, cwd: recall(threadId)?.cwd, aggregatedOutput: `${commandOutput}\n` } });
-  notify("item/completed", { threadId, turnId: id, item: { type: "agentMessage", phase: "final_answer", text: finalText } });
+  notify("item/completed", { threadId, turnId: id, item: { type: "agentMessage", phase: "final_answer", text: finalTextFor(threadId) } });
   notify("turn/completed", { threadId, turn: { id, status: "completed" } });
 }
 const lines = createInterface({ input: process.stdin });

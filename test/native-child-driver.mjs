@@ -67,6 +67,9 @@ export function apply(ctx) {
           headers: headers.length,
           outputs,
           turns: events.filter(event => event.type === "turn/start").map(event => event.data.turn),
+          turnEnds: events.filter(event => event.type === "turn/end").map(event => event.data),
+          steps: events.filter(event => event.type === "step/start" || event.type === "step/end")
+            .map(event => `${event.type}:${event.data.turn}/${event.data.step}`),
           eventTypes: [...new Set(events.map(event => event.type))].sort(),
         };
         await writeFile(`${process.env.DSH_NATIVE_CHILD_RESULT}.observed`, JSON.stringify({ status: "CHILD_OBSERVED", children, requests, failures }, null, 2));

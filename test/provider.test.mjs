@@ -59,6 +59,20 @@ const assistant = (id, text, provider = "other", replayState) => ({ id, role: "a
 const toolCall = (id, callId, name, args) => ({ id, role: "assistant", content: [{ type: "tool-call", id: callId, name, arguments: args }], source: { kind: "model", provider: "other", model: "x" } });
 const toolResult = (id, callId, text) => ({ id, role: "user", content: [{ type: "tool-result", toolCallId: callId, content: [{ type: "text", text }] }], source: { kind: "tool", callId } });
 
+/**
+ * A DSH Session stand-in whose `append` is a real instance method.
+ *
+ * The private field makes a detached `append` throw exactly as the core's
+ * Session does, so the fact import cannot regress to calling an unbound method.
+ */
+class FakeAppendSession {
+  #log = [];
+  constructor(id, cwd) { this.id = id; this.header = { cwd }; }
+  append(type, data, intent) { this.#log.push({ type, data, intent }); return { type, data }; }
+  snapshotEvents() { return this.#log.map(entry => ({ type: entry.type, data: entry.data })); }
+  get appended() { return this.#log; }
+}
+
 function setup(prefix) {
   const stateDir = mkdtempSync(join(tmpdir(), prefix));
   const cwd = mkdtempSync(join(tmpdir(), `${prefix}cwd-`));
@@ -961,10 +975,8 @@ test("an instructions-only execution gains no permissions, sandbox or approval p
 test("executed native facts are persisted as plugin-sourced DSH messages with stable identity", async t => {
   const fixture = setup("dsh-provider-facts-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
-  const appended = [];
-  const session = { id: "main", header: { cwd: fixture.cwd },
-    append: (type, data, intent) => { appended.push({ type, data, intent }); return { type, data }; },
-    snapshotEvents: () => appended.map(entry => ({ type: entry.type, data: entry.data })) };
+  const session = new FakeAppendSession("main", fixture.cwd);
+  const appended = session.appended;
   const adapter = adapterFor(fixture, { sessions: new Map([["main", session]]) });
 
   await liveTurn(adapter, fixture, "main", options("main", [user("u1", "run it")]), async server => {
@@ -1010,10 +1022,8 @@ test("executed native facts are persisted as plugin-sourced DSH messages with st
 
 test("a cold recovery imports the facts a previous process recorded but never appended", async t => {
   const fixture = setup("dsh-provider-facts-recovery-");
-  const appended = [];
-  const session = { id: "main", header: { cwd: fixture.cwd },
-    append: (type, data, intent) => { appended.push({ type, data, intent }); return { type, data }; },
-    snapshotEvents: () => appended.map(entry => ({ type: entry.type, data: entry.data })) };
+  const session = new FakeAppendSession("main", fixture.cwd);
+  const appended = session.appended;
   // First process records the native fact but has no DSH Session face to append to.
   const blind = adapterFor(fixture, { sessions: new Map([["main", { id: "main", header: { cwd: fixture.cwd } }]]) });
   await liveTurn(blind, fixture, "main", options("main", [user("u1", "run it")]), async server => {
@@ -1136,10 +1146,8 @@ test("a cold recovery without the live Agent continues from the recorded executi
 test("projects recorded native items from the provider store and appends them as DSH facts", async t => {
   const fixture = setup("dsh-provider-facts-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
-  const appended = [];
-  const session = { id: "s1", header: { cwd: fixture.cwd },
-    append: (...args) => { appended.push(args); return { type: args[0], data: args[1] }; },
-    snapshotEvents: () => appended.map(args => ({ type: args[0], data: args[1] })) };
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  const appended = session.appended;
   const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
   await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "record facts")]), async server => {
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { id: "i1", type: "commandExecution", command: "pnpm test", exitCode: 0, aggregatedOutput: "3 passed" } });
@@ -1157,7 +1165,7 @@ test("projects recorded native items from the provider store and appends them as
   // the visible, replayable representation.
   assert.deepEqual(await adapter.facts("s1"), expected, "only executed facts cross, each with its durable item identity");
   assert.equal(appended.length, 1, "the executed item is appended once, the reasoning item never");
-  const [type, message, intent] = appended[0];
+  const { type, data: message, intent } = appended[0];
   assert.equal(type, "user/message");
   assert.deepEqual(intent, { surfaceOp: "append" });
   assert.deepEqual(message.content, [{ type: "text", text: expected.join("\n") }]);

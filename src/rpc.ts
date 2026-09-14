@@ -27,6 +27,8 @@ export class AppServer extends EventEmitter {
     timer: NodeJS.Timeout;
   }>();
   private closed = false;
+  /** Recent App Server stderr lines, kept only to explain an unexpected exit. */
+  private readonly diagnostics: string[] = [];
 
   constructor(readonly options: { command?: string; args?: string[]; timeoutMs?: number } = {}) {
     super();
@@ -63,12 +65,20 @@ export class AppServer extends EventEmitter {
         this.disconnect(new UncertainError(`Invalid app-server stream: ${String(error)}`));
       }
     });
-    this.child.stderr.on("data", chunk => { this.emit("diagnostic", String(chunk)); });
+    this.child.stderr.on("data", chunk => {
+      const text = String(chunk);
+      // The App Server explains a refusal on stderr and then exits; keep the tail
+      // so the resulting uncertain-execution error names the real reason.
+      this.diagnostics.push(...text.split("\n").filter(line => line.trim() !== ""));
+      if (this.diagnostics.length > 20) this.diagnostics.splice(0, this.diagnostics.length - 20);
+      this.emit("diagnostic", text);
+    });
     this.child.on("error", error => { this.disconnect(new UncertainError(error.message)); });
     this.child.stdin.on("error", error => { this.disconnect(new UncertainError(error.message)); });
     this.child.on("exit", (code, signal) => {
       lines.close();
-      this.disconnect(new UncertainError(`App server exited (${code ?? signal}); execution state unknown`));
+      const reason = this.diagnostics.slice(-4).join(" | ");
+      this.disconnect(new UncertainError(`App server exited (${code ?? signal})${reason === "" ? "" : `: ${reason}`}; execution state unknown`));
     });
     await this.request("initialize", {
       clientInfo: { name: "dsh-codex-app-provider", version: "0.1.0" },

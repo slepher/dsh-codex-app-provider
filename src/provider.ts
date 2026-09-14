@@ -365,9 +365,7 @@ export class CodexProviderAdapter extends LlmAdapter {
    */
   private async importExecutionFacts(sessionId: string): Promise<void> {
     const session = this.deps.sessions.get(sessionId);
-    if (session === undefined) return;
-    const append = session.append;
-    if (append === undefined) return;
+    if (session === undefined || session.append === undefined) return;
     try {
       const events = await this.deps.backend.readEvents(OWNER_ID, backendSessionId(sessionId));
       const pending = factMessages(projectExecutionFacts(reduceExecutionEvents(events)));
@@ -375,7 +373,9 @@ export class CodexProviderAdapter extends LlmAdapter {
       const imported = new Set(importedFactIds(session.snapshotEvents?.() as readonly { type: string; data: unknown }[] | undefined));
       for (const fact of pending) {
         if (imported.has(fact.id)) continue;
-        append("user/message", factMessage(fact), { surfaceOp: "append" });
+        // Called on the Session itself: `append` is an instance method that owns
+        // the log, so extracting it would break on the real core.
+        session.append("user/message", factMessage(fact), { surfaceOp: "append" });
         imported.add(fact.id);
       }
       this.noteFactChannel();
