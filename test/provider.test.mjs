@@ -26,7 +26,13 @@ class FakeServer extends EventEmitter {
     }
     if (method === "thread/resume") {
       await new Promise(resolve => setImmediate(resolve));
-      return { thread: { id: params.threadId, status: { type: "idle" }, turns: [] } };
+      this.threadId = params.threadId;
+      // A managed record resumes with the same applied configuration contract as
+      // thread/start, so a cold recovery is verified rather than assumed.
+      return { thread: { id: params.threadId, status: { type: "idle" }, turns: [], cwd: params.cwd }, model: params.model,
+        reasoningEffort: params.config?.model_reasoning_effort, approvalPolicy: "never",
+        sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true },
+        ...this.hub.threadResult };
     }
     if (method === "turn/start") {
       const id = `turn-${++this.hub.turn}`;
@@ -105,7 +111,13 @@ async function liveTurn(adapter, fixture, sessionId, opts, emit) {
   const backendId = `codex:${sessionId}`;
   await waitFor(async () => (await fixture.backend.readSession(OWNER, backendId))?.threadId !== undefined, "thread identity");
   const record = await fixture.backend.readSession(OWNER, backendId);
-  const server = fixture.hub.servers.find(item => item.threadId === record.threadId);
+  // A cold recovery already knows the thread identity, so the transport that
+  // resumes it may not exist yet when this helper looks for it.
+  let server;
+  await waitFor(() => {
+    server = fixture.hub.servers.find(item => item.threadId === record.threadId);
+    return server !== undefined;
+  }, "session transport");
   await waitFor(async () => {
     const current = await fixture.backend.readSession(OWNER, backendId);
     return server.turnId !== undefined && current?.turnId === server.turnId;
@@ -909,30 +921,129 @@ test("consumes explicit native execution inputs and rejects changed identity/con
   assert.equal(server.calls.filter(call => call.method === "turn/start").length, 1);
 });
 
-test("projects recorded native items into sourced history for another adapter", async t => {
+test("a managed child's first creation reads the live Agent execution when the stock request carries none", async t => {
+  const fixture = setup("dsh-provider-agent-execution-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const execution = { developerInstructions: "Role A instructions", boundary: { cwd: fixture.cwd, writableRoots: [fixture.cwd], network: "disabled" } };
+  fixture.hub.threadResult = { cwd: fixture.cwd, approvalPolicy: "never", sandbox: {
+    type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+  const session = { id: "child", header: { cwd: fixture.cwd } };
+  const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+  const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+  // Stock core never fills `GenerateOptions.execution`; the Agent snapshot is the source.
+  await liveTurn(adapter, fixture, "child", options("child", [user("u1", "task")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const start = sessionServer(fixture.hub).calls.find(call => call.method === "thread/start").params;
+  assert.equal(start.developerInstructions, execution.developerInstructions, "role instructions reach the native thread");
+  assert.equal(start.config.permissions["dsh-task"].filesystem[fixture.cwd], "write");
+  assert.deepEqual((await fixture.backend.readSession(OWNER, "codex:child")).options.boundary, execution.boundary);
+});
+
+test("a managed child cannot request a route its live Agent does not authorize when only the Agent declares execution", async t => {
+  const fixture = setup("dsh-provider-agent-route-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  fixture.hub.threadResult = { cwd: fixture.cwd, approvalPolicy: "never", sandbox: {
+    type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+  const execution = { developerInstructions: "Role A", boundary: { cwd: fixture.cwd, writableRoots: [fixture.cwd], network: "disabled" } };
+  const session = { id: "child", header: { cwd: fixture.cwd } };
+  const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+  const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+  // Stock core fills no `GenerateOptions.execution`, so the Agent snapshot is the
+  // only source of the inputs; the route authorization must still be enforced.
+  await assert.rejects(collect(adapter.stream(options("child", [user("u1", "must not send")], { model: "sol" }))), /effective configuration/);
+  assert.equal(fixture.hub.servers.flatMap(server => server.calls ?? []).filter(call => call.method === "thread/start").length, 0,
+    "an unauthorized route never creates a thread");
+});
+
+test("a lane-scoped workflow boundary is converted to the child Session workspace", async t => {
+  const fixture = setup("dsh-provider-lane-");
+  const lane = mkdtempSync(join(tmpdir(), "dsh-provider-lane-path-"));
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); rmSync(lane, { recursive: true, force: true }); });
+  const execution = { developerInstructions: "Role A", boundary: { cwd: lane, writableRoots: [lane], network: "loopback" } };
+  fixture.hub.threadResult = { cwd: fixture.cwd, approvalPolicy: "never", sandbox: {
+    type: "workspaceWrite", writableRoots: [], networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+  const session = { id: "child", header: { cwd: fixture.cwd } };
+  const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+  const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+  await liveTurn(adapter, fixture, "child", options("child", [user("u1", "task")], { execution }), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const start = sessionServer(fixture.hub).calls.find(call => call.method === "thread/start").params;
+  const filesystem = start.config.permissions["dsh-task"].filesystem;
+  assert.equal(start.cwd, fixture.cwd, "the native thread runs in the Session workspace, not the lane");
+  assert.equal(filesystem[fixture.cwd], "write", "the Session workspace is writable");
+  assert.equal(filesystem[lane], undefined, "the lane path never becomes a sandbox root");
+  assert.equal(start.config.permissions["dsh-task"].network.enabled, true, "the requested network policy is preserved");
+  assert.deepEqual((await fixture.backend.readSession(OWNER, "codex:child")).options.boundary,
+    { cwd: fixture.cwd, writableRoots: [fixture.cwd], network: "loopback" });
+  // Only the workspace scope is rewritten: an explicit network change still conflicts.
+  const networkChanged = { ...execution, boundary: { ...execution.boundary, network: "disabled" } };
+  agent.options.execution = networkChanged;
+  await assert.rejects(collect(adapter.stream(options("child", [user("u2", "next")]))), /instructions or boundary changed/);
+});
+
+test("a cold recovery without the live Agent continues from the recorded execution baseline", async t => {
+  const fixture = setup("dsh-provider-recovery-");
+  const execution = { developerInstructions: "Role A", boundary: { cwd: fixture.cwd, writableRoots: [fixture.cwd], network: "disabled" } };
+  fixture.hub.threadResult = { cwd: fixture.cwd, approvalPolicy: "never", sandbox: {
+    type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+  const session = { id: "child", header: { cwd: fixture.cwd } };
+  const first = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", { session, options: { model: "luna", reasoningEffort: "high", execution } }]]) });
+  await liveTurn(first, fixture, "child", options("child", [user("u1", "task")], { execution }), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:child")).threadId;
+  await fixture.backend.close();
+  fixture.hub.servers.length = 0;
+  const restarted = new CodexSessionBackend(fixture.stateDir, () => new FakeServer(fixture.hub));
+  t.after(async () => { await restarted.close(); cleanup(fixture); });
+  const recoveryFixture = { ...fixture, backend: restarted };
+  // No live Agent and no request execution: the record alone must carry the baseline.
+  const recovered = adapterFor(recoveryFixture, { sessions: new Map([["child", session]]) });
+  await liveTurn(recovered, recoveryFixture, "child", options("child", [user("u2", "again")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "again" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const resumed = fixture.hub.servers.flatMap(server => server.calls).filter(call => call.method === "thread/resume");
+  assert.equal(resumed.length, 1, "recovery resumes the recorded thread");
+  assert.equal(resumed[0].params.threadId, threadId, "the thread identity is unchanged");
+  assert.equal(resumed[0].params.developerInstructions, "Role A", "the recorded instructions are restored");
+  assert.equal(resumed[0].params.config.permissions["dsh-task"].filesystem[fixture.cwd], "write");
+});
+
+test("projects recorded native items from the provider store and never appends execution facts to the session log", async t => {
   const fixture = setup("dsh-provider-facts-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
-  const events = [
-    { type: "codex/execution", data: { threadId: "thread-1", turnId: "turn-1", itemId: "i1", backendSequence: 1,
-      method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "i1", type: "commandExecution", command: "pnpm test", exitCode: 0, aggregatedOutput: "3 passed" } } } },
-    { type: "codex/execution", data: { threadId: "thread-1", turnId: "turn-1", itemId: "i2", backendSequence: 2,
-      method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "i2", type: "reasoning", summary: ["internal"] } } } },
-    { type: "user/message", data: { id: "u1" } },
-  ];
-  const sessions = new Map([["s1", { header: { cwd: fixture.cwd }, snapshotEvents: () => events }]]);
-  const adapter = adapterFor(fixture, { sessions });
+  const appended = [];
+  const session = { id: "s1", header: { cwd: fixture.cwd }, append: (...args) => appended.push(args), snapshotEvents: () => [] };
+  const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "record facts")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { id: "i1", type: "commandExecution", command: "pnpm test", exitCode: 0, aggregatedOutput: "3 passed" } });
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { id: "i2", type: "reasoning", summary: ["internal"] } });
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  assert.deepEqual(appended, [], "execution facts are never written to the DSH session log on stock core");
+  const record = await fixture.backend.readSession(OWNER, "codex:s1");
   assert.deepEqual(await adapter.facts("s1"), [
-    "[source: codex thread=thread-1 turn=turn-1 item=i1] command: pnpm test (exit 0)",
-    "[source: codex thread=thread-1 turn=turn-1 item=i1] 3 passed",
+    `[source: codex thread=${record.threadId} turn=${record.turnId} item=i1] command: pnpm test (exit 0)`,
+    `[source: codex thread=${record.threadId} turn=${record.turnId} item=i1] 3 passed`,
   ], "only executed facts cross, each with its durable item identity");
-  assert.deepEqual(await adapter.facts("unknown-session"), [], "a session with no recorded facts projects nothing");
+  await assert.rejects(adapter.facts("unknown-session"), /Session not found/, "an unknown Session is an error, never empty success");
   await assert.rejects(adapter.facts(""), /identity is required/);
 });
 
 test("refuses an unapplied native model before turn/start", async t => {
   const fixture = setup("dsh-provider-model-mismatch-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
-  fixture.hub.threadResult = { model: "wrong" };
+  // Every managed execution now applies an effective boundary, so a model
+  // mismatch is only reachable once that boundary has been confirmed.
+  fixture.hub.threadResult = { model: "wrong", cwd: fixture.cwd, approvalPolicy: "never",
+    sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
   const execution = { developerInstructions: "Role A" };
   const session = { id: "child", header: { cwd: fixture.cwd } };
   const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };

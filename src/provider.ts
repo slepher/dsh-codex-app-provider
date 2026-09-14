@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import { createExecutionEventWriter, projectExecutionFacts, type CodexExecutionEvent } from "./execution-events.js";
+import { projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
 import type { Session } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { NativeExecution } from "./execution.js";
 import {
   LlmAdapter,
   LlmError,
-  executionOptionsEqual,
   ReasoningEffortId,
   type ContentBlock,
   type FinishReason,
@@ -40,6 +39,12 @@ import type {
   UserInputRequest,
 } from "./browser-types.js";
 import { isCodexVisible, isInjectedContext } from "./context.js";
+import {
+  executionInputsEqual,
+  readExecutionInputs,
+  repositoryWritableExecution,
+  type ProviderExecutionInputs,
+} from "./execution-inputs.js";
 
 export const CODEX_PROVIDER = "codex";
 /** Owner identity of every native Session this provider records. */
@@ -115,27 +120,10 @@ export interface ProviderQuestionSeam {
   }): Promise<{ answers: readonly ProviderQuestionAnswer[] }>;
 }
 
-/**
- * Optional durable session-log seam (`ctx.sessionPersistence`). Only the facts
- * projection reads it, and only for a session whose live snapshot no longer
- * carries its recorded execution events.
- */
-export interface ProviderPersistenceSeam {
-  open(sessionId: string, mode: "read"): Promise<{
-    read(): Promise<{ events: readonly { type: string; data: unknown }[] }>;
-    close(): Promise<void>;
-  }>;
-}
-
 export interface CodexProviderDeps {
   backend: CodexBackend;
   sessions: { get(id: string): ProviderSessionFace | undefined };
   agents: { get(id: string): Agent | undefined };
-  /**
-   * Optional durable session-log seam (`ctx.sessionPersistence`); read only when
-   * a settled child's live snapshot no longer carries its execution events.
-   */
-  persistence?: (() => ProviderPersistenceSeam | undefined) | undefined;
   /** Optional DSH user-approval seam (`ctx.approval`); absent means fail closed. */
   approval?: ProviderApprovalSeam | undefined;
   /** Optional DSH structured-question seam (`ctx.userQuestions`); absent means empty answers. */
@@ -158,6 +146,7 @@ export class CodexProviderAdapter extends LlmAdapter {
   private readonly contextWindows = new Map<string, number>();
   private readonly active = new Set<AbortController>();
   private closed = false;
+  private retiredFactChannelNoted = false;
   private catalogCache: { at: number; value: ModelSettings } | undefined;
   private catalogFlight: Promise<ModelSettings> | undefined;
 
@@ -333,44 +322,33 @@ export class CodexProviderAdapter extends LlmAdapter {
   /**
    * Project the recorded native transcript into sourced history lines.
    *
-   * Facts come from the DSH session's own `codex/execution` log, so the
-   * projection is durable and needs no native resume. The live snapshot is
-   * preferred while the child is resident; a settled child leaves the registry
-   * and its ignorable execution events need not survive the live snapshot, so
-   * the durable session log is read instead. Model-authored reasoning stays out;
-   * long output is shortened and points at its durable item.
+   * Facts come from the provider's own recorded backend events, not from the DSH
+   * session log: stock core rejects an unknown session event on read, so the
+   * retired `codex/execution` channel is never written there. The provider store
+   * is durable across restarts, so the projection needs no native resume. Model-
+   * authored reasoning stays out; long output is shortened and points at its
+   * durable item.
    * @param nativeSessionId - DSH Session id whose native transcript to project.
    * @returns the sourced lines, oldest first.
+   * @throws when the Session has no recorded execution in the provider store.
    */
   async facts(nativeSessionId: string): Promise<readonly string[]> {
     if (!nativeSessionId) throw new Error("Native Session identity is required");
-    const session = this.deps.sessions.get(nativeSessionId);
-    const live = (session?.snapshotEvents?.() ?? []).flatMap(event =>
-      event.type === "codex/execution" ? [event.data as CodexExecutionEvent] : []);
-    const recorded = live.length > 0 ? live : await this.durableExecutionEvents(nativeSessionId);
-    return projectExecutionFacts(recorded).map(line => line.text);
+    const events = await this.deps.backend.readEvents(OWNER_ID, backendSessionId(nativeSessionId));
+    return projectExecutionFacts(reduceExecutionEvents(events)).map(line => line.text);
   }
 
-  /** Read one session's recorded execution events from its durable log. */
-  private async durableExecutionEvents(nativeSessionId: string): Promise<readonly CodexExecutionEvent[]> {
-    const persistence = this.deps.persistence?.();
-    if (persistence === undefined) return [];
-    let handle;
-    try {
-      handle = await persistence.open(nativeSessionId, "read");
-    } catch (error) {
-      this.deps.logger.warn(`Codex execution facts could not open the durable session log: ${String(error)}`);
-      return [];
-    }
-    try {
-      const { events } = await handle.read();
-      return events.flatMap(event => event.type === "codex/execution" ? [event.data as CodexExecutionEvent] : []);
-    } catch (error) {
-      this.deps.logger.warn(`Codex execution facts could not be projected from the durable log: ${String(error)}`);
-      return [];
-    } finally {
-      await handle.close().catch(() => {});
-    }
+  /**
+   * Announce once that execution facts stay out of the DSH session log.
+   *
+   * The degradation is deliberate: stock core rejects an unknown session event
+   * when the session is read, so the provider keeps the facts in its own store
+   * and the session log stays readable.
+   */
+  private noteRetiredFactChannel(): void {
+    if (this.retiredFactChannelNoted) return;
+    this.retiredFactChannelNoted = true;
+    this.deps.logger.warn("Codex execution facts are not written to the DSH session log on this core; they remain readable from the provider store");
   }
 
   async readExecution(nativeSessionId: string): Promise<NativeExecution | undefined> {
@@ -434,6 +412,54 @@ export class CodexProviderAdapter extends LlmAdapter {
     return true;
   }
 
+  /**
+   * Resolve one request's effective execution inputs.
+   *
+   * Stock core does not fill `GenerateOptions.execution`, so the request is
+   * preferred when it carries inputs but the live Agent's creation snapshot is
+   * the fallback that keeps a managed child's role instructions and boundary.
+   * Both sources are converted to the Session workspace before comparison, and
+   * an explicit request must still be authorized by the live Agent's route: a
+   * managed child may switch model/effort between turns only through the core's
+   * guarded configuration update, which is what keeps them equal.
+   * @param options - the assembled request.
+   * @param agent - the live Agent for this Session, when one is registered.
+   * @param cwd - the Session workspace the boundary is pinned to.
+   * @returns the effective inputs, or undefined for an ordinary Codex Session.
+   */
+  private requestedExecution(
+    options: GenerateOptions,
+    agent: Agent | undefined,
+    cwd: string,
+  ): ProviderExecutionInputs | undefined {
+    const live = agent !== undefined && String(agent.session.id) === options.sessionId ? agent : undefined;
+    let fromRequest: ProviderExecutionInputs | undefined;
+    let fromAgent: ProviderExecutionInputs | undefined;
+    try {
+      fromRequest = repositoryWritableExecution(readExecutionInputs(options), cwd);
+      fromAgent = repositoryWritableExecution(readExecutionInputs(live?.options), cwd);
+    } catch (error) {
+      throw new LlmError(error instanceof Error ? error.message : String(error), "EXECUTION_MISMATCH");
+    }
+    // A managed child is any request whose authorized inputs came from the core
+    // request or from the live Agent's creation snapshot. Stock core fills
+    // neither into the other, so the route authorization below must key off the
+    // resolved inputs rather than off `options.execution` alone.
+    if (fromRequest !== undefined || fromAgent !== undefined) {
+      if (live === undefined) {
+        throw new LlmError("Native execution inputs require the live Agent creation snapshot", "EXECUTION_MISMATCH");
+      }
+      if (fromRequest !== undefined && !executionInputsEqual(fromRequest, fromAgent)) {
+        throw new LlmError("Native execution inputs must match the live Agent creation snapshot", "EXECUTION_MISMATCH");
+      }
+      if (live.options.model !== options.model
+        || (live.options.reasoningEffort !== undefined && live.options.reasoningEffort !== options.reasoningEffort)) {
+        throw new LlmError("Native execution inputs must match the live Agent effective configuration", "EXECUTION_MISMATCH");
+      }
+    }
+    return fromRequest ?? fromAgent;
+  }
+
   private async *streamMain(options: GenerateOptions, sessionId: string, signal: AbortSignal): AsyncIterable<StreamChunk> {
     if (signal.aborted) throw new LlmError("Codex turn aborted before start", "ABORTED");
     const cwd = this.sessionCwd(sessionId);
@@ -443,32 +469,16 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (record !== undefined && record.cwd !== cwd) {
       throw new LlmError("This Session's workspace changed; start a new DSH Session for the new workspace", "WORKSPACE_CHANGED");
     }
-    const execution = options.execution;
-    if (execution !== undefined) {
-      const agent = this.deps.agents.get(sessionId);
-      if (agent === undefined || String(agent.session.id) !== sessionId
-        || !executionOptionsEqual(agent.options.execution, execution)) {
-        throw new LlmError("Native execution inputs must match the live Agent creation snapshot", "EXECUTION_MISMATCH");
-      }
-      // The live Agent's effective route authorizes the request. A managed
-      // child may switch model/effort between turns only through the core's
-      // guarded configuration update, which is what keeps `agent.options` and
-      // this request equal; the App Server then confirms the applied settings
-      // asynchronously through `thread/settings/updated`.
-      if (agent.options.model !== options.model
-        || (agent.options.reasoningEffort !== undefined && agent.options.reasoningEffort !== options.reasoningEffort)) {
-        throw new LlmError("Native execution inputs must match the live Agent effective configuration", "EXECUTION_MISMATCH");
-      }
-      if (execution.boundary !== undefined && execution.boundary.cwd !== cwd) {
-        throw new LlmError("Native execution workspace must match the DSH Session", "WORKSPACE_CHANGED");
-      }
+    const execution = this.requestedExecution(options, this.deps.agents.get(sessionId), cwd);
+    const recorded = recordedExecution(record);
+    if (recorded !== undefined && execution !== undefined && !executionInputsEqual(recorded, execution)) {
+      throw new LlmError("Native execution instructions or boundary changed; create a new child", "EXECUTION_MISMATCH");
     }
-    if (record !== undefined && !executionOptionsEqual(
-      {
-        ...(record.options?.developerInstructions === undefined ? {} : { developerInstructions: record.options?.developerInstructions }),
-        ...(record.options?.boundary === undefined ? {} : { boundary: record.options?.boundary }),
-      }, execution ?? {},
-    )) throw new LlmError("Native execution instructions or boundary changed; create a new child", "EXECUTION_MISMATCH");
+    // A recorded effective execution is the thread's configuration baseline: a
+    // cold recovery that carries no explicit inputs continues it instead of
+    // demanding that a missing live Agent snapshot still declares them. A first
+    // creation with neither keeps the ordinary, unscoped Codex path.
+    const effective = execution ?? recorded;
     // A record that already owns a thread and never ran a turn is a prepared
     // binding: the successor a controlled handover created, a rebuilt thread, or
     // an imported one. Its first request must resume that exact thread.
@@ -477,7 +487,7 @@ export class CodexProviderAdapter extends LlmAdapter {
     const plan = await planInput(options.messages, record?.threadId, this.cursors.get(sessionId), this.imageResolver);
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
-      record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...execution });
+      record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective });
     } else if (record.state === "unknown") {
       throw new LlmError("Codex execution ownership unknown; confirm the prior process stopped before resume", "EXECUTION_UNKNOWN");
     } else if (record.state === "saved") {
@@ -502,20 +512,18 @@ export class CodexProviderAdapter extends LlmAdapter {
       throw providerError(error);
     }
     this.cursors.set(sessionId, plan.key);
-    const recordEvent = createExecutionEventWriter(this.deps.sessions.get(sessionId), turn.threadId, turn.turnId);
+    this.noteRetiredFactChannel();
     let text = "", completedText: string | undefined, error: string | undefined;
     let status: TurnSnapshot["state"] | undefined, blockStarted = false;
     try {
       if (turn.state === "unknown") throw new LlmError("Codex execution state unknown; do not redispatch", "EXECUTION_UNKNOWN");
       if (TERMINAL_STATES.has(turn.state)) {
-        for (const entry of await backend.readEvents(owner, backendId)) recordEvent(entry.event, entry.sequence);
         ({ output: text, error } = await replayTurn(backend, owner, backendId, turn.turnId));
         completedText = text;
         status = turn.state;
       } else {
-        for await (const { event, sequence } of channel) {
+        for await (const { event } of channel) {
           if (signal?.aborted) break;
-          recordEvent(event, sequence);
           if (event.type === "session.uncertain") throw new LlmError(event.error, "EXECUTION_UNKNOWN");
           if (event.type === "approval.requested") {
             void this.bridgeApproval(owner, sessionId, event.request, signal);
@@ -933,6 +941,23 @@ function replayThread(value: unknown): string | undefined {
 
 function replayState(turn: TurnSnapshot, key: string): ReplayEnvelope {
   return { response: { threadId: turn.threadId, turnId: turn.turnId, input: key } };
+}
+
+/**
+ * Read the effective execution inputs a Session recorded at creation.
+ *
+ * Only the two enforced fields cross; a record with neither is an ordinary,
+ * unscoped Codex Session rather than an empty execution.
+ * @param record - the provider's recorded Session, when one exists.
+ * @returns the recorded inputs, or undefined when the record declares none.
+ */
+function recordedExecution(record: SessionSnapshot | undefined): ProviderExecutionInputs | undefined {
+  const options = record?.options;
+  if (options?.developerInstructions === undefined && options?.boundary === undefined) return undefined;
+  return {
+    ...(options.developerInstructions === undefined ? {} : { developerInstructions: options.developerInstructions }),
+    ...(options.boundary === undefined ? {} : { boundary: options.boundary }),
+  };
 }
 
 function usageContextWindow(usage: unknown): number | undefined {

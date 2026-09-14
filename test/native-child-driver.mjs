@@ -5,7 +5,7 @@ import { ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 
 export const name = "codex-app-native-child-test";
-export const inject = ["agents", "subagents", "sessionPersistence", "llm"];
+export const inject = ["agents", "subagents", "sessionPersistence", "codexExecution", "llm"];
 
 /** Test-only profile plugin: exercise the real spawn/descriptor/cold-resume chain. */
 export function apply(ctx) {
@@ -70,15 +70,14 @@ export function apply(ctx) {
         assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"]);
         child.outputs = outputs;
         if (externalEvents) {
-          const facts = events.filter(event => event.type === "codex/execution");
-          assert.ok(facts.length >= 2, "Native tool facts were logged");
-          assert.ok(facts.every(event => event.ignorable === true));
-          const completed = facts.filter(event => event.data.method === "item/completed" && event.data.params.item.type === "commandExecution");
-          assert.ok(completed.filter(event => event.data.params.item.aggregatedOutput?.includes(`DSH_TOOL_${child.role}`)).length >= (child.role === "A" ? 2 : 1));
-          const identities = completed.map(event => JSON.stringify([event.data.threadId, event.data.turnId, event.data.itemId]));
-          assert.equal(new Set(identities).size, completed.length, "Each native item completes once in the transcript");
+          // Execution facts live in the provider store, not the DSH session log:
+          // stock core rejects an unknown `codex/execution` session event on read.
+          const facts = await ctx.codexExecution.facts(child.id);
+          assert.ok(facts.length >= 2, "Native tool facts were projected from the provider store");
+          assert.ok(facts.every(line => line.startsWith("[source: codex thread=")), "every projected line carries its durable item identity");
+          assert.ok(facts.filter(line => line.includes(`DSH_TOOL_${child.role}`)).length >= (child.role === "A" ? 2 : 1));
           assert.equal(events.filter(event => event.type === "tool/call").length, 0, "DSH did not execute Codex tools again");
-          child.externalExecutionEvents = facts;
+          child.externalExecutionFacts = facts;
         }
       } finally { await handle.close(); }
     }

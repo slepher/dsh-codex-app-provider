@@ -29,6 +29,11 @@ class SwitchServer extends EventEmitter {
         thread: { id: params.threadId ?? this.thread, status: { type: "idle" }, turns: [] },
         model: params.model ?? "luna",
         reasoningEffort: params.config?.model_reasoning_effort,
+        // A managed execution now always carries an effective boundary, so the
+        // App Server must confirm it before the turn is admitted.
+        cwd: params.cwd,
+        approvalPolicy: "never",
+        sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true },
         ...this.resumeResult,
       };
     }

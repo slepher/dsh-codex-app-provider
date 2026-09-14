@@ -14,6 +14,10 @@ const workflowChild = workflowContract || workflowHandoff || process.argv.includ
 const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : workflowHandoff ? process.env.DSH_HANDOFF_CROSS === "1" ? "workflow-handoff-cross-live" : "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
 const nativeChild = externalEvents || workflowChild || process.argv.includes("--native-child");
 const installedOnly = browser || process.argv.includes("--install-only");
+// `--fake` swaps the real Codex CLI for the scripted App Server, so a run needs
+// no network, no model and no approval. It replaces the native transport only;
+// the workflow assertions that a model must author remain model-dependent.
+const fake = process.argv.includes("--fake");
 const evidence = join(root, "evidence");
 const run = (command, args, cwd, env, log) => new Promise((resolveRun, reject) => {
   const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -47,7 +51,8 @@ await writeFile(join(profile, "package.json"), JSON.stringify({
   dsh: { profile: { bundles: ["@deepseek-ai/dsh-base", browser ? "@deepseek-ai/dsh-web-app" : "@deepseek-ai/dsh-headless", "dsh-codex-app-provider", ...(workflowChild ? ["dsh-workflow-kit"] : [])], patchReload: "startup" } },
 }, null, 2));
 const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
-await writeFile(join(profile, "cordis.patch.yml"), `- id: agent-default-model\n  config:\n    provider: codex\n    model: ${JSON.stringify(model)}\n- id: dsh-codex-app-provider\n  config:\n    stateDir: ${JSON.stringify(join(dir, "state"))}\n    providerCwd: ${JSON.stringify(workspace)}\n`);
+const fakeServer = join(root, "test/fake-codex-app-server.mjs");
+await writeFile(join(profile, "cordis.patch.yml"), `- id: agent-default-model\n  config:\n    provider: codex\n    model: ${JSON.stringify(model)}\n- id: dsh-codex-app-provider\n  config:\n    stateDir: ${JSON.stringify(join(dir, "state"))}\n    providerCwd: ${JSON.stringify(workspace)}\n${fake ? `    command: ${JSON.stringify(fakeServer)}\n` : ""}`);
 if (workflowChild) {
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch + `- id: dsh-workflow-kit\n  config:\n    stateDir: ${JSON.stringify(join(dir, "workflow-host-state"))}\n    subdir: workflow-live-test\n${workflowContract ? "    defaultProfile: live\n" : workflowHandoff ? "    defaultProfile: gpt-workflow\n" : ""}`);
@@ -99,7 +104,7 @@ if (nativeChild) {
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch + `- insert:\n    - id: native-child-test\n      name: ${JSON.stringify(join(profile, "native-child-driver.mjs"))}\n`);
 }
-const env = { ...process.env, DSH_EXTERNAL_EVENTS_TEST: externalEvents ? "1" : "0", DSH_HOME: home, DSH_NATIVE_CHILD_RESULT: join(dir, "native-child-result.json"), ...(workflowHandoff ? { DSH_HANDOFF_DRIVER_EVIDENCE: join(evidence, `${prefix}-driver.json`) } : {}) };
+const env = { ...process.env, DSH_EXTERNAL_EVENTS_TEST: externalEvents ? "1" : "0", DSH_HOME: home, DSH_NATIVE_CHILD_RESULT: join(dir, "native-child-result.json"), ...(workflowHandoff ? { DSH_HANDOFF_DRIVER_EVIDENCE: join(evidence, `${prefix}-driver.json`) } : {}), ...(fake ? { DSH_FAKE_CODEX_LOG: join(dir, "fake-codex-requests.jsonl"), DSH_FAKE_CODEX_STATE: join(dir, "fake-codex-threads") } : {}) };
 const report = { status: "UNRUN", directory: dir, profile, workspace, model, dshVersion: coordinated.version, dshSourceCommit: coordinated.sourceCommit, pluginVersion: version };
 await writeFile(join(evidence, `${prefix}-result.json`), JSON.stringify(report, null, 2));
 try {

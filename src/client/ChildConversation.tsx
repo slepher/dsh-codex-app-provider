@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime } from "@deepseek-ai/dsh-client-ui-slots";
 import type { SubagentAddress } from "@deepseek-ai/dsh-subagent/client";
 import type {} from "@deepseek-ai/dsh-client-ui-sidebar-right/client";
@@ -19,6 +20,9 @@ export interface ChildConversationInjected {
 type Props = PropsRuntime<"sidebar.right.pane.tab"> & PropsRenderSlots<"codex.child.conversation"> &
   PropsLocale<"dsh-codex-app-provider"> & InjectFace<ChildConversationInjected>;
 
+/** The mounted conversation area; stock core has no per-session mount and injects nothing. */
+interface SessionMountProps { sessionId?: string; empty?: () => ReactNode; children?: ReactNode }
+
 export function ChildConversation({ useTabInfo, retainView, openMain, SessionProvider, renderSlot, t }: Props) {
   const { tab } = useTabInfo();
   const address = tab.navigation.params as SubagentAddress | undefined;
@@ -34,12 +38,18 @@ export function ChildConversation({ useTabInfo, retainView, openMain, SessionPro
   if (!valid) return <div role="alert">{t("childUnavailable")}</div>;
   if (view.key !== key) return <div role="status">{t("childLoading")}</div>;
   if (view.error) return <div role="alert">{view.error}</div>;
+  // Stock core does not recognize the declared mount, so the slot injects no
+  // SessionProvider. Render the unavailable state instead of an invalid element
+  // type; the reserved child view is a deliberate prototype degradation.
+  const Session = SessionProvider as unknown as ((props: SessionMountProps) => ReactElement) | undefined;
   return <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }}>
     <button type="button" onClick={() => openMain(address)}>{t("openMain")}</button>
     <div style={{ flex: 1, minHeight: 0 }}>
-      <SessionProvider sessionId={address.childSessionId} empty={() => <div>{t("childUnavailable")}</div>}>
-        {renderSlot("codex.child.conversation", {})}
-      </SessionProvider>
+      {typeof Session !== "function"
+        ? <div role="status">{t("childUnavailable")}</div>
+        : <Session sessionId={address.childSessionId} empty={() => <div>{t("childUnavailable")}</div>}>
+          {renderSlot("codex.child.conversation", {})}
+        </Session>}
     </div>
   </div>;
 }

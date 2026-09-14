@@ -1,5 +1,4 @@
-import type { BackendEvent } from "./browser-types.js";
-import type { ProviderSessionFace } from "./provider.js";
+import type { SequencedBackendEvent } from "./browser-types.js";
 
 /** Informational Codex item facts; omission never changes DSH execution or model history. */
 export interface CodexExecutionEvent {
@@ -24,51 +23,80 @@ const FACT_OUTPUT_LIMIT = 600;
 const itemKinds = new Set(["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "functionCallOutput", "webSearch", "contextCompaction", "plan"]);
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-/** Bind exactly one native Session and Codex turn; durable sequence prevents replay duplication. */
-export function createExecutionEventWriter(session: ProviderSessionFace | undefined, threadId: string, turnId: string) {
+/** Terminal turn states whose pending items did not report a final item status. */
+const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted"]);
+
+/**
+ * Reduce one Session's recorded backend events into Codex item facts.
+ *
+ * Execution facts live only in the provider's own store: stock DSH core neither
+ * persists nor reads an unknown `codex/execution` session event, so nothing is
+ * appended to the session log. Replaying the recorded backend events with the
+ * same item filtering keeps the transcript projection durable without touching
+ * that log, and a terminal turn or an uncertain session still reports each
+ * unfinished item exactly once.
+ * @param events - recorded backend events with their durable sequence, oldest first.
+ * @returns the reduced item facts, oldest first.
+ */
+export function reduceExecutionEvents(events: readonly SequencedBackendEvent[]): readonly CodexExecutionEvent[] {
+  const accepted: CodexExecutionEvent[] = [];
   const seen = new Set<string>();
-  const pending = new Set<string>();
-  const track = (data: CodexExecutionEvent) => {
-    seen.add(`${data.backendSequence}:${data.itemId}`);
+  const pending = new Map<string, CodexExecutionEvent>();
+  const pendingKey = (data: { threadId: string; turnId: string; itemId: string }): string =>
+    `${data.threadId}:${data.turnId}:${data.itemId}`;
+  const emit = (data: CodexExecutionEvent): void => {
+    const identity = `${data.backendSequence}:${data.itemId}`;
+    if (seen.has(identity)) return;
+    seen.add(identity);
     const status = data.method === "item/status" ? data.params.status : object(data.params.item).status;
-    if (data.method === "item/completed" || status === "completed" || status === "failed" || status === "interrupted" || status === "declined") pending.delete(data.itemId);
-    else pending.add(data.itemId);
-  };
-  for (const event of session?.snapshotEvents?.() ?? []) {
-    if (event.type === "codex/execution" && event.data.threadId === threadId && event.data.turnId === turnId) track(event.data);
-  }
-  const append = (data: CodexExecutionEvent) => {
-    if (seen.has(`${data.backendSequence}:${data.itemId}`)) return;
-    session!.append!("codex/execution", data, { ignorable: true });
-    track(data);
-  };
-  return (event: BackendEvent, sequence?: number): void => {
-    if (session?.append === undefined || sequence === undefined) return;
-    if (event.type === "session.uncertain" || event.type === "turn.state" && event.turn.threadId === threadId && event.turn.turnId === turnId
-      && ["completed", "failed", "interrupted"].includes(event.turn.state)) {
-      const status = event.type === "session.uncertain" || event.turn.state === "completed" ? "unknown" : event.turn.state;
-      for (const itemId of [...pending]) append({ threadId, turnId, itemId, backendSequence: sequence,
-        method: "item/status", params: { threadId, turnId, itemId, status } });
-      return;
+    if (data.method === "item/completed" || status === "completed" || status === "failed" || status === "interrupted" || status === "declined") {
+      pending.delete(pendingKey(data));
+    } else {
+      pending.set(pendingKey(data), data);
     }
-    if (event.type !== "thread.notification") return;
+    accepted.push(data);
+  };
+  // A terminal turn certifies only its own items; a lost session cannot tell which
+  // turn an item belonged to, so every unfinished item ends as unknown. `emit`
+  // owns the pending bookkeeping, so an already-recorded sequence leaves the item
+  // pending and a later terminal turn can still resolve it.
+  const flush = (status: string, sequence: number, turn?: { threadId: string; turnId: string }): void => {
+    for (const item of [...pending.values()]) {
+      if (turn !== undefined && (item.threadId !== turn.threadId || item.turnId !== turn.turnId)) continue;
+      emit({ threadId: item.threadId, turnId: item.turnId, itemId: item.itemId, backendSequence: sequence,
+        method: "item/status", params: { threadId: item.threadId, turnId: item.turnId, itemId: item.itemId, status } });
+    }
+  };
+  for (const { event, sequence } of events) {
+    if (event.type === "session.uncertain") {
+      flush("unknown", sequence);
+      continue;
+    }
+    if (event.type === "turn.state" && TERMINAL_TURN_STATES.has(event.turn.state)) {
+      const threadId = String(event.turn.threadId), turnId = String(event.turn.turnId);
+      flush(event.turn.state === "completed" ? "unknown" : event.turn.state, sequence, { threadId, turnId });
+      continue;
+    }
+    if (event.type !== "thread.notification") continue;
     let params = object(event.params);
-    if (params.threadId !== threadId || params.turnId !== turnId) return;
+    if (typeof params.threadId !== "string" || typeof params.turnId !== "string") continue;
+    const { threadId, turnId } = params as { threadId: string; turnId: string };
     const item = object(params.item);
     if (event.method === "item/started" || event.method === "item/completed") {
       if (item.type === "reasoning") {
         // Only the protocol's public summary crosses into the native transcript.
-        if (!Array.isArray(item.summary)) return;
+        if (!Array.isArray(item.summary)) continue;
         params = { threadId, turnId, item: { id: item.id, type: "reasoning", summary: item.summary.filter(value => typeof value === "string") } };
-      } else if (!itemKinds.has(String(item.type))) return;
+      } else if (!itemKinds.has(String(item.type))) continue;
     } else if (event.method === "item/reasoning/summaryTextDelta") {
-      if (typeof params.delta !== "string" || !Number.isSafeInteger(params.summaryIndex) || Number(params.summaryIndex) < 0) return;
+      if (typeof params.delta !== "string" || !Number.isSafeInteger(params.summaryIndex) || Number(params.summaryIndex) < 0) continue;
       params = { threadId, turnId, itemId: params.itemId, delta: params.delta, summaryIndex: params.summaryIndex };
-    } else if (event.method !== "item/commandExecution/outputDelta") return;
+    } else if (event.method !== "item/commandExecution/outputDelta") continue;
     const itemId = item.id ?? params.itemId;
-    if (typeof itemId !== "string" || !itemId) return;
-    append({ threadId, turnId, itemId, backendSequence: sequence, method: event.method, params });
-  };
+    if (typeof itemId !== "string" || !itemId) continue;
+    emit({ threadId, turnId, itemId, backendSequence: sequence, method: event.method, params });
+  }
+  return accepted;
 }
 
 /** One rendered fact line plus the durable identity a reader can resolve it by. */

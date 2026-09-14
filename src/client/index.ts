@@ -18,6 +18,10 @@ import { ChildConversation, type ChildConversationInjected } from "./ChildConver
 declare module "@deepseek-ai/dsh-client-ui-slots" {
   interface LocaleNamespaceMap { "dsh-codex-app-provider": keyof typeof zh }
 }
+/** A child conversation address as the DSH client names it. */
+type ChildAddress = Parameters<ChildConversationInjected["retainView"]>[0];
+/** The core's `subagent/open` request shape; absent from stock client types. */
+interface SubagentOpenRequest { originSessionId?: string; address: ChildAddress }
 export const inject = ["slots", "locale", "settingsScope"];
 export function apply(ctx: Context): void {
   ctx.inject(["uiConversation"], scope => {
@@ -36,7 +40,11 @@ export function apply(ctx: Context): void {
         if (signal.aborted) throw new Error("Child view has closed");
         const key = JSON.stringify(address), previous = leases.get(signal);
         if (previous?.key === key) return;
-        const releaseNative = sidebar.sessions.retainSubagent(address);
+        // Stock client core has no `retainSubagent`; the pane then renders
+        // read-only instead of throwing out of the render. The degraded panel is
+        // the accepted prototype outcome, not a defect.
+        const retain = (sidebar.sessions as { retainSubagent?: (value: ChildAddress) => () => void }).retainSubagent;
+        const releaseNative = typeof retain === "function" ? retain.call(sidebar.sessions, address) : () => {};
         previous?.release();
         const release = () => {
           signal.removeEventListener("abort", release);
@@ -53,7 +61,14 @@ export function apply(ctx: Context): void {
         children: { "codex.child.conversation": { kind: "single", scope: "session", mount: "main.conversation" } },
         inject: (): ChildConversationInjected => ({ retainView, openMain: address => sidebar.sessions.openSubagent(address) }),
       }, ChildConversation);
-      yield sidebar.on("subagent/open", request => {
+      // Stock client core declares no `subagent/open` event, so this
+      // interception is inert there and a native directory item still switches
+      // the main area; the registration is kept for cores that do emit it.
+      const onSidebarEvent = sidebar.on as unknown as (
+        event: "subagent/open",
+        listener: (request: SubagentOpenRequest) => boolean | undefined,
+      ) => () => void;
+      yield onSidebarEvent("subagent/open", request => {
         if (openPosition(scope.getSnapshot()) !== "sidebar" || request.originSessionId === undefined
           || sidebar.sessions.list.getSnapshot().current !== request.originSessionId) return;
         const address = request.address;

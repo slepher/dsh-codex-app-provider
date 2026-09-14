@@ -23,6 +23,7 @@
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "node --test test/*.test.mjs",
+    "test:integration:handoff": "node --test test/integration-handoff.test.mjs",
     "test:live": "node scripts/test-live.mjs",
     "test:live:handoff": "node scripts/live-hermetic.mjs",
     "test:live:handoff:cross": "node scripts/live-hermetic.mjs --cross",
@@ -35,16 +36,16 @@
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-agent": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2",
-    "@deepseek-ai/dsh-settings": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-ui-settings": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-locale": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.1"
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

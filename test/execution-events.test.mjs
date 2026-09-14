@@ -1,25 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Session, SessionId } from "@deepseek-ai/dsh-session";
-import { createExecutionEventWriter } from "../lib/execution-events.js";
+import { projectExecutionFacts, reduceExecutionEvents } from "../lib/execution-events.js";
 
-test("Codex tool facts remain informational and replay once for the exact thread/turn", () => {
-  const session = Session.create(SessionId("external-events"));
-  const write = createExecutionEventWriter(session, "thread-a", "turn-a");
+/** One recorded backend event with the durable sequence the provider store keeps. */
+const recorded = (sequence, event) => ({ sequence, event });
+/** Client-visible form of one reduced fact. */
+const visible = data => ({ type: "codex/execution", seq: data.backendSequence, time: data.backendSequence, ignorable: true, data });
+
+test("Codex tool facts replay once across the whole session transcript and keep reasoning private", () => {
   const started = { type: "thread.notification", method: "item/started", params: { threadId: "thread-a", turnId: "turn-a", item: { id: "tool-a", type: "commandExecution", command: "echo safe", status: "inProgress" } } };
   const delta = { type: "thread.notification", method: "item/commandExecution/outputDelta", params: { threadId: "thread-a", turnId: "turn-a", itemId: "tool-a", delta: "safe\n" } };
-  write(started, 1); write(delta, 2); write(delta, 2);
-  write({ ...delta, params: { ...delta.params, turnId: "old-turn" } }, 3);
-  write({ ...delta, params: { ...delta.params, threadId: "other-thread" } }, 4);
-  write({ ...started, params: { ...started.params, item: { id: "reasoning", type: "reasoning", text: "private" } } }, 5);
-  assert.equal(session.snapshotEvents().length, 2);
-  assert.deepEqual(session.deriveMessages(), []);
-  assert.ok(session.snapshotEvents().every(event => event.type === "codex/execution" && event.ignorable === true));
-  const resumed = createExecutionEventWriter(session, "thread-a", "turn-a"); resumed(started, 1); resumed(delta, 2);
-  assert.equal(session.snapshotEvents().length, 2);
-  resumed({ ...started, method: "item/completed", params: { ...started.params, item: { ...started.params.item, status: "completed", aggregatedOutput: "safe\n", exitCode: 0 } } }, 6);
-  assert.equal(session.snapshotEvents().length, 3);
-  assert.deepEqual(session.deriveMessages(), []);
+  const events = [
+    recorded(1, started), recorded(2, delta), recorded(2, delta),
+    recorded(3, { ...delta, params: { ...delta.params, turnId: "old-turn" } }),
+    recorded(4, { ...delta, params: { ...delta.params, threadId: "other-thread" } }),
+    recorded(5, { ...started, params: { ...started.params, item: { id: "reasoning", type: "reasoning", text: "private" } } }),
+  ];
+  const reduced = reduceExecutionEvents(events);
+  assert.equal(reduced.length, 4, "every recorded item crosses once across the session transcript");
+  assert.deepEqual(reduced.map(data => `${data.threadId}/${data.turnId}`),
+    ["thread-a/turn-a", "thread-a/turn-a", "thread-a/old-turn", "other-thread/turn-a"]);
+  assert.deepEqual(reduceExecutionEvents(events), reduced, "the projection is a pure function of the recorded events");
+  assert.equal(JSON.stringify(reduced).includes("private"), false, "model-authored reasoning text never crosses");
+  const completed = recorded(6, { ...started, method: "item/completed", params: { ...started.params, item: { ...started.params.item, status: "completed", aggregatedOutput: "safe\n", exitCode: 0 } } });
+  assert.equal(reduceExecutionEvents([...events, completed]).length, 5);
 });
 
 test("native Conversation fold merges started, output and completed into one execution item", async () => {
@@ -45,15 +49,15 @@ test("native Conversation fold merges started, output and completed into one exe
 
 test("public reasoning summary streams and completes without exposing raw reasoning", async () => {
   const { executionDefinition: definition, ExecutionNode } = await import("../lib/client/ExecutionNode.js");
-  const session = Session.create(SessionId("public-summary"));
-  const write = createExecutionEventWriter(session, "thread", "turn");
   const params = { threadId: "thread", turnId: "turn", itemId: "reason", delta: "Public", summaryIndex: 0, content: "PRIVATE" };
-  write({ type: "thread.notification", method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id: "reason", type: "reasoning", summary: [], content: ["PRIVATE"] } } }, 0);
-  write({ type: "thread.notification", method: "item/reasoning/textDelta", params }, 1);
-  write({ type: "thread.notification", method: "item/reasoning/summaryTextDelta", params }, 2);
-  write({ type: "thread.notification", method: "item/reasoning/summaryTextDelta", params: { ...params, delta: " summary" } }, 3);
-  write({ type: "thread.notification", method: "item/completed", params: { threadId: "thread", turnId: "turn", item: { id: "reason", type: "reasoning", summary: ["Public summary"], content: ["PRIVATE"] } } }, 4);
-  const events = session.snapshotEvents();
+  const reduced = reduceExecutionEvents([
+    recorded(0, { type: "thread.notification", method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id: "reason", type: "reasoning", summary: [], content: ["PRIVATE"] } } }),
+    recorded(1, { type: "thread.notification", method: "item/reasoning/textDelta", params }),
+    recorded(2, { type: "thread.notification", method: "item/reasoning/summaryTextDelta", params }),
+    recorded(3, { type: "thread.notification", method: "item/reasoning/summaryTextDelta", params: { ...params, delta: " summary" } }),
+    recorded(4, { type: "thread.notification", method: "item/completed", params: { threadId: "thread", turnId: "turn", item: { id: "reason", type: "reasoning", summary: ["Public summary"], content: ["PRIVATE"] } } }),
+  ]);
+  const events = reduced.map(visible);
   assert.equal(events.length, 4);
   assert.equal(definition.match(events[0]).role, "start");
   assert.equal(JSON.stringify(events).includes("PRIVATE"), false);
@@ -65,32 +69,28 @@ test("public reasoning summary streams and completes without exposing raw reason
   const node = definition.buildViewNode(context);
   assert.equal(node.data.text, "Public summary");
   assert.equal(node.data.status, "completed");
-  assert.deepEqual(session.deriveMessages(), []);
   const interrupted = JSON.stringify(ExecutionNode({ node: { ...node, data: { ...node.data, status: "interrupted" } }, useTurnData: () => undefined, t: key => key }));
   assert.match(interrupted, /reasoningSummary.*executionInterrupted/);
 });
 
 test("unfinished item statuses follow only the bound terminal turn and retain uncertainty", async () => {
   const { executionDefinition: definition } = await import("../lib/client/ExecutionNode.js");
-  const session = Session.create(SessionId("terminal-items"));
-  const write = createExecutionEventWriter(session, "thread", "turn");
-  for (const [index, id] of ["one", "two"].entries()) write({ type: "thread.notification", method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id, type: "commandExecution", command: id, status: "inProgress" } } }, index + 1);
-  write({ type: "turn.state", turn: { threadId: "thread", turnId: "other-turn", state: "interrupted" } }, 3);
-  assert.equal(session.snapshotEvents().length, 2);
-  write({ type: "session.uncertain", error: "lost connection" }, 4);
-  const facts = session.snapshotEvents();
+  const started = id => recorded(id === "one" ? 1 : 2, { type: "thread.notification", method: "item/started", params: { threadId: "thread", turnId: "turn", item: { id, type: "commandExecution", command: id, status: "inProgress" } } });
+  const otherTurn = recorded(3, { type: "turn.state", turn: { threadId: "thread", turnId: "other-turn", state: "interrupted" } });
+  assert.equal(reduceExecutionEvents([started("one"), started("two"), otherTurn]).length, 2, "a terminal turn never resolves another turn's items");
+  const uncertain = recorded(4, { type: "session.uncertain", error: "lost connection" });
+  const facts = reduceExecutionEvents([started("one"), started("two"), otherTurn, uncertain]);
   assert.equal(facts.length, 4);
-  assert.ok(facts.slice(2).every(event => event.data.params.status === "unknown"));
-  const resumed = createExecutionEventWriter(session, "thread", "turn");
-  resumed({ type: "session.uncertain", error: "lost connection" }, 4);
-  assert.equal(session.snapshotEvents().length, 4, "one backend sequence may update each item once");
-  resumed({ type: "turn.state", turn: { threadId: "thread", turnId: "turn", state: "interrupted" } }, 5);
-  assert.equal(session.snapshotEvents().length, 6);
-  const first = facts[0], context = { key: "one", id: definition.match(first).id, start: { event: first, location: { kind: "session" } } };
+  assert.ok(facts.slice(2).every(data => data.params.status === "unknown"), "an uncertain session reports every unfinished item as unknown");
+  assert.deepEqual(reduceExecutionEvents([started("one"), started("two"), otherTurn, uncertain, uncertain]), facts, "one backend sequence may update each item once");
+  const resolved = reduceExecutionEvents([started("one"), started("two"), otherTurn, uncertain,
+    recorded(5, { type: "turn.state", turn: { threadId: "thread", turnId: "turn", state: "interrupted" } })]);
+  assert.equal(resolved.length, 6, "an unknown item stays pending until its own turn ends");
+  const events = resolved.map(visible);
+  const first = events[0], context = { key: "one", id: definition.match(first).id, start: { event: first, location: { kind: "session" } } };
   context.state = definition.start(context, context.start);
-  for (const event of session.snapshotEvents().slice(2).filter(event => event.data.itemId === "one")) context.state = definition.update(context, { event });
+  for (const event of events.slice(2).filter(event => event.data.itemId === "one")) context.state = definition.update(context, { event });
   assert.equal(definition.buildViewNode(context).data.status, "interrupted");
-  assert.deepEqual(session.deriveMessages(), []);
 });
 
 test("native Stop renders an unconfirmed request instead of claiming the Codex item terminated", async () => {
@@ -112,7 +112,6 @@ test("native Stop renders an unconfirmed request instead of claiming the Codex i
 
 // Sourced history for continuation under another provider adapter.
 test("projects recorded native items into sourced facts without model-authored text", async () => {
-  const { projectExecutionFacts } = await import("../lib/execution-events.js");
   const event = (method, item, itemId = "i1", turnId = "t1") => ({ threadId: "th1", turnId, itemId, backendSequence: 1, method, params: { threadId: "th1", turnId, item } });
   const lines = projectExecutionFacts([
     event("item/completed", { id: "i1", type: "commandExecution", command: "pnpm test", cwd: "/w", exitCode: 0, aggregatedOutput: "12 passed" }),
@@ -133,7 +132,6 @@ test("projects recorded native items into sourced facts without model-authored t
 });
 
 test("shortens long output and names the durable item that holds it", async () => {
-  const { projectExecutionFacts } = await import("../lib/execution-events.js");
   const lines = projectExecutionFacts([{ threadId: "th1", turnId: "t1", itemId: "i1", backendSequence: 1, method: "item/completed",
     params: { threadId: "th1", turnId: "t1", item: { id: "i1", type: "commandExecution", command: "run", exitCode: 1, aggregatedOutput: "x".repeat(2000) } } }]);
   assert.equal(lines.length, 2);
