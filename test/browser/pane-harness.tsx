@@ -15,6 +15,7 @@ import { createChildViews, type ChildJournalChange } from "../../src/client/chil
 const ADDRESSES = {
   a: { parentSessionId: "parent", childSessionId: "child-a", mode: "continuable" as const },
   b: { parentSessionId: "parent", childSessionId: "child-b", mode: "continuable" as const },
+  oneShot: { parentSessionId: "parent", childSessionId: "child-c", mode: "one-shot" as const },
 };
 const key = (address: { parentSessionId: string; childSessionId: string; mode: string }): string =>
   `${address.parentSessionId}:${address.childSessionId}:${address.mode}`;
@@ -23,6 +24,7 @@ const streams = new Map<string, { publish(change: ChildJournalChange): void }>()
 const calls: unknown[] = [];
 let pendingApprovals: unknown[] = [];
 let pendingQuestions: unknown[] = [];
+let failNextPrompt = false;
 
 const views = createChildViews({
   create: (address, options) => {
@@ -30,7 +32,10 @@ const views = createChildViews({
     return { async open() {}, async prepend(request) { calls.push({ kind: "prepend", address, request }); },
       restart() { calls.push({ kind: "restart", address }); }, async dispose() { calls.push({ kind: "dispose", address }); } };
   },
-  prompt: async (address, text, delivery) => { calls.push({ kind: "prompt", address, text, delivery }); },
+  prompt: async (address, text, delivery) => {
+    calls.push({ kind: "prompt", address, text, delivery });
+    if (failNextPrompt) { failNextPrompt = false; throw new Error("parent is unavailable"); }
+  },
   stop: async address => { calls.push({ kind: "stop", address }); },
 });
 const approvals = {
@@ -53,12 +58,13 @@ const SIGNAL = new AbortController().signal;
 const TABS = {
   a: { tab: { navigation: { params: ADDRESSES.a }, signal: SIGNAL } },
   b: { tab: { navigation: { params: ADDRESSES.b }, signal: SIGNAL } },
+  oneShot: { tab: { navigation: { params: ADDRESSES.oneShot }, signal: SIGNAL } },
 };
 const attach = (address: never, listener: never) => views.attach(address, listener);
 const openMain = (address: unknown) => { calls.push({ kind: "openMain", address }); };
 const translate = (name: string) => name;
 
-function Pane({ which }: { which: "a" | "b" }) {
+function Pane({ which }: { which: "a" | "b" | "oneShot" }) {
   return createElement(ChildConversation, {
     useTabInfo: () => TABS[which],
     openMain,
@@ -69,9 +75,10 @@ function Pane({ which }: { which: "a" | "b" }) {
 }
 
 const root = createRoot(document.getElementById("root")!);
-const render = (showB: boolean): void => root.render(createElement("div", null,
+const render = (showB: boolean, showOneShot = false): void => root.render(createElement("div", null,
   createElement("div", { id: "pane-a" }, createElement(Pane, { which: "a" })),
-  showB ? createElement("div", { id: "pane-b" }, createElement(Pane, { which: "b" })) : null));
+  showB ? createElement("div", { id: "pane-b" }, createElement(Pane, { which: "b" })) : null,
+  showOneShot ? createElement("div", { id: "pane-oneshot" }, createElement(Pane, { which: "oneShot" })) : null));
 
 render(true);
 (globalThis as unknown as { __PANE__: unknown }).__PANE__ = {
@@ -81,4 +88,6 @@ render(true);
   setQuestions: (list: unknown[]) => { pendingQuestions = list; },
   hideB: () => render(false),
   showB: () => render(true),
+  showOneShot: () => render(true, true),
+  failNextPrompt: () => { failNextPrompt = true; },
 };

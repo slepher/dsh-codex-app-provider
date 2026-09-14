@@ -166,6 +166,32 @@ try {
   calls = await evaluate(`__PANE__.calls.slice()`);
   record("closing a tab stops exercising no model request", calls.filter(call => call.kind === "prompt").length === 2, calls.filter(call => call.kind === "prompt"));
 
+  // A one-shot child cannot be continued, so its Stop control is unavailable.
+  await evaluate(`__PANE__.showOneShot()`);
+  await new Promise(resolveWait => setTimeout(resolveWait, 400));
+  const oneShotStop = await evaluate(`(() => {
+    const button = [...document.querySelectorAll("#pane-oneshot button")].find(node => node.textContent === "childStop");
+    return button === undefined ? "missing" : String(button.disabled);
+  })()`);
+  record("a one-shot child offers no stop", oneShotStop === "true", oneShotStop);
+
+  // Opening or interacting with a pane never selects a Session: the plugin only
+  // ever adds a right-pane resource, so the main area cannot move under it and
+  // no navigation can arrive late.
+  calls = await evaluate(`__PANE__.calls.slice()`);
+  record("no pane action navigates the main area", calls.every(call => call.kind !== "openMain"), calls.filter(call => call.kind === "openMain"));
+
+  // A refused prompt surfaces in the pane instead of being swallowed. The child
+  // is idle again, so the composer sends rather than steers.
+  await evaluate(`__PANE__.publish("a", { type: "append", entry: ${JSON.stringify(turnEnd)} })`);
+  await new Promise(resolveWait => setTimeout(resolveWait, 300));
+  await evaluate(`__PANE__.failNextPrompt()`);
+  await evaluate(setDraft("a", "this will be refused"));
+  await evaluate(clickButton("a", "childSend"));
+  await new Promise(resolveWait => setTimeout(resolveWait, 300));
+  record("a refused prompt is shown", (await evaluate(`document.querySelector("#pane-a .codex-child-error")?.textContent ?? ""`)).includes("parent is unavailable"),
+    await evaluate(`document.querySelector("#pane-a .codex-child-error")?.textContent ?? ""`));
+
   const errors = cdp.entries.filter(entry => entry.level === "error" || entry.level === "exception").map(entry => entry.text.slice(0, 200));
   record("no console error while interacting", errors.length === 0, errors);
 } catch (error) {
