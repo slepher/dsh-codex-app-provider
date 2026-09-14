@@ -40,13 +40,16 @@ export function apply(ctx) {
      * worker once for a corrected report and record that it happened, so a
      * formatting miss never masquerades as a delivery failure.
      */
-    const recordResult = async (task, workerId) => {
+    const recordResult = async (task, attempt) => {
       const first = await call({ action: "record-result", task });
       if (first.ok) return first.value;
-      const retry = await call({ action: "continue", task, text: "Your report did not match the frozen contract's execution-result fields. Write the corrected report to the contract's result path, then reply with exactly those lines, each starting with '- '." });
+      // The correction names the binding the Host checks, so the worker restates
+      // this attempt's own identities rather than inventing them.
+      const binding = [`- Task: ${task}`, `- Attempt: ${attempt.attempt}`, `- Input snapshot: ${attempt.base}`].join("\n");
+      const retry = await call({ action: "continue", task, text: `Your report did not match the frozen contract's execution-result fields. Write the corrected report to the contract's result path: the required lines, each starting with '- ', binding this attempt exactly as\n${binding}\n- Contract revision: the revision named in the contract\n- Candidate snapshot: the commit you actually produced in the assigned workspace\n- Outcome: complete, and nothing else.` });
       assert.equal(retry.ok, true, JSON.stringify(retry.result));
       report.corrections = [...(report.corrections ?? []), { task, rejected: first.result?.error?.message ?? null }]; await save();
-      await settled(workerId);
+      await settled(attempt.workerId);
       const second = await call({ action: "record-result", task });
       assert.equal(second.ok, true, JSON.stringify(second.result));
       return second.value;
@@ -79,7 +82,7 @@ export function apply(ctx) {
         await settled(attempt.workerId);
         summary = await action({ action: "status" });
         assert.equal(summary.tasks.find(value => value.task === task).state, "running", "Native completion is not workflow acceptance");
-        summary = await recordResult(task, attempt.workerId);
+        summary = await recordResult(task, attempt);
         attempt = summary.tasks.find(value => value.task === task);
         assert.equal(attempt.state, "candidate");
         if (attempt.review) await settled(attempt.review.worker);

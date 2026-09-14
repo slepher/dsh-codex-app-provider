@@ -70,7 +70,7 @@ export function apply(ctx) {
       // correction path has to look at the outcome rather than assert on it.
       const first = await call({ action: "record-result", task: "T001" });
       if (first.ok && first.value.tasks.find(value => value.task === "T001").state === "candidate") return first.value;
-      const retry = await call({ action: "continue", task: "T001", text: "Your report did not match the frozen contract's execution-result fields. Resend only those lines, each starting with '- ', with the same Task, Contract revision, Attempt, Input snapshot, Candidate snapshot and Outcome values, and no other formatting. Write the corrected report to the contract's result path and then reply with it." });
+      const retry = await call({ action: "continue", task: "T001", text: "Your report did not match the frozen contract's execution-result fields. Write the corrected report to the contract's result path: first the six required lines, each starting with '- ' (Task, Contract revision, Attempt, Input snapshot, Candidate snapshot, Outcome), then the verification evidence the contract asks for — the fixture read with its output and `git diff --check` with its exit code, each on its own line. Reply with exactly that report and no commentary." });
       assert.equal(retry.ok, true, JSON.stringify(retry.result));
       report.resultCorrection = { rejected: first.result?.error?.message ?? null }; await save();
       await settled(successorId);
