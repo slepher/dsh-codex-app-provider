@@ -57,16 +57,26 @@ export function apply(ctx) {
       const handle = await ctx.sessionPersistence.open(child.id, "read");
       try {
         const { events } = await handle.read();
+        const headers = events.filter(event => event.type === "request/header");
+        const outputs = events.filter(event => event.type === "assistant/message")
+          .map(event => event.data.message.content.filter(block => block.type === "text").map(block => block.text).join(""));
+        // Record what the child's log actually holds beside the result file
+        // before asserting, so a mismatch is diagnosable from the evidence
+        // directory instead of only from the assertion text.
+        child.observed = {
+          headers: headers.length,
+          outputs,
+          turns: events.filter(event => event.type === "turn/start").map(event => event.data.turn),
+          eventTypes: [...new Set(events.map(event => event.type))].sort(),
+        };
+        await writeFile(`${process.env.DSH_NATIVE_CHILD_RESULT}.observed`, JSON.stringify({ status: "CHILD_OBSERVED", children, requests, failures }, null, 2));
         assert.equal(handle.header.parentSession, parent.id);
         assert.equal(handle.header.cwd, child.execution.boundary.cwd);
         const descriptor = events.find(event => event.type === "subagent/descriptor");
         assert.equal(descriptor.data.version, 4);
         assert.deepEqual(descriptor.data.execution, child.execution);
-        const headers = events.filter(event => event.type === "request/header");
         assert.ok(headers.length >= (child.role === "A" ? 2 : 1));
         for (const header of headers) assert.deepEqual(header.data.header.config.execution, child.execution);
-        const outputs = events.filter(event => event.type === "assistant/message")
-          .map(event => event.data.message.content.filter(block => block.type === "text").map(block => block.text).join(""));
         assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"]);
         child.outputs = outputs;
         if (externalEvents) {
