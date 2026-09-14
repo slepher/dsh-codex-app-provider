@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import { createExecutionEventWriter } from "./execution-events.js";
+import { createExecutionEventWriter, projectExecutionFacts, type CodexExecutionEvent } from "./execution-events.js";
 import type { Session } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { NativeExecution } from "./execution.js";
@@ -309,15 +309,32 @@ export class CodexProviderAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * Project the recorded native transcript into sourced history lines.
+   *
+   * Facts come from the DSH session's own `codex/execution` log, so the
+   * projection is durable and needs no native resume. Model-authored reasoning
+   * stays out; long output is shortened and points at its durable item.
+   * @param nativeSessionId - DSH Session id whose native transcript to project.
+   * @returns the sourced lines, oldest first.
+   */
+  async facts(nativeSessionId: string): Promise<readonly string[]> {
+    if (!nativeSessionId) throw new Error("Native Session identity is required");
+    const session = this.deps.sessions.get(nativeSessionId);
+    const recorded = (session?.snapshotEvents?.() ?? []).flatMap(event =>
+      event.type === "codex/execution" ? [event.data as CodexExecutionEvent] : []);
+    return projectExecutionFacts(recorded).map(line => line.text);
+  }
+
   async readExecution(nativeSessionId: string): Promise<NativeExecution | undefined> {
     if (!nativeSessionId) throw new Error("Native Session identity is required");
     const id = backendSessionId(nativeSessionId);
     const snapshot = await this.deps.backend.readSession(OWNER_ID, id);
     if (snapshot === undefined) return undefined;
-    const { threadId, turnId, cwd, model, reasoningEffort, state } = snapshot;
-    const reports = snapshot.reports.map(({ threadId, turnId, status, result, error, protocolError, createdAt }) =>
-      ({ threadId, turnId, status, result, error, protocolError, createdAt }));
-    return { nativeSessionId, threadId, turnId, cwd, model, reasoningEffort, state, reports };
+    const { threadId, turnId, cwd, model, reasoningEffort, pending, state } = snapshot;
+    const reports = snapshot.reports.map(({ threadId, turnId, status, result, error, protocolError, usage, createdAt }) =>
+      ({ threadId, turnId, status, result, error, protocolError, ...(usage?.last === undefined ? {} : { usage: usage.last }), createdAt }));
+    return { nativeSessionId, threadId, turnId, cwd, model, reasoningEffort, ...(pending === undefined ? {} : { pending }), state, reports };
   }
 
   private async catalog(): Promise<ModelSettings> {
@@ -345,10 +362,17 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (execution !== undefined) {
       const agent = this.deps.agents.get(sessionId);
       if (agent === undefined || String(agent.session.id) !== sessionId
-        || !executionOptionsEqual(agent.options.execution, execution)
-        || agent.options.model !== options.model
-        || (agent.options.reasoningEffort !== undefined && agent.options.reasoningEffort !== options.reasoningEffort)) {
+        || !executionOptionsEqual(agent.options.execution, execution)) {
         throw new LlmError("Native execution inputs must match the live Agent creation snapshot", "EXECUTION_MISMATCH");
+      }
+      // The live Agent's effective route authorizes the request. A managed
+      // child may switch model/effort between turns only through the core's
+      // guarded configuration update, which is what keeps `agent.options` and
+      // this request equal; the App Server then confirms the applied settings
+      // asynchronously through `thread/settings/updated`.
+      if (agent.options.model !== options.model
+        || (agent.options.reasoningEffort !== undefined && agent.options.reasoningEffort !== options.reasoningEffort)) {
+        throw new LlmError("Native execution inputs must match the live Agent effective configuration", "EXECUTION_MISMATCH");
       }
       if (execution.boundary !== undefined && execution.boundary.cwd !== cwd) {
         throw new LlmError("Native execution workspace must match the DSH Session", "WORKSPACE_CHANGED");
@@ -368,7 +392,11 @@ export class CodexProviderAdapter extends LlmAdapter {
     } else if (record.state === "saved") {
       record = await backend.resumeSession(owner, backendId).catch(error => { throw providerError(error); });
     }
-    if (execution !== undefined && (record.model !== options.model
+    // A workflow-managed child authorizes its target through the live Agent's
+    // effective configuration, which may differ from the last confirmed value
+    // until the App Server reports the applied settings. Every other Session
+    // keeps comparing the request against its confirmed configuration.
+    if (execution === undefined && (record.model !== options.model
       || (options.reasoningEffort !== undefined && record.reasoningEffort !== options.reasoningEffort))) {
       throw new LlmError("App Server did not apply the requested native execution model/effort", "EXECUTION_MISMATCH");
     }

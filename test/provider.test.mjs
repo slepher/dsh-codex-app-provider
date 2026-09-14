@@ -171,6 +171,13 @@ test("streams one native turn into text, usage, and replay state, then resumes t
   assert.deepEqual(firstTurn.params.input, [{ type: "text", text: "first", text_elements: [] }]);
   assert.equal(firstTurn.params.model, "luna"); assert.equal(firstTurn.params.effort, "high");
 
+  // The read-only projection carries the turn's own token accounting, so a
+  // Host can attribute cost without resuming or reading the native log.
+  const execution = await adapter.readExecution("s1");
+  assert.deepEqual(execution.reports[0].usage,
+    { totalTokens: null, inputTokens: 100, cachedInputTokens: 20, cacheWriteInputTokens: null, outputTokens: 5, reasoningOutputTokens: 2 });
+  assert.equal("total" in execution.reports[0].usage, false, "the cumulative snapshot is not projected as a turn's usage");
+
   const learned = await adapter.resolveModel("codex", "luna");
   assert.equal(learned.context.contextWindow, 1000, "runtime usage teaches the context window when config does not set one");
 
@@ -900,6 +907,26 @@ test("consumes explicit native execution inputs and rejects changed identity/con
   await assert.rejects(collect(adapter.stream(options("child", [user("u2", "next")], { execution: changed }))), /instructions or boundary changed/);
   await assert.rejects(collect(adapter.stream(options("child", [user("u2", "next")]))), /instructions or boundary changed/);
   assert.equal(server.calls.filter(call => call.method === "turn/start").length, 1);
+});
+
+test("projects recorded native items into sourced history for another adapter", async t => {
+  const fixture = setup("dsh-provider-facts-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const events = [
+    { type: "codex/execution", data: { threadId: "thread-1", turnId: "turn-1", itemId: "i1", backendSequence: 1,
+      method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "i1", type: "commandExecution", command: "pnpm test", exitCode: 0, aggregatedOutput: "3 passed" } } } },
+    { type: "codex/execution", data: { threadId: "thread-1", turnId: "turn-1", itemId: "i2", backendSequence: 2,
+      method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "i2", type: "reasoning", summary: ["internal"] } } } },
+    { type: "user/message", data: { id: "u1" } },
+  ];
+  const sessions = new Map([["s1", { header: { cwd: fixture.cwd }, snapshotEvents: () => events }]]);
+  const adapter = adapterFor(fixture, { sessions });
+  assert.deepEqual(await adapter.facts("s1"), [
+    "[source: codex thread=thread-1 turn=turn-1 item=i1] command: pnpm test (exit 0)",
+    "[source: codex thread=thread-1 turn=turn-1 item=i1] 3 passed",
+  ], "only executed facts cross, each with its durable item identity");
+  assert.deepEqual(await adapter.facts("unknown-session"), [], "a session with no recorded facts projects nothing");
+  await assert.rejects(adapter.facts(""), /identity is required/);
 });
 
 test("refuses an unapplied native model before turn/start", async t => {

@@ -39,12 +39,26 @@ export interface SessionSnapshot {
   threadId?: ThreadId;
   turnId?: TurnId;
   cwd: string;
+  /** Last natively confirmed model/effort; the creation snapshot stays in `options`. */
   model?: string;
   reasoningEffort?: string;
+  /** Authorized target configuration a running turn has not confirmed yet. */
+  pending?: PendingConfig;
   usage?: unknown;
   state: RunState;
   options?: CreateSessionOptions;
   reports: readonly Report[];
+}
+
+/**
+ * A model/effort target requested for a turn but not yet confirmed by the App
+ * Server. `model`/`reasoningEffort` keep the last confirmed values while this
+ * is set, so an unknown outcome never rewrites the configuration a Session was
+ * actually running.
+ */
+export interface PendingConfig {
+  model?: string;
+  reasoningEffort?: string;
 }
 
 export interface TurnOptions {
@@ -68,6 +82,48 @@ export interface CreateSessionOptions extends TurnOptions {
   approvalsReviewer?: ApprovalsReviewer;
   sandbox?: SandboxMode;
   boundary?: ExecutionBoundary;
+}
+
+/**
+ * One controlled native-thread handover requested by the trusted Host.
+ *
+ * The source record keeps its history but loses the right to operate the
+ * thread; the successor record owns it and continues on the target
+ * configuration. The provider never creates a replacement thread when the
+ * binding fails.
+ */
+export interface ThreadHandoffRequest {
+  /** Host request identity; a repeated request reuses its recorded handover. */
+  requestId: string;
+  /** Native Session handing the thread over. */
+  fromSessionId: string;
+  /** Reserved successor native Session that continues it. */
+  toSessionId: string;
+  /** Target model and effort the successor runs on. */
+  model: string;
+  reasoningEffort?: string;
+  /** Full execution inputs the successor's first request will carry. */
+  developerInstructions?: string;
+  boundary?: ExecutionBoundary;
+  approvalPolicy?: ApprovalPolicy;
+  sandbox?: SandboxMode;
+}
+
+/** The recorded outcome of one thread handover. */
+export interface ThreadHandoffResult {
+  toSessionId: string;
+  threadId: string;
+  state: RunState;
+}
+
+/** Read-only view of one native Session's thread ownership. */
+export interface ThreadOwnership {
+  sessionId: string;
+  threadId?: string;
+  /** Successor that now owns the thread, when this record handed it over. */
+  handedOffTo?: string;
+  /** Source that handed the thread over, when this record continues one. */
+  handoffFrom?: string;
 }
 
 export interface CreateWorkerInput extends CreateSessionOptions {

@@ -109,3 +109,34 @@ test("native Stop renders an unconfirmed request instead of claiming the Codex i
   props.node.data.status = "completed";
   assert.match(JSON.stringify(ExecutionNode(props)), /executed/);
 });
+
+// Sourced history for continuation under another provider adapter.
+test("projects recorded native items into sourced facts without model-authored text", async () => {
+  const { projectExecutionFacts } = await import("../lib/execution-events.js");
+  const event = (method, item, itemId = "i1", turnId = "t1") => ({ threadId: "th1", turnId, itemId, backendSequence: 1, method, params: { threadId: "th1", turnId, item } });
+  const lines = projectExecutionFacts([
+    event("item/completed", { id: "i1", type: "commandExecution", command: "pnpm test", cwd: "/w", exitCode: 0, aggregatedOutput: "12 passed" }),
+    event("item/completed", { id: "i2", type: "fileChange", changes: [{ path: "src/a.ts", kind: { type: "update" } }] }, "i2"),
+    event("item/completed", { id: "i3", type: "reasoning", summary: ["thinking about the design"] }, "i3"),
+    event("item/completed", { id: "i5", type: "mcpToolCall", server: "repo", tool: "search", result: { hits: 2 } }, "i5", "t2"),
+    event("item/started", { id: "i6", type: "commandExecution", command: "pnpm build" }, "i6", "t2"),
+    { threadId: "th1", turnId: "t2", itemId: "i6", backendSequence: 6, method: "item/status", params: { threadId: "th1", turnId: "t2", itemId: "i6", status: "interrupted" } },
+  ].map((entry, index) => ({ ...entry, backendSequence: index + 1 })));
+  assert.deepEqual(lines.map(line => line.text), [
+    "[source: codex thread=th1 turn=t1 item=i1] command: pnpm test (exit 0, cwd /w)",
+    "[source: codex thread=th1 turn=t1 item=i1] 12 passed",
+    "[source: codex thread=th1 turn=t1 item=i2] file change: src/a.ts (update)",
+    "[source: codex thread=th1 turn=t2 item=i5] tool repo/search: {\"hits\":2}",
+    "[source: codex thread=th1 turn=t2 item=i6] item i6 ended as interrupted",
+  ], "reasoning stays out and an unfinished item reports only its terminal status");
+  assert.deepEqual(lines[0], { text: lines[0].text, threadId: "th1", turnId: "t1", itemId: "i1" });
+});
+
+test("shortens long output and names the durable item that holds it", async () => {
+  const { projectExecutionFacts } = await import("../lib/execution-events.js");
+  const lines = projectExecutionFacts([{ threadId: "th1", turnId: "t1", itemId: "i1", backendSequence: 1, method: "item/completed",
+    params: { threadId: "th1", turnId: "t1", item: { id: "i1", type: "commandExecution", command: "run", exitCode: 1, aggregatedOutput: "x".repeat(2000) } } }]);
+  assert.equal(lines.length, 2);
+  assert.match(lines[1].text, /truncated; full output at codex thread=th1 turn=t1 item=i1/);
+  assert.ok(lines[1].text.length < 900);
+});

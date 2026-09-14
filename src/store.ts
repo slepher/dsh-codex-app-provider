@@ -11,6 +11,7 @@ import { isAbsolute, resolve } from "node:path";
 import type {
   ApprovalRequest,
   CreateSessionOptions,
+  PendingConfig,
   Report,
   RunState,
   SequencedBackendEvent,
@@ -30,10 +31,36 @@ export interface StoredWorker {
   savedState?: WorkerState;
 }
 
+/**
+ * One recorded thread handover. The source record keeps its history, reports
+ * and usage but can no longer start, resume, configure or restart the thread.
+ */
+export interface StoredHandoffOut {
+  /** Successor native Session that now owns the thread. */
+  toSessionId: string;
+  /** Host request that fixed this handover; repeated requests reuse it. */
+  requestId: string;
+  at: number;
+}
+
+/** The source association one successor record carries. */
+export interface StoredHandoffIn {
+  /** Native Session that handed the thread over. */
+  fromSessionId: string;
+  requestId: string;
+  at: number;
+}
+
 export interface StoredSession extends SessionSnapshot {
   ownerId: string;
   updatedAt?: number;
   turnId?: string;
+  /** Authorized target configuration awaiting native confirmation. */
+  pending?: PendingConfig;
+  /** Set once this record handed its thread to a successor. */
+  handedOff?: StoredHandoffOut;
+  /** Set when this record was created to continue another record's thread. */
+  handoffFrom?: StoredHandoffIn;
   lastStartKey?: string;
   lastTurnState?: RunState;
   lastOutput?: string;
@@ -103,7 +130,7 @@ export class SessionStore {
   }
 
   occupiedThreads(): string[] {
-    return [...new Set([...this.records.values()].flatMap(record => occupied(record) && record.threadId !== undefined ? [record.threadId] : []))];
+    return [...new Set([...this.records.values()].flatMap(record => claimsThread(record) && record.threadId !== undefined ? [record.threadId] : []))];
   }
 
   get(ownerId: string, sessionId: string): StoredSession | undefined {
@@ -115,6 +142,7 @@ export class SessionStore {
 
   adopt(sessionId: string, parentSessionId: string, expectedThreadId: string): StoredSession {
     const record = this.records.get(sessionId);
+    if (record?.handedOff !== undefined) throw new Error("This Codex Session handed its thread to a successor");
     const matches = [...this.records.values()].filter(item => item.threadId === expectedThreadId);
     if (record?.worker === undefined || record.threadId !== expectedThreadId
       || matches.length !== 1 || matches[0] !== record || occupied(record)) {
@@ -227,7 +255,37 @@ function parseRecord(text: string): StoredSession {
   if (!validReports(record)) {
     throw new Error("Invalid Session reports");
   }
+  if (!validPending(record.pending)) throw new Error("Invalid Session pending configuration");
+  if (!validHandoff(record.handedOff, ["toSessionId", "requestId"]) || !validHandoff(record.handoffFrom, ["fromSessionId", "requestId"])) {
+    throw new Error("Invalid Session handoff record");
+  }
   return record as StoredSession;
+}
+
+/** A handoff record is optional as a whole, but never partially malformed. */
+function validHandoff(value: unknown, ids: readonly string[]): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== "object" || value === null) return false;
+  const handoff = value as Record<string, unknown>;
+  return Object.keys(handoff).every(key => [...ids, "at"].includes(key))
+    && ids.every(key => typeof handoff[key] === "string" && (handoff[key] as string).length > 0)
+    && validTimestamp(handoff.at);
+}
+
+/** A pending target is optional as a whole, but never partially malformed. */
+function validPending(value: unknown): value is PendingConfig | undefined {
+  if (value === undefined) return true;
+  if (typeof value !== "object" || value === null) return false;
+  const pending = value as Partial<PendingConfig>;
+  if (Object.keys(pending).length === 0) return false;
+  if (Object.keys(pending).some(key => key !== "model" && key !== "reasoningEffort")) return false;
+  return (pending.model === undefined || typeof pending.model === "string" && pending.model.length > 0)
+    && (pending.reasoningEffort === undefined || typeof pending.reasoningEffort === "string" && pending.reasoningEffort.length > 0);
+}
+
+/** Whether one record still owns and may operate its native thread. */
+function claimsThread(record: StoredSession): boolean {
+  return record.handedOff === undefined && occupied(record);
 }
 
 function occupied(record: StoredSession): boolean {

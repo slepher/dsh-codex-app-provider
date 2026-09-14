@@ -16,6 +16,7 @@ import type {
   Conversation,
   CreateSessionOptions,
   CreateWorkerInput,
+  PendingConfig,
   Report,
   ReportAcceptance,
   SequencedBackendEvent,
@@ -24,6 +25,9 @@ import type {
   SubscribeOptions,
   ThreadPage,
   TurnInput,
+  ThreadHandoffRequest,
+  ThreadHandoffResult,
+  ThreadOwnership,
   TurnOptions,
   TurnSnapshot,
   Usage,
@@ -434,6 +438,7 @@ export class CodexSessionBackend implements CodexBackend {
         threadId: record.threadId,
       });
       if (result.thread?.id !== record.threadId) throw new Error("Recovered thread identity mismatch");
+      reconcilePending(record, result);
       checkBoundary(record, result);
       checkExecutionModel(record, result);
       if (result.thread.status?.type === "active" || result.thread.turns?.some(turn => turn.status === "inProgress")) {
@@ -486,6 +491,9 @@ export class CodexSessionBackend implements CodexBackend {
       const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
       if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
       record.threadId = result.thread.id;
+      // A rebuilt thread starts from the confirmed configuration; a target that
+      // was still pending when the rebuild began never applied.
+      reconcilePending(record, result);
       checkBoundary(record, result);
       checkExecutionModel(record, result);
       if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, result.thread.id) ?? record.usage;
@@ -616,6 +624,91 @@ export class CodexSessionBackend implements CodexBackend {
     return this.store.occupiedThreads();
   }
 
+  /**
+   * Read one native Session's thread ownership for Host reconciliation.
+   * @param ownerId - the provider's own owner identity.
+   * @param sessionId - native Session to inspect.
+   * @returns the recorded binding, or `undefined` when no record exists.
+   */
+  async threadOwnership(ownerId: string, sessionId: string): Promise<ThreadOwnership | undefined> {
+    const record = this.store.get(ownerId, sessionId);
+    if (record === undefined) return undefined;
+    return { sessionId, ...(record.threadId === undefined ? {} : { threadId: record.threadId }),
+      ...(record.handedOff === undefined ? {} : { handedOffTo: record.handedOff.toSessionId }),
+      ...(record.handoffFrom === undefined ? {} : { handoffFrom: record.handoffFrom.fromSessionId }) };
+  }
+
+  /**
+   * Hand one Codex thread from a stopped source record to a reserved successor.
+   *
+   * The source keeps its history, reports and usage but is de-authorized for
+   * start, resume, configure, compact and restart, so no path can take the
+   * thread back. The successor record carries the original thread identity, the
+   * target model/effort and the full execution inputs its first request will
+   * send, and is persisted before the successor's first model call. A repeated
+   * request with the same identity reuses its recorded handover, and a handover
+   * whose target write was lost is completed rather than re-decided.
+   * @param ownerId - the provider's own owner identity.
+   * @param request - source, reserved successor, target configuration and request identity.
+   * @returns the successor's recorded thread binding.
+   * @throws when the source is still live, its thread is active or changed, the
+   *   request conflicts with a recorded handover, or the successor identity is taken.
+   */
+  async handoffThread(ownerId: string, request: ThreadHandoffRequest): Promise<ThreadHandoffResult> {
+    const fields = [request?.requestId, request?.fromSessionId, request?.toSessionId, request?.model];
+    if (fields.some(value => typeof value !== "string" || value.length === 0)) {
+      throw new Error("Handoff request requires requestId, source, successor and target model");
+    }
+    if (request.fromSessionId === request.toSessionId) throw new Error("A handoff successor must differ from its source");
+    const from = this.required(ownerId, request.fromSessionId);
+    if (from.threadId === undefined) throw new Error("Source Session has no Codex thread to hand over");
+    const recorded = from.handedOff;
+    if (recorded !== undefined
+      && (recorded.requestId !== request.requestId || recorded.toSessionId !== request.toSessionId)) {
+      throw new Error("Thread handoff was already recorded with different inputs");
+    }
+    if (recorded === undefined) {
+      const live = this.live.get(request.fromSessionId);
+      if (live !== undefined) throw new Error("Source Session is still live; stop it before handing over its thread");
+      if (!["idle", "saved"].includes(from.state)) {
+        throw new Error(`Source Session is ${from.state}; stop it before handing over its thread`);
+      }
+      const result = await this.readWithTemporaryServer(rpc => rpc.request<ThreadResult>("thread/read", { threadId: from.threadId, includeTurns: false }));
+      const thread = result.thread;
+      if (thread?.id !== from.threadId) throw new Error("Native thread identity changed; handoff refused");
+      if (thread.status?.type === "active") throw new Error("Native thread is still active; handoff refused");
+      if (typeof thread.cwd !== "string" || thread.cwd !== from.cwd) throw new Error("Native thread workspace changed; handoff refused");
+    }
+    const existing = this.store.get(ownerId, request.toSessionId);
+    if (existing !== undefined && existing.handoffFrom?.requestId !== request.requestId) {
+      throw new Error("Handoff successor identity is already in use");
+    }
+    if (existing === undefined) {
+      const boundary = normalizedBoundary(request.boundary, from.cwd);
+      const options: CreateSessionOptions = { model: request.model,
+        ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+        ...(request.developerInstructions === undefined ? {} : { developerInstructions: request.developerInstructions }),
+        ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
+        ...(request.sandbox === undefined ? {} : { sandbox: request.sandbox }),
+        ...(boundary === undefined ? {} : { boundary }) };
+      this.guard({ ownerId, sessionId: request.toSessionId, action: "create", cwd: from.cwd, ...(boundary === undefined ? {} : { boundary }) });
+      // The source marker is written first: it is the de-authorization
+      // boundary, so a crash before the successor exists can only be retried
+      // with the same request identity, never reclaimed by the source.
+      if (recorded === undefined) {
+        from.handedOff = { toSessionId: request.toSessionId, requestId: request.requestId, at: Date.now() };
+        this.store.put(from);
+      }
+      const target: StoredSession = { ownerId, sessionId: request.toSessionId, threadId: from.threadId, cwd: from.cwd, state: "idle",
+        model: request.model, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+        approvals: [], options, events: [], nextEventSequence: 1, reports: [],
+        handoffFrom: { fromSessionId: request.fromSessionId, requestId: request.requestId, at: Date.now() } };
+      this.store.put(target);
+      return { toSessionId: target.sessionId, threadId: from.threadId, state: target.state };
+    }
+    return { toSessionId: existing.sessionId, threadId: existing.threadId ?? from.threadId, state: existing.state };
+  }
+
   async startTurn(owner: string | Caller, sessionId: string, input: string | readonly TurnInput[], options: StartTurnOptions = {}): Promise<TurnSnapshot> {
     const record = this.required(owner, sessionId);
     this.store.assertWritable(record);
@@ -631,6 +724,12 @@ export class CodexSessionBackend implements CodexBackend {
     )) throw new Error("Role execution profile cannot be overridden");
     this.managed(record, owner, "start");
     this.guard({ ownerId, sessionId, action: "start", cwd: record.cwd });
+    // A turn may request a model/effort other than the last confirmed one. The
+    // request is recorded as a pending target; `record.model` keeps the
+    // confirmed value until the App Server reports the settings it applied.
+    const target = pendingTarget(record, options);
+    if (target === undefined) delete record.pending;
+    else record.pending = target;
     const runtime = await this.runtime(record, owner);
     record.state = "running";
     record.turnId = undefined;
@@ -664,6 +763,10 @@ export class CodexSessionBackend implements CodexBackend {
     } catch (error) {
       record.state = error instanceof RpcError ? "idle" : "unknown";
       record.lastTurnState = record.state;
+      // An explicit rejection never applied the target: keep the confirmed
+      // configuration. An unknown outcome keeps the target pending for the
+      // resume path to reconcile against native facts.
+      if (error instanceof RpcError) delete record.pending;
       this.store.put(record);
       throw error;
     }
@@ -1045,6 +1148,16 @@ export class CodexSessionBackend implements CodexBackend {
       record.usage = params.tokenUsage;
       this.store.put(record);
       this.publish(record, { type: "usage.updated", sessionId: record.sessionId, usage: params.tokenUsage });
+    } else if (message.method === "thread/settings/updated") {
+      // The App Server reports the settings a thread actually runs. This is the
+      // native confirmation that promotes a pending target to the confirmed
+      // configuration; the initial creation snapshot in `options` is untouched.
+      const applied = objectValue(params.threadSettings);
+      if (typeof applied.model === "string" && applied.model.length > 0) record.model = applied.model;
+      if (typeof applied.effort === "string" && applied.effort.length > 0) record.reasoningEffort = applied.effort;
+      delete record.pending;
+      this.store.put(record);
+      this.publish(record, { type: "thread.notification", method: message.method, params });
     }
   }
 
@@ -1277,8 +1390,9 @@ function turnInput(input: string | readonly TurnInput[]): Record<string, unknown
 }
 
 function snapshot(record: StoredSession): SessionSnapshot {
-  const { sessionId, threadId, turnId, cwd, model, reasoningEffort, usage, state, options, reports } = record;
-  return { sessionId, threadId, turnId, cwd, model, reasoningEffort, usage, state, options: structuredClone(options), reports: structuredClone(reports) };
+  const { sessionId, threadId, turnId, cwd, model, reasoningEffort, pending, usage, state, options, reports } = record;
+  return { sessionId, threadId, turnId, cwd, model, reasoningEffort, ...(pending === undefined ? {} : { pending: structuredClone(pending) }),
+    usage, state, options: structuredClone(options), reports: structuredClone(reports) };
 }
 
 function turnSnapshot(record: StoredSession, state: TurnSnapshot["state"]): TurnSnapshot {
@@ -1409,6 +1523,32 @@ function checkExecutionModel(record: StoredSession, result: ThreadResult): void 
     || record.reasoningEffort !== undefined && result.reasoningEffort !== record.reasoningEffort) {
     throw new Error("App Server did not apply the requested execution model/effort (Workflow role profile when present)");
   }
+}
+
+/**
+ * The authorized target a turn requested, when it differs from the confirmed
+ * configuration. `undefined` means the request keeps the confirmed values.
+ */
+function pendingTarget(record: StoredSession, options: TurnOptions): PendingConfig | undefined {
+  const model = options.model !== undefined && options.model !== record.model ? options.model : undefined;
+  const reasoningEffort = options.reasoningEffort !== undefined && options.reasoningEffort !== record.reasoningEffort
+    ? options.reasoningEffort
+    : undefined;
+  if (model === undefined && reasoningEffort === undefined) return undefined;
+  return { ...(model === undefined ? {} : { model }), ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+}
+
+/**
+ * Promote or discard a pending target from native facts after a resume or
+ * rebuild. Native reports what the thread runs, so a target that was still
+ * pending when the process stopped is confirmed by the resumed thread rather
+ * than reverted to the configuration it was switched away from.
+ */
+function reconcilePending(record: StoredSession, result: ThreadResult): void {
+  if (record.pending === undefined) return;
+  if (typeof result.model === "string" && result.model.length > 0) record.model = result.model;
+  if (typeof result.reasoningEffort === "string" && result.reasoningEffort.length > 0) record.reasoningEffort = result.reasoningEffort;
+  delete record.pending;
 }
 
 function rolloutUsage(path: string, threadId: string): unknown | undefined {

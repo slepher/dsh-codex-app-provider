@@ -55,7 +55,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       providerCwd: resolve(config.providerCwd ?? process.cwd()),
     });
     unregister = ctx.llm.registerAdapter([CODEX_PROVIDER], provider);
-    ctx.provide("codexExecution", { read: nativeSessionId => provider!.readExecution(nativeSessionId) });
+    ctx.provide("codexExecution", {
+      read: nativeSessionId => provider!.readExecution(nativeSessionId),
+      facts: nativeSessionId => provider!.facts(nativeSessionId),
+    });
     unfilter = installCodexContextFilter(ctx);
   }, "dsh-codex-app-provider: execution lifecycle");
 }
