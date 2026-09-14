@@ -906,6 +906,37 @@ test("uncertain RPC ends the stream without replaying, and stale events cannot c
 });
 
 
+test("the deployment's own workspace supplies the default model and effort", async t => {
+  const fixture = setup("dsh-provider-workspace-defaults-");
+  const workspace = mkdtempSync(join(tmpdir(), "dsh-provider-workspace-"));
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); rmSync(workspace, { recursive: true, force: true }); });
+  // The workspace configuration names no model: the catalogue's default model
+  // decides, with that model's own default effort.
+  fixture.hub.config = {};
+  fixture.hub.models = [
+    { model: "luna", displayName: "Luna", isDefault: false, defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }] },
+    { model: "sol", displayName: "Sol", isDefault: true, defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep" }] },
+  ];
+  const adapter = new CodexProviderAdapter({ backend: fixture.backend, sessions: { get: () => undefined },
+    agents: { get: () => undefined }, logger: { warn() {} }, providerCwd: workspace });
+
+  const preferred = await adapter.resolveModel("codex", "sol");
+  assert.equal(preferred.reasoning.defaultEffort, "high",
+    "the catalogue's default model keeps its own default effort when the workspace names none");
+  assert.deepEqual(preferred.reasoning.efforts.map(effort => effort.id), ["high"]);
+  const other = await adapter.resolveModel("codex", "luna");
+  assert.equal(other.reasoning.defaultEffort, "low", "every other model keeps its own default effort");
+
+  const calls = fixture.hub.servers.flatMap(server => server.calls ?? []);
+  assert.equal(calls.find(call => call.method === "config/read")?.params.cwd, workspace,
+    "the App Server is asked about this deployment's workspace, not a guessed directory");
+  assert.equal(calls.find(call => call.method === "model/list")?.params.cwd, workspace);
+  assert.equal(calls.some(call => call.method === "thread/start" || call.method === "turn/start"), false,
+    "resolving the defaults performs no execution");
+});
+
 test("consumes explicit native execution inputs and rejects changed identity/configuration before sending text", async t => {
   const fixture = setup("dsh-provider-execution-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
