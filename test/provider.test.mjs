@@ -1030,6 +1030,30 @@ test("executed native facts are persisted as plugin-sourced DSH messages with st
   assert.notEqual(appended[1].data.id, fact.data.id, "a distinct native item gets a distinct identity");
 });
 
+test("a declared boundary is snapshotted, so a caller mutating it cannot rewrite the execution", async t => {
+  const fixture = setup("dsh-provider-snapshot-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const roots = [fixture.cwd];
+  const execution = { developerInstructions: "Role A", boundary: { cwd: fixture.cwd, writableRoots: roots, network: "disabled" } };
+  fixture.hub.threadResult = { cwd: fixture.cwd, approvalPolicy: "never", sandbox: {
+    type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+  const session = { id: "child", header: { cwd: fixture.cwd } };
+  const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+  const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+  await liveTurn(adapter, fixture, "child", options("child", [user("u1", "task")], { execution }), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const recorded = await fixture.backend.readSession(OWNER, "codex:child");
+  // The caller now rewrites the very array it declared; the Session's recorded
+  // and effective inputs must not follow it.
+  roots.push("/elsewhere");
+  assert.deepEqual(recorded.options.boundary.writableRoots, [fixture.cwd]);
+  assert.deepEqual((await fixture.backend.readSession(OWNER, "codex:child")).options.boundary.writableRoots, [fixture.cwd]);
+  const start = sessionServer(fixture.hub).calls.find(call => call.method === "thread/start").params;
+  assert.deepEqual(Object.keys(start.config.permissions["dsh-task"].filesystem).filter(path => path !== ":root"), [fixture.cwd]);
+});
+
 test("a cold recovery imports the facts a previous process recorded but never appended", async t => {
   const fixture = setup("dsh-provider-facts-recovery-");
   const session = new FakeAppendSession("main", fixture.cwd);

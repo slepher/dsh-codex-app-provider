@@ -22,6 +22,21 @@ export interface ProviderExecutionInputs {
   boundary?: ExecutionBoundary;
 }
 
+/**
+ * Detach one declared boundary from its owner.
+ *
+ * `AgentOptions` composition spreads a caller's object shallowly, so a nested
+ * `boundary` stays the caller's own reference: a later mutation of the caller's
+ * `writableRoots` would otherwise rewrite what this Session recorded and what a
+ * later request is compared against. The provider reads its own snapshot so an
+ * execution's inputs are fixed the moment they are observed.
+ * @param boundary - the declared boundary, already structurally validated.
+ * @returns an independent boundary value.
+ */
+function snapshotBoundary(boundary: ExecutionBoundary): ExecutionBoundary {
+  return { cwd: boundary.cwd, writableRoots: [...boundary.writableRoots], network: boundary.network };
+}
+
 function isBoundary(value: unknown): value is ExecutionBoundary {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const boundary = value as { cwd?: unknown; writableRoots?: unknown; network?: unknown };
@@ -56,7 +71,7 @@ export function readExecutionInputs(carrier: unknown): ProviderExecutionInputs |
   }
   return {
     ...(record.developerInstructions === undefined ? {} : { developerInstructions: record.developerInstructions }),
-    ...(record.boundary === undefined ? {} : { boundary: record.boundary }),
+    ...(record.boundary === undefined ? {} : { boundary: snapshotBoundary(record.boundary) }),
   };
 }
 

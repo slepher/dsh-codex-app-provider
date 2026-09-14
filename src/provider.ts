@@ -999,7 +999,8 @@ function recordedExecution(record: SessionSnapshot | undefined): ProviderExecuti
   if (options?.developerInstructions === undefined && options?.boundary === undefined) return undefined;
   return {
     ...(options.developerInstructions === undefined ? {} : { developerInstructions: options.developerInstructions }),
-    ...(options.boundary === undefined ? {} : { boundary: options.boundary }),
+    ...(options.boundary === undefined ? {} : { boundary: { cwd: options.boundary.cwd,
+      writableRoots: [...options.boundary.writableRoots], network: options.boundary.network } }),
   };
 }
 

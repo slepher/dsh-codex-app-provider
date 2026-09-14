@@ -13,7 +13,9 @@ export function apply(ctx) {
   let started = false;
   const requests = [], failures = [];
   ctx.on("llm/stream", async function* (options, next) {
-    if (options.execution !== undefined) requests.push({ sessionId: options.sessionId, model: options.model, reasoningEffort: options.reasoningEffort, execution: options.execution });
+    // Record every request: whether a core carries the plugin's execution inputs
+    // into the assembled request is one of the facts under observation.
+    requests.push({ sessionId: options.sessionId, model: options.model, reasoningEffort: options.reasoningEffort, execution: options.execution ?? null });
     for await (const chunk of next()) {
       if (chunk.type === "finish" && (chunk.reason.kind === "error" || chunk.reason.kind === "aborted")) {
         failures.push({ sessionId: options.sessionId, reason: chunk.reason });
@@ -40,13 +42,21 @@ export function apply(ctx) {
         developerInstructions: `Your role marker is DSH_ROLE_${role}. Reply with only this marker when asked. ${externalEvents ? `Before every reply, use your native shell to run printf DSH_TOOL_${role}.` : "Do not run tools."}`,
         boundary: { cwd: parent.session.header.cwd, writableRoots: [parent.session.header.cwd], network: "disabled" },
       };
+      // The dispatcher owns the child's execution snapshot, exactly as the
+      // workflow does: it hands over a detached value, so changing its own copy
+      // afterwards must not reach the child. The core composes `AgentOptions` by
+      // spreading the request shallowly (`resolveChildAgentOptions`), so a nested
+      // object passed by reference would stay the caller's.
+      const dispatched = structuredClone(execution);
       const created = await ctx.subagents.startContinuable({
         provider: "spawn", label: `native role ${role}`,
         request: { parent, prompt: [{ type: "text", text: "Reply with your role marker." }], agentOptions: {
-          provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna", reasoningEffort: ReasoningEffortId("medium"), execution,
+          provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna", reasoningEffort: ReasoningEffortId("medium"), execution: dispatched,
         } }, signal,
       });
-      children.push({ role, id: created.childId, execution: structuredClone(execution) });
+      children.push({ role, id: created.childId, execution: structuredClone(dispatched) });
+      // The caller changes its own configuration after dispatch; the child's
+      // dispatched snapshot must be what it runs.
       execution.developerInstructions = "Changed caller configuration; must not affect this child.";
       await idle(created.childId);
     }
@@ -86,7 +96,13 @@ export function apply(ctx) {
           keys: Object.keys(descriptor.data).sort() };
         if (descriptor.data.execution !== undefined) assert.deepEqual(descriptor.data.execution, child.execution);
         assert.ok(headers.length >= (child.role === "A" ? 2 : 1));
-        for (const header of headers) assert.deepEqual(header.data.header.config.execution, child.execution);
+        // Whether the plugin's execution inputs appear in the request header is
+        // likewise core-owned: observe it, and hold the plugin to it only where
+        // the core actually carries it.
+        child.observed.headerExecution = headers.map(header => header.data.header.config.execution ?? null);
+        for (const header of headers) {
+          if (header.data.header.config.execution !== undefined) assert.deepEqual(header.data.header.config.execution, child.execution);
+        }
         assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"],
           `the child must run the role instructions it was dispatched with; descriptor=${JSON.stringify(child.observed.descriptor)}. `
           + "A core that does not carry the plugin's execution field requires the workflow to restore role instructions through the official Agent/pre-step seam (repair.md §4.7)");
@@ -112,6 +128,10 @@ export function apply(ctx) {
         }
       } finally { await handle.close(); }
     }
+    // The durable facts: each child ran the turns it was dispatched with, and
+    // each turn was one model request. Neither depends on the core carrying a
+    // plugin-declared execution field.
+    assert.deepEqual(children.map(child => child.observed.turns.length), [2, 1], "each child ran its dispatched turns");
     assert.equal(requests.filter(request => request.sessionId === children[0].id).length, 2);
     assert.equal(requests.filter(request => request.sessionId === children[1].id).length, 1);
     await writeFile(process.env.DSH_NATIVE_CHILD_RESULT, JSON.stringify({ status: externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_SPAWN_COLD_AGENT_RESUME", parentSessionId: parent.id, children, requests }, null, 2));
