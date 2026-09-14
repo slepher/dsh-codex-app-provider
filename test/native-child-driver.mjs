@@ -81,6 +81,11 @@ export function apply(ctx) {
           steps: events.filter(event => event.type === "step/start" || event.type === "step/end")
             .map(event => `${event.type}:${event.data.turn}/${event.data.step}`),
           eventTypes: [...new Set(events.map(event => event.type))].sort(),
+          // Every user-role row the log holds, so a missing or unexpected fact
+          // import is diagnosable from the evidence directory.
+          userMessages: events.filter(event => event.type === "user/message").map(event => ({
+            plugin: event.data?.source?.plugin ?? null, kind: event.data?.source?.kind ?? null,
+            id: event.data?.id ?? null, text: String(event.data?.content?.[0]?.text ?? "").slice(0, 80) })),
         };
         await writeFile(`${process.env.DSH_NATIVE_CHILD_RESULT}.observed`, JSON.stringify({ status: "CHILD_OBSERVED", children, requests, failures }, null, 2));
         assert.equal(handle.header.parentSession, parent.id);
@@ -116,7 +121,7 @@ export function apply(ctx) {
           assert.ok(facts.filter(line => line.includes(`DSH_TOOL_${child.role}`)).length >= (child.role === "A" ? 2 : 1));
           const imported = events.filter(event => event.type === "user/message"
             && event.data?.source?.plugin === "dsh-codex-app-provider");
-          assert.ok(imported.length >= 2, "executed facts are persisted in the DSH session log");
+          assert.ok(imported.length >= (child.role === "A" ? 2 : 1), "every executed native item is persisted in the DSH session log");
           assert.ok(imported.every(event => typeof event.data.id === "string" && event.data.id.startsWith("codex-executed:")),
             "every imported fact carries a stable native-item identity");
           assert.ok(imported.every(event => event.data.source.form === "notice"), "an imported fact is presented as a notice, not a human prompt");

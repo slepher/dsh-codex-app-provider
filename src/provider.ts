@@ -147,6 +147,8 @@ export class CodexProviderAdapter extends LlmAdapter {
   private closed = false;
   private retiredFactChannelNoted = false;
   private catalogCache: { at: number; value: ModelSettings } | undefined;
+  /** Sessions whose fact import already reported a failure. */
+  private readonly factImportFailures = new Set<string>();
   private catalogFlight: Promise<ModelSettings> | undefined;
 
   constructor(private readonly deps: CodexProviderDeps) {
@@ -363,7 +365,12 @@ export class CodexProviderAdapter extends LlmAdapter {
    */
   private async importExecutionFacts(sessionId: string): Promise<void> {
     const session = this.deps.sessions.get(sessionId);
-    if (session === undefined || session.append === undefined) return;
+    if (session === undefined || session.append === undefined) {
+      // The DSH session log is the conversation's source of truth, so an
+      // unavailable Session face is a real degradation, not a silent skip.
+      this.noteFactImportFailure(sessionId, "the Session is not appendable in this composition");
+      return;
+    }
     try {
       const events = await this.deps.backend.readEvents(OWNER_ID, backendSessionId(sessionId));
       const pending = factMessages(projectExecutionFacts(reduceExecutionEvents(events)));
@@ -378,8 +385,15 @@ export class CodexProviderAdapter extends LlmAdapter {
       }
       this.noteFactChannel();
     } catch (error) {
-      this.deps.logger.warn(`Codex execution facts could not be appended to the DSH session log: ${String(error)}`);
+      this.noteFactImportFailure(sessionId, String(error));
     }
+  }
+
+  /** Report one fact-import failure once per Session, so it is never silent. */
+  private noteFactImportFailure(sessionId: string, reason: string): void {
+    if (this.factImportFailures.has(sessionId)) return;
+    this.factImportFailures.add(sessionId);
+    this.deps.logger.warn(`Codex execution facts could not be appended to the DSH session log for ${sessionId}: ${reason}`);
   }
 
   async readExecution(nativeSessionId: string): Promise<NativeExecution | undefined> {

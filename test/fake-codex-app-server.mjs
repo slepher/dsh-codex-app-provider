@@ -95,11 +95,24 @@ function finalTextFor(threadId) {
   return marker?.[0] ?? finalText;
 }
 
+/**
+ * The command output one thread's turn reports.
+ *
+ * A verification child whose instructions name a `DSH_TOOL_*` marker gets that
+ * marker in its command output, so a hermetic run can exercise the whole native
+ * tool -> provider store -> DSH session fact chain without a real shell.
+ */
+function commandOutputFor(threadId) {
+  const instructions = recall(threadId)?.developerInstructions ?? "";
+  const marker = /DSH_TOOL_[A-Z0-9]+/.exec(instructions) ?? /printf (DSH_TOOL_[A-Z0-9]+)/.exec(instructions);
+  return marker === null ? commandOutput : `${commandOutput}\n${marker[1] ?? marker[0]}`;
+}
+
 function completeTurn(threadId, id) {
   notify("turn/started", { threadId, turn: { id, status: "inProgress" } });
   notify("item/completed", { threadId, turnId: id, item: {
     id: `item-${id}`, type: "commandExecution", command: "run-fake-command", status: "completed",
-    exitCode: 0, cwd: recall(threadId)?.cwd, aggregatedOutput: `${commandOutput}\n` } });
+    exitCode: 0, cwd: recall(threadId)?.cwd, aggregatedOutput: `${commandOutputFor(threadId)}\n` } });
   notify("item/completed", { threadId, turnId: id, item: { type: "agentMessage", phase: "final_answer", text: finalTextFor(threadId) } });
   notify("turn/completed", { threadId, turn: { id, status: "completed" } });
 }
