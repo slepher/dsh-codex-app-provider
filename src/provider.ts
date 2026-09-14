@@ -39,6 +39,7 @@ import type {
   UserInputRequest,
 } from "./browser-types.js";
 import { isCodexVisible, isInjectedContext } from "./context.js";
+import { factMessage, factMessages, importedFactIds } from "./facts.js";
 import {
   executionCwd,
   executionInputsEqual,
@@ -339,16 +340,48 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   /**
-   * Announce once that execution facts stay out of the DSH session log.
+   * Announce once that execution facts now travel through the DSH session log.
    *
-   * The degradation is deliberate: stock core rejects an unknown session event
-   * when the session is read, so the provider keeps the facts in its own store
-   * and the session log stays readable.
+   * The provider store stays the raw record; the session log carries the visible
+   * and resumable representation of what actually ran, so a reader of the
+   * conversation can see the executed work without the provider.
    */
-  private noteRetiredFactChannel(): void {
+  private noteFactChannel(): void {
     if (this.retiredFactChannelNoted) return;
     this.retiredFactChannelNoted = true;
-    this.deps.logger.warn("Codex execution facts are not written to the DSH session log on this core; they remain readable from the provider store");
+    this.deps.logger.warn("Codex execution facts are appended to the DSH session log as plugin-sourced user messages; the provider store keeps the raw record");
+  }
+
+  /**
+   * Persist newly executed native facts into the DSH session log.
+   *
+   * `agent.inject()` only queues the next pre-step and a cancelled or exited
+   * session would lose the record, so the durable path is a real
+   * `user/message` append sourced from this plugin. Reading the current log
+   * first makes the import idempotent: the message identity is derived from the
+   * native item, so a retried turn, a reconnect or a cold recovery re-derives
+   * the same identity instead of duplicating an executed command.
+   * @param sessionId - the DSH Session whose executed facts to import.
+   */
+  private async importExecutionFacts(sessionId: string): Promise<void> {
+    const session = this.deps.sessions.get(sessionId);
+    if (session === undefined) return;
+    const append = session.append;
+    if (append === undefined) return;
+    try {
+      const events = await this.deps.backend.readEvents(OWNER_ID, backendSessionId(sessionId));
+      const pending = factMessages(projectExecutionFacts(reduceExecutionEvents(events)));
+      if (pending.length === 0) return;
+      const imported = new Set(importedFactIds(session.snapshotEvents?.() as readonly { type: string; data: unknown }[] | undefined));
+      for (const fact of pending) {
+        if (imported.has(fact.id)) continue;
+        append("user/message", factMessage(fact), { surfaceOp: "append" });
+        imported.add(fact.id);
+      }
+      this.noteFactChannel();
+    } catch (error) {
+      this.deps.logger.warn(`Codex execution facts could not be appended to the DSH session log: ${String(error)}`);
+    }
   }
 
   async readExecution(nativeSessionId: string): Promise<NativeExecution | undefined> {
@@ -481,6 +514,9 @@ export class CodexProviderAdapter extends LlmAdapter {
       && (record.executionCwd ?? recordedExecution(record)?.boundary?.cwd ?? cwd) !== targetExecutionCwd) {
       throw new LlmError("This Session's Codex execution location changed; start a new child", "EXECUTION_MISMATCH");
     }
+    // Catch up on facts a previous process recorded but never imported — an
+    // interrupted final turn, or a crash between the native turn and the append.
+    await this.importExecutionFacts(sessionId);
     // A recorded effective execution is the thread's configuration baseline: a
     // cold recovery that carries no explicit inputs continues it instead of
     // demanding that a missing live Agent snapshot still declares them. A first
@@ -524,7 +560,6 @@ export class CodexProviderAdapter extends LlmAdapter {
       throw providerError(error);
     }
     this.cursors.set(sessionId, plan.key);
-    this.noteRetiredFactChannel();
     let text = "", completedText: string | undefined, error: string | undefined;
     let status: TurnSnapshot["state"] | undefined, blockStarted = false;
     try {
@@ -563,6 +598,11 @@ export class CodexProviderAdapter extends LlmAdapter {
     } finally {
       off();
       channel.close();
+      // The backend committed every recorded fact before the channel closed, so
+      // the projection is complete for a completed, failed or observed
+      // interrupted turn. A turn interrupted while the process was still
+      // waiting is imported by the next request's catch-up below.
+      await this.importExecutionFacts(sessionId);
     }
     const output = completedText ?? text;
     if (signal?.aborted) {

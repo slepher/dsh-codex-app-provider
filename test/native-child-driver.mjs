@@ -70,12 +70,21 @@ export function apply(ctx) {
         assert.deepEqual(outputs, child.role === "A" ? ["DSH_ROLE_A", "DSH_ROLE_A"] : ["DSH_ROLE_B"]);
         child.outputs = outputs;
         if (externalEvents) {
-          // Execution facts live in the provider store, not the DSH session log:
-          // stock core rejects an unknown `codex/execution` session event on read.
+          // The provider store keeps the raw record; the DSH session log carries
+          // the visible, replayable representation of what actually ran.
           const facts = await ctx.codexExecution.facts(child.id);
           assert.ok(facts.length >= 2, "Native tool facts were projected from the provider store");
           assert.ok(facts.every(line => line.startsWith("[source: codex thread=")), "every projected line carries its durable item identity");
           assert.ok(facts.filter(line => line.includes(`DSH_TOOL_${child.role}`)).length >= (child.role === "A" ? 2 : 1));
+          const imported = events.filter(event => event.type === "user/message"
+            && event.data?.source?.plugin === "dsh-codex-app-provider");
+          assert.ok(imported.length >= 2, "executed facts are persisted in the DSH session log");
+          assert.ok(imported.every(event => typeof event.data.id === "string" && event.data.id.startsWith("codex-executed:")),
+            "every imported fact carries a stable native-item identity");
+          assert.ok(imported.every(event => event.data.source.form === "notice"), "an imported fact is presented as a notice, not a human prompt");
+          assert.equal(new Set(imported.map(event => event.data.id)).size, imported.length, "no executed fact is imported twice");
+          const importedText = imported.flatMap(event => event.data.content.map(block => block.text)).join("\n");
+          assert.ok(importedText.includes(`DSH_TOOL_${child.role}`), "the executed command is readable from the DSH log");
           assert.equal(events.filter(event => event.type === "tool/call").length, 0, "DSH did not execute Codex tools again");
           child.externalExecutionFacts = facts;
         }

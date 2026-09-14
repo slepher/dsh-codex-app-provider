@@ -958,6 +958,82 @@ test("an instructions-only execution gains no permissions, sandbox or approval p
   assert.equal(record.executionCwd, fixture.cwd);
 });
 
+test("executed native facts are persisted as plugin-sourced DSH messages with stable identity", async t => {
+  const fixture = setup("dsh-provider-facts-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const appended = [];
+  const session = { id: "main", header: { cwd: fixture.cwd },
+    append: (type, data, intent) => { appended.push({ type, data, intent }); return { type, data }; },
+    snapshotEvents: () => appended.map(entry => ({ type: entry.type, data: entry.data })) };
+  const adapter = adapterFor(fixture, { sessions: new Map([["main", session]]) });
+
+  await liveTurn(adapter, fixture, "main", options("main", [user("u1", "run it")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: {
+      id: "item-1", type: "commandExecution", command: "echo hi", status: "completed", exitCode: 0, aggregatedOutput: "hi\n" } });
+    // A reasoning item carries only its public summary; raw reasoning never crosses.
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: {
+      id: "item-reasoning", type: "reasoning", summary: ["public summary"], content: ["hidden chain of thought"] } });
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+
+  assert.equal(appended.length, 1, "one message per executed native item, and none for model reasoning");
+  const [fact] = appended;
+  assert.equal(fact.type, "user/message");
+  assert.deepEqual(fact.intent, { surfaceOp: "append" }, "the append is a real surface placement, not an inbox injection");
+  assert.equal(fact.data.role, "user");
+  assert.equal(fact.data.source.kind, "plugin");
+  assert.equal(fact.data.source.plugin, "dsh-codex-app-provider");
+  assert.equal(fact.data.source.form, "notice");
+  assert.ok(fact.data.source.summary.length <= 120);
+  const threadId = fact.data.id.split(":")[1], turnId = fact.data.id.split(":")[2], itemId = fact.data.id.split(":")[3];
+  assert.equal(fact.data.id, `codex-executed:${threadId}:${turnId}:${itemId}`, "the identity is derived from the native item");
+  assert.equal(itemId, "item-1");
+  const text = fact.data.content.map(block => block.text).join("\n");
+  assert.match(text, /\[source: codex thread=/, "the fact names its durable native source");
+  assert.match(text, /command: echo hi \(exit 0/);
+  assert.match(text, /hi/);
+  assert.doesNotMatch(text, /hidden chain of thought/, "hidden reasoning never enters the DSH log");
+
+  // A later turn re-reads the same log: an already-imported fact is never appended twice.
+  await liveTurn(adapter, fixture, "main", options("main", [user("u2", "again")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: {
+      id: "item-2", type: "fileChange", status: "completed", changes: [{ path: "src/a.ts", kind: "update" }] } });
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  assert.equal(appended.length, 2, "the previous turn's fact is deduplicated, the new one is imported");
+  assert.equal(appended[0].data.id, fact.data.id);
+  assert.match(appended[1].data.content.map(block => block.text).join("\n"), /file change: src\/a\.ts \(update\)/);
+  assert.notEqual(appended[1].data.id, fact.data.id, "a distinct native item gets a distinct identity");
+});
+
+test("a cold recovery imports the facts a previous process recorded but never appended", async t => {
+  const fixture = setup("dsh-provider-facts-recovery-");
+  const appended = [];
+  const session = { id: "main", header: { cwd: fixture.cwd },
+    append: (type, data, intent) => { appended.push({ type, data, intent }); return { type, data }; },
+    snapshotEvents: () => appended.map(entry => ({ type: entry.type, data: entry.data })) };
+  // First process records the native fact but has no DSH Session face to append to.
+  const blind = adapterFor(fixture, { sessions: new Map([["main", { id: "main", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(blind, fixture, "main", options("main", [user("u1", "run it")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: {
+      id: "item-1", type: "commandExecution", command: "echo recovered", status: "completed", exitCode: 0, aggregatedOutput: "recovered\n" } });
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  assert.equal(appended.length, 0, "without a Session face the facts stay in the provider store only");
+
+  const adapter = adapterFor(fixture, { sessions: new Map([["main", session]]) });
+  await liveTurn(adapter, fixture, "main", options("main", [user("u2", "next")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  assert.equal(appended.length, 1, "the missed fact is caught up on the next request");
+  assert.match(appended[0].data.content.map(block => block.text).join("\n"), /echo recovered/);
+});
+
 test("a managed child's first creation reads the live Agent execution when the stock request carries none", async t => {
   const fixture = setup("dsh-provider-agent-execution-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
@@ -1057,11 +1133,13 @@ test("a cold recovery without the live Agent continues from the recorded executi
   assert.equal(resumed[0].params.config.permissions["dsh-task"].filesystem[fixture.cwd], "write");
 });
 
-test("projects recorded native items from the provider store and never appends execution facts to the session log", async t => {
+test("projects recorded native items from the provider store and appends them as DSH facts", async t => {
   const fixture = setup("dsh-provider-facts-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
   const appended = [];
-  const session = { id: "s1", header: { cwd: fixture.cwd }, append: (...args) => appended.push(args), snapshotEvents: () => [] };
+  const session = { id: "s1", header: { cwd: fixture.cwd },
+    append: (...args) => { appended.push(args); return { type: args[0], data: args[1] }; },
+    snapshotEvents: () => appended.map(args => ({ type: args[0], data: args[1] })) };
   const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
   await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "record facts")]), async server => {
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { id: "i1", type: "commandExecution", command: "pnpm test", exitCode: 0, aggregatedOutput: "3 passed" } });
@@ -1069,12 +1147,22 @@ test("projects recorded native items from the provider store and never appends e
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
-  assert.deepEqual(appended, [], "execution facts are never written to the DSH session log on stock core");
   const record = await fixture.backend.readSession(OWNER, "codex:s1");
-  assert.deepEqual(await adapter.facts("s1"), [
+  const expected = [
     `[source: codex thread=${record.threadId} turn=${record.turnId} item=i1] command: pnpm test (exit 0)`,
     `[source: codex thread=${record.threadId} turn=${record.turnId} item=i1] 3 passed`,
-  ], "only executed facts cross, each with its durable item identity");
+  ];
+  // The same facts are readable both ways: the provider store remains the raw
+  // record for a cross-provider continuation, and the DSH session log carries
+  // the visible, replayable representation.
+  assert.deepEqual(await adapter.facts("s1"), expected, "only executed facts cross, each with its durable item identity");
+  assert.equal(appended.length, 1, "the executed item is appended once, the reasoning item never");
+  const [type, message, intent] = appended[0];
+  assert.equal(type, "user/message");
+  assert.deepEqual(intent, { surfaceOp: "append" });
+  assert.deepEqual(message.content, [{ type: "text", text: expected.join("\n") }]);
+  assert.deepEqual(message.source, { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice",
+    summary: "Codex executed: " + expected[0] });
   await assert.rejects(adapter.facts("unknown-session"), /Session not found/, "an unknown Session is an error, never empty success");
   await assert.rejects(adapter.facts(""), /identity is required/);
 });

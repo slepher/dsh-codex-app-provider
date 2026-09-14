@@ -5,6 +5,8 @@ import type { Message } from "@deepseek-ai/dsh-llm";
 const INJECTED_FORMS = new Set(["instructions", "catalog", "snapshot"]);
 const DSH_SYSTEM_PROMPT = "@deepseek-ai/dsh-system-prompt";
 const COMPACT_CHECKPOINT = "compact";
+/** The provider's own executed-fact import; already in the Codex thread. */
+const CODEX_FACTS_PLUGIN = "dsh-codex-app-provider";
 
 interface SourceFace {
   kind?: unknown;
@@ -23,6 +25,9 @@ export function isInjectedContext(message: Message): boolean {
   // A user-invoked DSH skill is explicit input, not background context.
   if (source.kind === "skill-invocation") return false;
   if (source.kind === "plugin" && source.plugin === COMPACT_CHECKPOINT) return false;
+  // Executed Codex facts are already in the native thread; re-sending them would
+  // duplicate work the thread performed and re-present it as an instruction.
+  if (source.kind === "plugin" && source.plugin === CODEX_FACTS_PLUGIN) return true;
   if (source.kind === "plugin" && source.plugin === DSH_SYSTEM_PROMPT) return true;
   if (source.kind === "plugin" && source.plugin === "agent-instructions") return true;
   if (source.kind === "agent-instructions" || source.kind === "skill-catalog") return true;
