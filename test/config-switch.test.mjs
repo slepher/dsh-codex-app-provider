@@ -131,6 +131,33 @@ test("a managed child switches model and effort in the same thread, pending unti
   assert.equal(server.calls.filter(call => call.method === "thread/start").length, 1, "no forked or rebuilt thread");
 });
 
+test("an ordinary main Session switches model and effort on a later turn without a new thread", async t => {
+  const fixture = setup("dsh-provider-main-switch-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const session = { id: "main", header: { cwd: fixture.cwd } };
+  const adapter = new CodexProviderAdapter({
+    backend: fixture.backend, sessions: { get: id => (id === "main" ? session : undefined) },
+    agents: { get: () => undefined }, logger: { warn() {} }, providerCwd: fixture.cwd,
+  });
+
+  await liveTurn(adapter, fixture, "main", options("main", [user("u1", "first")]), async server => { completed(server); });
+  const server = fixture.servers[0];
+  // The user picks another model in the native picker; the next request carries
+  // it and the App Server confirms what the same thread now runs.
+  await liveTurn(adapter, fixture, "main", options("main", [user("u2", "second")], { model: "sol", reasoningEffort: "low" }), async live => {
+    const starts = server.calls.filter(call => call.method === "turn/start");
+    assert.deepEqual([starts.at(-1).params.model, starts.at(-1).params.effort], ["sol", "low"],
+      "the user's new selection reaches the App Server");
+    live.notify("thread/settings/updated", { threadId: server.thread, threadSettings: { model: "sol", effort: "low" } });
+    completed(live);
+  });
+  assert.equal(server.calls.filter(call => call.method === "thread/start").length, 1, "no replacement Session is built");
+  assert.equal(fixture.servers.length, 1, "the switch reuses the one App Server runtime");
+  const record = await fixture.backend.readSession(OWNER, "codex:main");
+  assert.deepEqual([record.model, record.reasoningEffort], ["sol", "low"], "the native confirmation is recorded");
+  assert.equal(record.executionCwd, fixture.cwd, "an unscoped Session runs in its host workspace");
+});
+
 test("an explicitly rejected switch keeps the last confirmed configuration", async t => {
   const fixture = setup("dsh-provider-switch-reject-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });

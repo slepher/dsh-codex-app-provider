@@ -41,7 +41,15 @@ const recall = threadId => {
 
 let turnCounter = 0;
 
-/** The configuration the App Server reports it applied for one thread request. */
+/**
+ * The configuration the App Server reports it applied for one thread request.
+ *
+ * The report is derived from the request the way real Codex derives it: the
+ * `dsh-task` permissions profile when one was sent, otherwise the explicitly
+ * requested sandbox mode, otherwise Codex's own configuration (reported as
+ * absent). Approval policy is only ever what the request declared — this fake
+ * never invents one, exactly as an unmodified App Server would not.
+ */
 function applied(params) {
   const permissions = params.config?.permissions?.["dsh-task"];
   const writableRoots = permissions === undefined
@@ -51,14 +59,14 @@ function applied(params) {
     cwd: params.cwd,
     model: params.model ?? "luna",
     reasoningEffort: params.config?.model_reasoning_effort,
-    approvalPolicy: params.approvalPolicy ?? (permissions === undefined ? undefined : "never"),
-    sandbox: permissions === undefined ? undefined : {
+    ...(params.approvalPolicy === undefined ? {} : { approvalPolicy: params.approvalPolicy }),
+    sandbox: permissions !== undefined ? {
       type: "workspaceWrite",
       writableRoots,
       excludeSlashTmp: true,
       excludeTmpdirEnvVar: true,
       networkAccess: permissions.network?.enabled === true,
-    },
+    } : params.sandbox !== undefined ? { type: params.sandbox === "read-only" ? "readOnly" : "workspaceWrite", writableRoots, excludeSlashTmp: true, excludeTmpdirEnvVar: true, networkAccess: false } : undefined,
   };
 }
 

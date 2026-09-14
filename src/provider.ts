@@ -40,9 +40,9 @@ import type {
 } from "./browser-types.js";
 import { isCodexVisible, isInjectedContext } from "./context.js";
 import {
+  executionCwd,
   executionInputsEqual,
   readExecutionInputs,
-  repositoryWritableExecution,
   type ProviderExecutionInputs,
 } from "./execution-inputs.js";
 
@@ -418,26 +418,25 @@ export class CodexProviderAdapter extends LlmAdapter {
    * Stock core does not fill `GenerateOptions.execution`, so the request is
    * preferred when it carries inputs but the live Agent's creation snapshot is
    * the fallback that keeps a managed child's role instructions and boundary.
-   * Both sources are converted to the Session workspace before comparison, and
-   * an explicit request must still be authorized by the live Agent's route: a
+   * The declared inputs travel verbatim: this plugin never rewrites a task
+   * boundary into the Session workspace or widens its writable roots, and an
+   * explicit request must still be authorized by the live Agent's route. A
    * managed child may switch model/effort between turns only through the core's
    * guarded configuration update, which is what keeps them equal.
    * @param options - the assembled request.
    * @param agent - the live Agent for this Session, when one is registered.
-   * @param cwd - the Session workspace the boundary is pinned to.
    * @returns the effective inputs, or undefined for an ordinary Codex Session.
    */
   private requestedExecution(
     options: GenerateOptions,
     agent: Agent | undefined,
-    cwd: string,
   ): ProviderExecutionInputs | undefined {
     const live = agent !== undefined && String(agent.session.id) === options.sessionId ? agent : undefined;
     let fromRequest: ProviderExecutionInputs | undefined;
     let fromAgent: ProviderExecutionInputs | undefined;
     try {
-      fromRequest = repositoryWritableExecution(readExecutionInputs(options), cwd);
-      fromAgent = repositoryWritableExecution(readExecutionInputs(live?.options), cwd);
+      fromRequest = readExecutionInputs(options);
+      fromAgent = readExecutionInputs(live?.options);
     } catch (error) {
       throw new LlmError(error instanceof Error ? error.message : String(error), "EXECUTION_MISMATCH");
     }
@@ -466,13 +465,21 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (cwd === undefined) throw new LlmError("Codex provider requires a Session workspace (cwd)", "NO_WORKSPACE");
     const owner = OWNER_ID, backendId = backendSessionId(sessionId), backend = this.deps.backend;
     let record = await backend.readSession(owner, backendId);
+    // `cwd` identifies the DSH Session's host workspace and `executionCwd` is
+    // where its Codex thread actually runs; a lane worker legitimately has two
+    // different values, so neither check may be dropped or conflated.
     if (record !== undefined && record.cwd !== cwd) {
       throw new LlmError("This Session's workspace changed; start a new DSH Session for the new workspace", "WORKSPACE_CHANGED");
     }
-    const execution = this.requestedExecution(options, this.deps.agents.get(sessionId), cwd);
+    const execution = this.requestedExecution(options, this.deps.agents.get(sessionId));
     const recorded = recordedExecution(record);
     if (recorded !== undefined && execution !== undefined && !executionInputsEqual(recorded, execution)) {
       throw new LlmError("Native execution instructions or boundary changed; create a new child", "EXECUTION_MISMATCH");
+    }
+    const targetExecutionCwd = execution !== undefined ? executionCwd(execution, cwd) : undefined;
+    if (record !== undefined && targetExecutionCwd !== undefined
+      && (record.executionCwd ?? recordedExecution(record)?.boundary?.cwd ?? cwd) !== targetExecutionCwd) {
+      throw new LlmError("This Session's Codex execution location changed; start a new child", "EXECUTION_MISMATCH");
     }
     // A recorded effective execution is the thread's configuration baseline: a
     // cold recovery that carries no explicit inputs continues it instead of
@@ -495,9 +502,14 @@ export class CodexProviderAdapter extends LlmAdapter {
     }
     // A workflow-managed child authorizes its target through the live Agent's
     // effective configuration, which may differ from the last confirmed value
-    // until the App Server reports the applied settings. Every other Session
-    // keeps comparing the request against its confirmed configuration.
-    if (execution === undefined && (record.model !== options.model
+    // until the App Server reports the applied settings, so its switch is
+    // admitted above. A cold recovery with no live Agent authorization must
+    // still match the recorded execution baseline. An ordinary Session resolves
+    // no native execution inputs at all: its model/effort is the user's own
+    // native selection, passed to `turn/start` and confirmed by the App Server,
+    // so a second-turn switch must not be refused here.
+    const managedSession = execution !== undefined || recorded !== undefined;
+    if (managedSession && execution === undefined && (record.model !== options.model
       || (options.reasoningEffort !== undefined && record.reasoningEffort !== options.reasoningEffort))) {
       throw new LlmError("App Server did not apply the requested native execution model/effort", "EXECUTION_MISMATCH");
     }

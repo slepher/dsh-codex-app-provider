@@ -7,6 +7,10 @@
  * from the live Agent's creation snapshot, and compares them here. Only
  * `developerInstructions` and `boundary` are execution inputs; the rest of the
  * backend options is not.
+ *
+ * A declared `boundary` is a task-level constraint: it is forwarded to Codex
+ * verbatim, `<boundary.cwd>` is the native thread's working directory, and the
+ * plugin never synthesizes, widens or narrows it.
  * @module dsh-codex-app-provider/execution-inputs
  */
 
@@ -71,24 +75,16 @@ export function executionInputsEqual(
 }
 
 /**
- * Apply the prototype's boundary policy to one managed execution.
+ * The native execution cwd one Session's thread runs in.
  *
- * A workflow-managed child runs in the Session's own workspace and may write the
- * whole workspace; its lane stays a prompt-level working location rather than a
- * sandbox boundary. `network` and `developerInstructions` are preserved, so only
- * the workspace scope is widened, and the conversion is explicit rather than the
- * removal of a check.
- * @param execution - declared inputs, when the carrier declares any.
- * @param cwd - the Session workspace the boundary is pinned to.
- * @returns the effective inputs, or undefined for an unscoped Codex Session.
+ * A declared task boundary names the real working location (a lane, an
+ * allocated worktree); without one the thread runs in the Session's own host
+ * workspace. The two are deliberately different values and are persisted
+ * separately so a lane worker is never mistaken for a workspace change.
+ * @param inputs - the declared execution inputs, when any.
+ * @param sessionCwd - the DSH Session's host workspace.
+ * @returns the absolute directory the Codex thread runs in.
  */
-export function repositoryWritableExecution(
-  execution: ProviderExecutionInputs | undefined,
-  cwd: string,
-): ProviderExecutionInputs | undefined {
-  if (execution === undefined) return undefined;
-  return {
-    ...(execution.developerInstructions === undefined ? {} : { developerInstructions: execution.developerInstructions }),
-    boundary: { cwd, writableRoots: [cwd], network: execution.boundary?.network ?? "disabled" },
-  };
+export function executionCwd(inputs: ProviderExecutionInputs | undefined, sessionCwd: string): string {
+  return inputs?.boundary?.cwd ?? sessionCwd;
 }

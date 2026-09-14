@@ -17,13 +17,18 @@ class FakeServer extends EventEmitter {
     this.calls.push({ method, params });
     if (method === "thread/start" || method === "thread/resume") {
       if (method === "thread/resume") this.threadId = params.threadId;
+      const permissions = params.config?.permissions?.["dsh-task"];
+      const writableRoots = permissions === undefined ? []
+        : Object.entries(permissions.filesystem).filter(([, mode]) => mode === "write").map(([path]) => path);
       return {
         thread: { id: this.threadId, path: this.threadPath, status: { type: "idle" }, turns: [] },
+        cwd: params.cwd,
         model: "test-model",
-        ...(params.approvalPolicy === "never" ? {
-          sandbox: { type: "workspaceWrite", writableRoots: ["/lane"], excludeSlashTmp: true, excludeTmpdirEnvVar: true, networkAccess: false },
-          approvalPolicy: "never",
-        } : {}),
+        ...(params.approvalPolicy === undefined ? {} : { approvalPolicy: params.approvalPolicy }),
+        ...(permissions === undefined ? {} : {
+          sandbox: { type: "workspaceWrite", writableRoots, excludeSlashTmp: true, excludeTmpdirEnvVar: true,
+            networkAccess: permissions.network?.enabled === true },
+        }),
       };
     }
     if (method === "turn/start") {
@@ -149,7 +154,7 @@ test("binds one thread and deduplicates native retries with approval identity", 
   }
 });
 
-test("declines unexpected boundary approvals without recording request state", async t => {
+test("surfaces an approval request from a bounded execution instead of declining for Codex", async t => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-boundary-approval-"));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const servers = [];
@@ -159,16 +164,23 @@ test("declines unexpected boundary approvals without recording request state", a
     boundary: { cwd: "/work", writableRoots: ["/lane"], network: "disabled" },
   });
   const turn = await backend.startTurn("owner", "boundary", "work");
-  const before = await backend.readEvents("owner", "boundary");
+  // A declared task boundary constrains where the thread may write; it is not an
+  // approval policy. A request Codex sends to this client is surfaced and
+  // decided on its real identity, never declined on Codex's behalf.
   servers[0].emit("request", {
     id: "unexpected",
     method: "item/commandExecution/requestApproval",
     params: { threadId: turn.threadId, turnId: turn.turnId },
   });
-  assert.deepEqual(servers[0].responses, [{ id: "unexpected", result: { decision: "decline" } }]);
-  assert.equal((await backend.readSession("owner", "boundary")).state, "running");
+  assert.deepEqual(servers[0].responses, []);
+  const pending = await backend.pendingApprovals("owner", "boundary");
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].method, "item/commandExecution/requestApproval");
+  assert.equal((await backend.readSession("owner", "boundary")).state, "waiting-approval");
+  assert.ok((await backend.readEvents("owner", "boundary")).some(({ event }) => event.type === "approval.requested"));
+  await backend.decideApproval("owner", pending[0].requestId, "accept");
+  assert.deepEqual(servers[0].responses, [{ id: "unexpected", result: { decision: "accept" } }]);
   assert.equal((await backend.pendingApprovals("owner", "boundary")).length, 0);
-  assert.deepEqual(await backend.readEvents("owner", "boundary"), before);
 });
 
 test("grants permissions turns, answers non-interactive user input empty, and declines elicitation", async t => {

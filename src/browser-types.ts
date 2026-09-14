@@ -38,16 +38,43 @@ export interface SessionSnapshot {
   sessionId: SessionId;
   threadId?: ThreadId;
   turnId?: TurnId;
+  /**
+   * The DSH Session's host workspace. This identifies the Session, never the
+   * native thread's working directory when the Session declares a task
+   * boundary: a lane worker's host workspace is the parent repository while its
+   * Codex thread runs in the lane.
+   */
   cwd: string;
+  /** The Codex execution cwd the native thread runs in; equals `cwd` when no task boundary is declared. */
+  executionCwd?: string;
   /** Last natively confirmed model/effort; the creation snapshot stays in `options`. */
   model?: string;
   reasoningEffort?: string;
   /** Authorized target configuration a running turn has not confirmed yet. */
   pending?: PendingConfig;
+  /**
+   * The native configuration the App Server reported it applied. Written only
+   * from native facts, so a declared task constraint is verified against what
+   * actually ran rather than against what the plugin asked for.
+   */
+  applied?: AppliedExecution;
   usage?: unknown;
   state: RunState;
   options?: CreateSessionOptions;
   reports: readonly Report[];
+}
+
+/** Native settings the App Server reported for one thread. */
+export interface AppliedExecution {
+  cwd?: string;
+  approvalPolicy?: string;
+  sandbox?: {
+    type?: string;
+    writableRoots?: readonly string[];
+    excludeSlashTmp?: boolean;
+    excludeTmpdirEnvVar?: boolean;
+    networkAccess?: boolean;
+  };
 }
 
 /**
@@ -106,6 +133,7 @@ export interface ThreadHandoffRequest {
   developerInstructions?: string;
   boundary?: ExecutionBoundary;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
   sandbox?: SandboxMode;
 }
 

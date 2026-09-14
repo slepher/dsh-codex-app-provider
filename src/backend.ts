@@ -145,7 +145,7 @@ export class CodexSessionBackend implements CodexBackend {
     options: CreateSessionOptions = {},
   ): Promise<SessionSnapshot> {
     if (!ownerId || !sessionId || !isAbsolute(cwd)) throw new Error("Owner, Session ID, and absolute cwd are required");
-    const boundary = normalizedBoundary(options.boundary, cwd);
+    const boundary = normalizedBoundary(options.boundary);
     const normalizedOptions = { ...options, ...(boundary === undefined ? {} : { boundary }) };
     this.guard({ ownerId, sessionId, action: "create", cwd, ...(boundary === undefined ? {} : { boundary }) });
     const existing = this.store.get(ownerId, sessionId);
@@ -154,6 +154,7 @@ export class CodexSessionBackend implements CodexBackend {
       ownerId,
       sessionId,
       cwd,
+      executionCwd: boundary?.cwd ?? cwd,
       state: "unknown",
       model: options.model,
       reasoningEffort: options.reasoningEffort,
@@ -170,7 +171,7 @@ export class CodexSessionBackend implements CodexBackend {
       const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
       if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
       record.threadId = result.thread.id;
-      checkBoundary(record, result);
+      reconcileBoundary(record, result);
       checkExecutionModel(record, result);
       if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, result.thread.id) ?? record.usage;
       record.model = result.model;
@@ -234,13 +235,14 @@ export class CodexSessionBackend implements CodexBackend {
       reasoningEffort: resolvedRole.reasoningEffort,
       developerInstructions: resolvedRole.developerInstructions,
     };
-    const boundary = normalizedBoundary(options.boundary, input.cwd);
+    const boundary = normalizedBoundary(options.boundary);
     const normalizedOptions = { ...options, ...(boundary === undefined ? {} : { boundary }) };
     this.guard({ ownerId: ownerIdentity(caller), sessionId, action: "create", cwd: input.cwd, ...(boundary === undefined ? {} : { boundary }) });
     const record: StoredSession = {
       ownerId: ownerIdentity(caller),
       sessionId,
       cwd: input.cwd,
+      executionCwd: boundary?.cwd ?? input.cwd,
       state: "unknown",
       model: options.model,
       reasoningEffort: options.reasoningEffort,
@@ -266,7 +268,7 @@ export class CodexSessionBackend implements CodexBackend {
       const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
       if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
       record.threadId = result.thread.id;
-      checkBoundary(record, result);
+      reconcileBoundary(record, result);
       checkExecutionModel(record, result);
       if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, result.thread.id) ?? record.usage;
       record.model = result.model;
@@ -440,7 +442,7 @@ export class CodexSessionBackend implements CodexBackend {
       });
       if (result.thread?.id !== record.threadId) throw new Error("Recovered thread identity mismatch");
       reconcilePending(record, result);
-      checkBoundary(record, result);
+      reconcileBoundary(record, result);
       checkExecutionModel(record, result);
       if (result.thread.status?.type === "active" || result.thread.turns?.some(turn => turn.status === "inProgress")) {
         throw new Error("Thread appears active; refusing to claim it");
@@ -496,7 +498,7 @@ export class CodexSessionBackend implements CodexBackend {
       // A rebuilt thread starts from the confirmed configuration; a target that
       // was still pending when the rebuild began never applied.
       reconcilePending(record, result);
-      checkBoundary(record, result);
+      reconcileBoundary(record, result);
       checkExecutionModel(record, result);
       if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, result.thread.id) ?? record.usage;
       record.model = result.model;
@@ -687,18 +689,29 @@ export class CodexSessionBackend implements CodexBackend {
       const thread = result.thread;
       if (thread?.id !== from.threadId) throw new Error("Native thread identity changed; handoff refused");
       if (thread.status?.type === "active") throw new Error("Native thread is still active; handoff refused");
-      if (typeof thread.cwd !== "string" || thread.cwd !== from.cwd) throw new Error("Native thread workspace changed; handoff refused");
+      if (typeof thread.cwd !== "string" || thread.cwd !== (from.executionCwd ?? from.cwd)) throw new Error("Native thread workspace changed; handoff refused");
     }
     const existing = this.store.get(ownerId, request.toSessionId);
     if (existing !== undefined && existing.handoffFrom?.requestId !== request.requestId) {
       throw new Error("Handoff successor identity is already in use");
     }
     if (existing === undefined) {
-      const boundary = normalizedBoundary(request.boundary, from.cwd);
+      const boundary = normalizedBoundary(request.boundary);
+      const executionCwd = from.executionCwd ?? from.cwd;
+      // The successor continues the very same native thread, so its execution
+      // location cannot move. A source that declared a task constraint must
+      // hand one on: dropping it would silently widen a read-only contract.
+      if (boundary !== undefined && boundary.cwd !== executionCwd) {
+        throw new Error("A handoff successor must continue the thread in the same execution cwd");
+      }
+      if (from.options?.boundary !== undefined && boundary === undefined) {
+        throw new Error("A handoff successor of a bounded execution must declare the task boundary it continues under");
+      }
       const options: CreateSessionOptions = { model: request.model,
         ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
         ...(request.developerInstructions === undefined ? {} : { developerInstructions: request.developerInstructions }),
         ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
+        ...(request.approvalsReviewer === undefined ? {} : { approvalsReviewer: request.approvalsReviewer }),
         ...(request.sandbox === undefined ? {} : { sandbox: request.sandbox }),
         ...(boundary === undefined ? {} : { boundary }) };
       this.guard({ ownerId, sessionId: request.toSessionId, action: "create", cwd: from.cwd, ...(boundary === undefined ? {} : { boundary }) });
@@ -713,7 +726,8 @@ export class CodexSessionBackend implements CodexBackend {
       // runtime is detached before the successor exists. A crash here leaves a
       // revoked source whose handover is completed by a repeated request.
       await this.detach(request.fromSessionId);
-      const target: StoredSession = { ownerId, sessionId: request.toSessionId, threadId: from.threadId, cwd: from.cwd, state: "idle",
+      const target: StoredSession = { ownerId, sessionId: request.toSessionId, threadId: from.threadId, cwd: from.cwd,
+        executionCwd, state: "idle",
         model: request.model, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
         approvals: [], options, events: [], nextEventSequence: 1, reports: [],
         handoffFrom: { fromSessionId: request.fromSessionId, requestId: request.requestId, at: Date.now() } };
@@ -1286,12 +1300,10 @@ export class CodexSessionBackend implements CodexBackend {
       runtime.rpc.reject(message.id, "Unsupported server request");
       return;
     }
-    if (record.options?.boundary !== undefined) {
-      runtime.rpc.respond(message.id, method === "item/permissions/requestApproval"
-        ? { permissions: {}, scope: "turn" }
-        : { decision: "decline" });
-      return;
-    }
+    // A declared task boundary is not an approval policy: it constrains where
+    // the thread may write, not whether Codex may ask. A request that reaches
+    // this client is one Codex decided it cannot settle itself, so it is
+    // recorded and surfaced instead of being declined on the plugin's behalf.
     if (this.live.get(record.sessionId) !== runtime
       || record.turnId === undefined
       || !["running", "waiting-approval", "interrupt-requested"].includes(record.state)
@@ -1317,7 +1329,6 @@ export class CodexSessionBackend implements CodexBackend {
   private userInputRequest(record: StoredSession, runtime: Runtime, id: number | string, params: Record<string, unknown>): void {
     const threadId = record.threadId, turnId = record.turnId;
     if (threadId === undefined || turnId === undefined
-      || record.options?.boundary !== undefined
       || this.live.get(record.sessionId) !== runtime
       || !["running", "waiting-approval", "interrupt-requested"].includes(record.state)
       || params.turnId !== undefined && params.turnId !== turnId) {
@@ -1437,7 +1448,9 @@ function turnInput(input: string | readonly TurnInput[]): Record<string, unknown
 
 function snapshot(record: StoredSession): SessionSnapshot {
   const { sessionId, threadId, turnId, cwd, model, reasoningEffort, pending, usage, state, options, reports } = record;
-  return { sessionId, threadId, turnId, cwd, model, reasoningEffort, ...(pending === undefined ? {} : { pending: structuredClone(pending) }),
+  return { sessionId, threadId, turnId, cwd, executionCwd: record.executionCwd ?? options?.boundary?.cwd ?? cwd,
+    model, reasoningEffort, ...(pending === undefined ? {} : { pending: structuredClone(pending) }),
+    ...(record.applied === undefined ? {} : { applied: structuredClone(record.applied) }),
     usage, state, options: structuredClone(options), reports: structuredClone(reports) };
 }
 
@@ -1490,36 +1503,55 @@ function userInputQuestions(value: unknown): UserInputQuestion[] {
   return questions;
 }
 
-function normalizedBoundary(boundary: CreateSessionOptions["boundary"], cwd: string) {
+/**
+ * Validate one explicitly declared task boundary.
+ *
+ * The boundary names the Codex execution location and the exact writable roots
+ * the task declares. It is forwarded verbatim: the plugin neither rewrites its
+ * cwd to the Session workspace nor widens its writable roots. A boundary that
+ * does not name absolute directories fails closed.
+ * @param boundary - the declared boundary, when the caller declared one.
+ * @returns the normalized declared boundary, or undefined for an unscoped Session.
+ */
+function normalizedBoundary(boundary: CreateSessionOptions["boundary"]) {
   if (boundary === undefined) return undefined;
-  if (boundary.cwd !== cwd || !boundary.writableRoots.every(isAbsolute)) {
-    throw new Error("Boundary cwd and writable roots must be absolute and match the Session");
+  if (!isAbsolute(boundary.cwd) || !boundary.writableRoots.every(isAbsolute)) {
+    throw new Error("Boundary cwd and writable roots must be absolute");
   }
   return {
-    cwd,
+    cwd: resolve(boundary.cwd),
     writableRoots: [...new Set(boundary.writableRoots.map(path => resolve(path)))],
     network: boundary.network,
   } as const;
 }
 
+/**
+ * Build the native thread request for one record.
+ *
+ * Only what the record actually declares is sent. `approvalPolicy`,
+ * `approvalsReviewer` and `sandbox` travel when the caller declared them, and
+ * Codex resolves the rest from its own configuration layers and cwd. A declared
+ * task boundary adds the `dsh-task` permissions profile that expresses it; no
+ * other feature flag is coupled to it, so Codex keeps its own native tools,
+ * Apps, plugins and children.
+ * @param record - the record whose thread is being started or resumed.
+ * @returns the `thread/start` / `thread/resume` parameters.
+ */
 function threadParams(record: StoredSession): Record<string, unknown> {
   const options = record.options ?? {};
   const boundary = options.boundary;
   return {
-    cwd: record.cwd,
+    // The native thread runs where the task runs, which is the Session workspace
+    // only when the Session declares no task boundary.
+    cwd: boundary?.cwd ?? record.cwd,
     model: record.model,
     ...(options.developerInstructions === undefined ? {} : { developerInstructions: options.developerInstructions }),
     ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
     ...(options.approvalsReviewer === undefined ? {} : { approvalsReviewer: options.approvalsReviewer }),
-    ...(boundary === undefined && options.sandbox !== undefined ? { sandbox: options.sandbox } : {}),
+    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     config: {
       ...(record.reasoningEffort === undefined ? {} : { model_reasoning_effort: record.reasoningEffort }),
       ...(boundary === undefined ? {} : {
-        "features.multi_agent": false,
-        "features.apps": false,
-        "features.plugins": false,
-        "features.browser_use": false,
-        "features.computer_use": false,
         default_permissions: "dsh-task",
         permissions: {
           "dsh-task": {
@@ -1538,29 +1570,60 @@ function threadParams(record: StoredSession): Record<string, unknown> {
         ...(boundary.network === "loopback" ? { "features.network_proxy": true } : {}),
       }),
     },
-    ...(boundary === undefined ? {} : { approvalPolicy: "never" }),
     ephemeral: false,
   };
 }
 
-function checkBoundary(record: StoredSession, result: ThreadResult): void {
+/**
+ * Record the native configuration a thread request actually applied, and verify
+ * any explicitly declared task boundary against it.
+ *
+ * Recording happens for every request, so `applied` is native fact rather than
+ * an echo of the request. Verification only covers a declared boundary: an
+ * unscoped Session leaves Codex's own configuration alone and has nothing to
+ * verify. Approval policy is never compared — Codex owns that decision.
+ * @param record - the record being reconciled.
+ * @param result - the App Server's thread result.
+ * @throws when a declared boundary was not applied as declared.
+ */
+function reconcileBoundary(record: StoredSession, result: ThreadResult): void {
+  const applied: NonNullable<StoredSession["applied"]> = {
+    ...(result.cwd === undefined ? {} : { cwd: result.cwd }),
+    ...(result.approvalPolicy === undefined ? {} : { approvalPolicy: result.approvalPolicy }),
+    ...(result.sandbox === undefined ? {} : {
+      sandbox: {
+        ...(result.sandbox.type === undefined ? {} : { type: result.sandbox.type }),
+        ...(result.sandbox.writableRoots === undefined ? {} : { writableRoots: [...result.sandbox.writableRoots] }),
+        ...(result.sandbox.excludeSlashTmp === undefined ? {} : { excludeSlashTmp: result.sandbox.excludeSlashTmp }),
+        ...(result.sandbox.excludeTmpdirEnvVar === undefined ? {} : { excludeTmpdirEnvVar: result.sandbox.excludeTmpdirEnvVar }),
+        ...(result.sandbox.networkAccess === undefined ? {} : { networkAccess: result.sandbox.networkAccess }),
+      },
+    }),
+  };
+  record.applied = applied;
+  // Native facts are the authority for the thread's working location: a
+  // recorded execution cwd that disagrees with the resumed thread is repaired
+  // here rather than trusted, and a declared boundary is then verified below.
+  record.executionCwd = result.cwd ?? record.executionCwd ?? record.cwd;
   const boundary = record.options?.boundary;
   if (boundary === undefined) return;
-  const expected = [...new Set(boundary.writableRoots)].sort();
-  // Codex reports additional writable roots; an explicitly writable cwd may be omitted.
-  const actual = [...new Set([
+  const declared = [...new Set(boundary.writableRoots)].sort();
+  // Codex may omit an explicitly writable cwd from its report, so the declared
+  // execution cwd counts as writable when the declaration includes it. Nothing
+  // else is excused: a reported root the task did not declare is a widening and
+  // is refused, which is what makes a read-only contract verifiable.
+  const reported = [...new Set([
     ...(result.sandbox?.writableRoots ?? []),
-    ...(result.cwd === boundary.cwd && expected.includes(result.cwd) ? [result.cwd] : []),
+    ...(result.cwd === boundary.cwd && declared.includes(result.cwd) ? [result.cwd] : []),
   ])].sort();
   if (
     result.cwd !== undefined && result.cwd !== boundary.cwd
     || result.sandbox?.type !== "workspaceWrite"
-    || JSON.stringify(actual) !== JSON.stringify(expected)
+    || JSON.stringify(reported) !== JSON.stringify(declared)
     || result.sandbox.excludeSlashTmp !== true
     || result.sandbox.excludeTmpdirEnvVar !== true
     || result.sandbox.networkAccess !== (boundary.network === "loopback")
-    || result.approvalPolicy !== "never"
-  ) throw new Error(`App Server did not apply the requested execution boundary: ${JSON.stringify({ sandbox: result.sandbox, approvalPolicy: result.approvalPolicy })}`);
+  ) throw new Error(`App Server did not apply the declared task boundary: ${JSON.stringify({ declared: boundary, sandbox: result.sandbox, cwd: result.cwd })}`);
 }
 
 function checkExecutionModel(record: StoredSession, result: ThreadResult): void {

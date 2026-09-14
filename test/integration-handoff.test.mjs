@@ -12,10 +12,10 @@ import * as plugin from "../lib/index.js";
 /**
  * Deterministic L1 integration: the real plugin context, the real hand-off
  * service, and a scripted App Server instead of a model. It asserts the
- * prototype slice's contract without network, model or approval — specifically
- * that the hand-off entry converts a lane boundary, that the successor's first
- * native call is `thread/resume` and never `thread/start`, and that execution
- * facts are projected from the provider store.
+ * slice's contract without network, model or approval — specifically that the
+ * hand-off entry forwards the declared lane boundary verbatim, that the
+ * successor's first native call is `thread/resume` and never `thread/start`,
+ * and that execution facts are projected from the provider store.
  */
 const FAKE = fileURLToPath(new URL("./fake-codex-app-server.mjs", import.meta.url));
 const vehicle = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
@@ -43,7 +43,7 @@ function setup() {
 
 const requests = file => readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
 
-test("the handoff entry converts a lane boundary and the successor resumes the handed thread", async t => {
+test("the handoff entry forwards the declared lane boundary and the successor resumes the handed thread", async t => {
   const fixture = setup();
   const opening = { id: "opening", header: { cwd: fixture.cwd } };
   const successor = { id: "continue", header: { cwd: fixture.cwd } };
@@ -70,8 +70,9 @@ test("the handoff entry converts a lane boundary and the successor resumes the h
   const source = await ctx.codexExecution.read(opening.id);
   assert.equal(typeof source.threadId, "string");
 
-  // The lane path is only a prompt-level location: the hand-off entry must pin
-  // the successor's boundary to the source record's confirmed workspace.
+  // The lane is the task's real working location: the hand-off entry forwards
+  // the declared boundary verbatim, so both the source and the successor thread
+  // run in the lane and the host workspace never enters the sandbox scope.
   const bound = await ctx.codexHandoff.handoff({
     requestId: "handoff-integration-1", fromSessionId: opening.id, toSessionId: successor.id,
     model: "sol", reasoningEffort: "high", developerInstructions: "successor role",
@@ -93,10 +94,11 @@ test("the handoff entry converts a lane boundary and the successor resumes the h
   assert.equal(resume.params.model, "sol", "the target model reaches the native thread");
   assert.equal(resume.params.config.model_reasoning_effort, "high", "the target effort reaches the native thread");
   assert.equal(resume.params.developerInstructions, "successor role", "the target instructions reach the native thread");
-  assert.equal(resume.params.approvalPolicy, "never", "a bound execution is non-interactive");
+  assert.equal("approvalPolicy" in resume.params, false, "Codex owns its approval policy, not the plugin");
+  assert.equal(resume.params.cwd, fixture.lane, "the resumed thread stays in the task's declared lane");
   const filesystem = resume.params.config.permissions["dsh-task"].filesystem;
-  assert.equal(filesystem[fixture.cwd], "write", "the session workspace is writable");
-  assert.equal(filesystem[fixture.lane], undefined, "the lane path never becomes a sandbox root");
+  assert.equal(filesystem[fixture.lane], "write", "the lane is the declared writable root");
+  assert.equal(filesystem[fixture.cwd], undefined, "the host workspace never becomes a sandbox root");
 
   // Execution facts live in the provider store, not the DSH session log.
   const facts = (await ctx.codexExecution.facts(opening.id)).join("\n");

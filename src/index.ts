@@ -7,7 +7,6 @@ import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
-import { repositoryWritableExecution } from "./execution-inputs.js";
 import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
@@ -75,20 +74,14 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (liveCwd !== undefined && liveCwd !== source.cwd) {
           throw new Error("The source Session workspace changed; the Codex thread handoff was refused");
         }
-        // The successor Session does not exist yet, so its effective boundary is
-        // pinned to the source record's confirmed workspace. The lane path in the
-        // request stays a prompt-level location, exactly as at first creation.
-        const converted = repositoryWritableExecution(
-          request.developerInstructions === undefined && request.boundary === undefined ? undefined
-            : { ...(request.developerInstructions === undefined ? {} : { developerInstructions: request.developerInstructions }),
-              ...(request.boundary === undefined ? {} : { boundary: request.boundary }) },
-          source.cwd,
-        );
+        // The successor continues the same native thread, so its execution cwd
+        // is the source's; the boundary the caller declared travels verbatim and
+        // the backend refuses one that would move the thread or widen a
+        // declared task constraint into an unscoped execution.
         const result = await backend.handoffThread(CODEX_OWNER_ID, {
           ...request,
           fromSessionId,
           toSessionId: nativeSessionId(request.toSessionId),
-          ...(converted?.boundary === undefined ? {} : { boundary: converted.boundary }),
         });
         return { ...result, toSessionId: dshSessionId(result.toSessionId) };
       },
