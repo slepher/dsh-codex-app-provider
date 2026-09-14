@@ -53,9 +53,17 @@ await writeFile(join(profile, "package.json"), JSON.stringify({
 const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
 const fakeServer = join(root, "test/fake-codex-app-server.mjs");
 await writeFile(join(profile, "cordis.patch.yml"), `- id: agent-default-model\n  config:\n    provider: codex\n    model: ${JSON.stringify(model)}\n- id: dsh-codex-app-provider\n  config:\n    stateDir: ${JSON.stringify(join(dir, "state"))}\n    providerCwd: ${JSON.stringify(workspace)}\n${fake ? `    command: ${JSON.stringify(fakeServer)}\n` : ""}`);
+// The managed role protocols are plain files in the installed `codex-workflow`
+// skill, and the bundled role prompts name that path, so every workflow run
+// points the Host at the adjacent checkout.
+const skillDir = process.env.DSH_WORKFLOW_SKILL_DIR ?? resolve(root, "../../codex-workflow/skills/codex-workflow");
 if (workflowChild) {
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
-  await writeFile(join(profile, "cordis.patch.yml"), patch + `- id: dsh-workflow-kit\n  config:\n    stateDir: ${JSON.stringify(join(dir, "workflow-host-state"))}\n    subdir: workflow-live-test\n${workflowContract ? "    defaultProfile: live\n" : workflowHandoff ? "    defaultProfile: gpt-workflow\n" : ""}`);
+  await writeFile(join(profile, "cordis.patch.yml"), patch
+    + `- id: dsh-workflow-kit\n  config:\n    stateDir: ${JSON.stringify(join(dir, "workflow-host-state"))}\n`
+    + `    defaultProfile: gpt-workflow\n`
+    + `    workflowSkillDir: ${JSON.stringify(skillDir)}\n`
+    + `    implementationStandardDir: ${JSON.stringify(resolve(skillDir, "..", "audit-implementation-simplicity"))}\n`);
 }
 if (workflowHandoff) {
   // The current workflow Host reads the configurations shipped inside its own
@@ -63,7 +71,6 @@ if (workflowHandoff) {
   // selected through the settings namespace. The managed `coding_worker` role
   // protocol is read from the installed skill, so the isolated profile points at
   // the adjacent skill checkout.
-  const skillDir = process.env.DSH_WORKFLOW_SKILL_DIR ?? resolve(root, "../../codex-workflow/skills/codex-workflow");
   const cross = process.env.DSH_HANDOFF_CROSS === "1";
   if (cross) {
     // The other provider's own state lives in the harness home; the isolated
@@ -83,22 +90,15 @@ if (workflowHandoff) {
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch.replace(
     "    defaultProfile: gpt-workflow\n",
-    `    defaultProfile: ${cross ? "handoff" : "gpt-workflow"}\n    workflowSkillDir: ${JSON.stringify(skillDir)}\n    implementationStandardDir: ${JSON.stringify(resolve(skillDir, "..", "audit-implementation-simplicity"))}\n`)
+    `    defaultProfile: ${cross ? "handoff" : "gpt-workflow"}\n`)
     // The DeepSeek package-inventory request extension enumerates the whole
     // loader graph, which an isolated profile cannot fully resolve; the cross
     // run scopes it out instead of failing the successor's first turn.
     + (cross ? "- id: plugin-package-inventory-deepseek\n  disabled: true\n" : ""));
 }
-if (workflowContract) {
-  const directory = join(home, "workflow-live-test");
-  await mkdir(join(directory, "roles"), { recursive: true }); await mkdir(join(directory, "profiles"));
-  const roles = {};
-  for (const role of ["planner", "context_collector", "evidence_runner", "def_coding_worker", "sup_coding_worker", "reviewer", "full_tester"]) {
-    roles[role] = { model, reasoningEffort: "medium" };
-    await writeFile(join(directory, "roles", `${role}.md`), "Execute only the assigned frozen contract in the isolated test repository. Use native shell tools for evidence. Preserve owned paths and exact input/candidate identities. Return the required result format. Do not spawn children or contact external services.");
-  }
-  await writeFile(join(directory, "profiles/live.json"), JSON.stringify({ roles }));
-}
+// The workflow contract run needs no role fixture: the installed kit ships its
+// own configurations (`gpt-workflow`/`ds-workflow`) and bundles every role
+// prompt, so the deployment selects one by name instead of writing role files.
 if (nativeChild) {
   await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, workflowHandoff ? "test/workflow-handoff-driver.mjs" : workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
