@@ -65,14 +65,16 @@ export function apply(ctx) {
      * same successor for a corrected report once and record that it happened,
      * so a formatting miss never masquerades as a handoff failure.
      */
-    const recordResult = async () => {
-      let summary = await action({ action: "record-result", task: "T001" });
-      if (summary.tasks.find(value => value.task === "T001").state === "candidate") return summary;
-      const retry = await call({ action: "continue", task: "T001", text: "Your report did not match the frozen contract's execution-result fields. Resend only those lines, each starting with '- ', with the same Task, Contract revision, Attempt, Input snapshot, Candidate snapshot and Outcome values, and no other formatting." });
+    const recordResult = async successorId => {
+      // A report the Host rejects outright carries no summary to inspect, so the
+      // correction path has to look at the outcome rather than assert on it.
+      const first = await call({ action: "record-result", task: "T001" });
+      if (first.ok && first.value.tasks.find(value => value.task === "T001").state === "candidate") return first.value;
+      const retry = await call({ action: "continue", task: "T001", text: "Your report did not match the frozen contract's execution-result fields. Resend only those lines, each starting with '- ', with the same Task, Contract revision, Attempt, Input snapshot, Candidate snapshot and Outcome values, and no other formatting. Write the corrected report to the contract's result path and then reply with it." });
       assert.equal(retry.ok, true, JSON.stringify(retry.result));
-      report.resultCorrection = true; await save();
-      await settled(handoff.toWorker);
-      summary = await action({ action: "record-result", task: "T001" });
+      report.resultCorrection = { rejected: first.result?.error?.message ?? null }; await save();
+      await settled(successorId);
+      const summary = await action({ action: "record-result", task: "T001" });
       return summary;
     };
     /**
@@ -202,7 +204,7 @@ export function apply(ctx) {
       attempt = summary.tasks.find(value => value.task === "T001");
       assert.equal(attempt.handoff.status, "confirmed", "the successor turn confirms the handover");
       assert.equal(attempt.activeWorker, handoff.toWorker);
-      summary = await recordResult();
+      summary = await recordResult(handoff.toWorker);
       attempt = summary.tasks.find(value => value.task === "T001");
       assert.equal(attempt.state, "candidate", JSON.stringify(attempt));
       assert.equal(attempt.activeWorker, handoff.toWorker, "the candidate belongs to the successor");
