@@ -323,6 +323,15 @@ export type BackendEvent =
   | { type: "report.ready"; workerId: SessionId; turnId: TurnId; parentSessionId: string }
   | { type: "thread.notification"; method: string; params: unknown };
 
+/** One projected execution fact line plus the durable identity a reader resolves it by. */
+export interface ExecutionFactLine {
+  /** Sourced line, already marked as an executed fact rather than an instruction. */
+  text: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+}
+
 export interface SequencedBackendEvent {
   sequence: number;
   event: BackendEvent;
@@ -401,7 +410,7 @@ export interface CodexBackend {
   pendingUserInputs(owner: string | Caller, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
   answerUserInput(ownerId: string, requestId: string, answers: UserInputAnswer): Promise<void>;
   history(owner: string | Caller, sessionId: SessionId): Promise<Conversation>;
-  readEvents(owner: string | Caller, sessionId: SessionId, afterSequence?: number): Promise<readonly SequencedBackendEvent[]>;
+  readFacts(owner: string | Caller, sessionId: SessionId): Promise<readonly ExecutionFactLine[]>;
   readReports(owner: string | Caller, sessionId: SessionId): Promise<readonly Report[]>;
   acknowledgeReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId): Promise<Report>;
   acceptReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId, acceptance: ReportAcceptance): Promise<Report>;

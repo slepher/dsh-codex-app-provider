@@ -103,10 +103,12 @@ test("isolates private and agent-owned workers, links once, and emits only new r
   });
   let revokedDeliveries = 0;
   backend.subscribe(uiA, privateWorker.id, () => { revokedDeliveries++; });
+  const duringLink = [];
+  backend.subscribe(agentUiA, privateWorker.id, event => { if (event.type === "report.ready") duringLink.push(event); });
   const linked = await backend.linkWorker(agentUiA, privateWorker.id);
   assert.equal(linked.owner, "agent");
   assert.equal(linked.reports[0].acknowledgedAt > 0, true);
-  assert.equal((await backend.readEvents(agentA, privateWorker.id)).some(item => item.event.type === "report.ready"), false);
+  assert.deepEqual(duringLink, [], "linking claims the report the record already held without announcing a new one");
 
   const ready = [];
   backend.subscribe(agentA, privateWorker.id, event => { if (event.type === "report.ready") ready.push(event); });

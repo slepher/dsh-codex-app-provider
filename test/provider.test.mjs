@@ -685,11 +685,12 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   const childServer = fixture.hub.servers.find(server => server.calls?.some(call => call.method === "turn/start"));
   await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:child-a"))?.turnId === childServer.turnId, "child turn identity");
 
-  const childEvents = (await fixture.backend.readEvents(OWNER, "codex:child-a")).length;
   childServer.ask(99, "item/commandExecution/requestApproval", { threadId: "native-child-thread", turnId: "native-child-turn" });
-  childServer.notify("item/agentMessage/delta", { threadId: "native-child-thread", turnId: "native-child-turn", delta: "foreign" });
+  childServer.notify("item/completed", { threadId: "native-child-thread", turnId: "native-child-turn",
+    item: { id: "foreign-cmd", type: "commandExecution", command: "printf foreign", status: "completed", exitCode: 0, aggregatedOutput: "foreign" } });
   assert.deepEqual(childServer.rejected, [{ id: 99, message: "Unknown Session thread" }], "native child approvals are rejected fail-closed");
-  assert.equal((await fixture.backend.readEvents(OWNER, "codex:child-a")).length, childEvents, "native child events never enter the DSH child record");
+  assert.deepEqual(await fixture.backend.readFacts(OWNER, "codex:child-a"), [],
+    "another thread's executed item never becomes this Session's execution fact");
 
   const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "agent", nativeSessionId: "parent" } };
   const uiCaller = { nativeSessionId: "parent", source: "ui", parentAgent: { id: "agent", nativeSessionId: "parent" } };
@@ -713,11 +714,13 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   const [childApproval] = await fixture.backend.pendingApprovals(OWNER, "codex:child-a");
   await fixture.backend.decideApproval(OWNER, childApproval.requestId, "accept");
   await waitFor(() => childServer.responded?.length > 0, "child approval response");
+  const childStream = [];
+  fixture.backend.subscribe(OWNER, "codex:child-a", event => childStream.push(event.type));
   childServer.notify("item/completed", { threadId: childServer.threadId, turnId: childServer.turnId, item: { type: "agentMessage", phase: "final_answer", text: "child done" } });
   childServer.notify("turn/completed", { threadId: childServer.threadId, turn: { id: childServer.turnId, status: "completed" } });
   const chunks = await child;
   assert.equal(chunks.at(-1).reason.kind, "stop");
-  assert.equal((await fixture.backend.readEvents(OWNER, "codex:child-a")).some(item => item.event.type === "report.ready"), false, "the DSH child stays outside the worker report path");
+  assert.equal(childStream.includes("report.ready"), false, "the DSH child stays outside the worker report path");
 });
 
 /** One codex reply in the DSH log, carrying the identity that marks the thread's history. */

@@ -39,7 +39,7 @@ test("a disposed Session releases the Codex record that backed it", async t => {
   mkdirSync(records, { recursive: true });
   const path = join(records, `${encodeURIComponent("codex:child")}.json`);
   writeFileSync(path, JSON.stringify({ ownerId: CODEX_OWNER_ID, sessionId: "codex:child", cwd: "/work",
-    executionCwd: "/work", state: "unknown", approvals: [], options: {}, events: [], nextEventSequence: 1, reports: [] }));
+    executionCwd: "/work", state: "unknown", approvals: [], options: {}, facts: [], reports: [] }));
 
   const ctx = new Context();
   new LlmRuntime(ctx);

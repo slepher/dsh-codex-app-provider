@@ -236,9 +236,9 @@ test("the restored entry serves legacy worker data without migrating or re-ident
   // once real consumers can still reach that history.
   const store = new SessionStore(fixture.stateDir);
   store.put({ ownerId: "parent", sessionId: "legacy-session", threadId: "legacy-thread", cwd: fixture.cwd,
-    state: "idle", approvals: [], events: [], nextEventSequence: 1, reports: [] });
+    state: "idle", approvals: [], facts: [], reports: [] });
   store.put({ ownerId: "parent", sessionId: "legacy-worker", threadId: "worker-thread", cwd: fixture.cwd,
-    state: "idle", approvals: [], events: [], nextEventSequence: 1,
+    state: "idle", approvals: [], facts: [],
     reports: [{ workerId: "legacy-worker", threadId: "worker-thread", turnId: "turn-legacy", status: "completed",
       result: "legacy deliverable", usage: null, createdAt: Date.now(), acceptance: "pending" }],
     worker: { parentSessionId: "parent", owner: "agent", name: "legacy worker", detached: false } });

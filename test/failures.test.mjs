@@ -74,7 +74,6 @@ test("does not redispatch uncertain creation or turn starts and rejects wrong-th
     server.completeBeforeResponse = true;
     const completed = await backend.startTurn("owner", "session", "first", { idempotencyKey: "1:1" });
     assert.equal(completed.state, "completed");
-    assert.equal((await backend.readEvents("owner", "session")).at(-1).event.finalOutput, "done");
     assert.equal((await backend.readReports("owner", "session"))[0].result, "done");
 
     server.completeBeforeResponse = false;

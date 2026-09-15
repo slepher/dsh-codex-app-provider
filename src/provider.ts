@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import { projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
 import type { Session } from "@deepseek-ai/dsh-session";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { NativeExecution } from "./execution.js";
@@ -332,8 +331,8 @@ export class CodexProviderAdapter extends LlmAdapter {
    */
   async facts(nativeSessionId: string): Promise<readonly string[]> {
     if (!nativeSessionId) throw new Error("Native Session identity is required");
-    const events = await this.deps.backend.readEvents(OWNER_ID, backendSessionId(nativeSessionId));
-    return projectExecutionFacts(reduceExecutionEvents(events)).map(line => line.text);
+    const facts = await this.deps.backend.readFacts(OWNER_ID, backendSessionId(nativeSessionId));
+    return facts.map(line => line.text);
   }
 
   /**
@@ -369,8 +368,8 @@ export class CodexProviderAdapter extends LlmAdapter {
       return;
     }
     try {
-      const events = await this.deps.backend.readEvents(OWNER_ID, backendSessionId(sessionId));
-      const pending = factMessages(projectExecutionFacts(reduceExecutionEvents(events)));
+      const facts = await this.deps.backend.readFacts(OWNER_ID, backendSessionId(sessionId));
+      const pending = factMessages(facts);
       if (pending.length === 0) return;
       const imported = new Set(importedFactIds(session.snapshotEvents?.() as readonly { type: string; data: unknown }[] | undefined));
       for (const fact of pending) {

@@ -16,8 +16,7 @@ test("persists ownership and recovers an uncertain run as unknown", () => {
     cwd: "/work",
     state: "running",
     approvals: [],
-    events: [],
-    nextEventSequence: 1,
+    facts: [],
   });
   assert.throws(() => first.get("owner-2", "session-1"), /owner mismatch/);
   first.close();
@@ -60,8 +59,7 @@ function persist(stateDir, reports, worker) {
     cwd: "/work",
     state: "idle",
     approvals: [],
-    events: [],
-    nextEventSequence: 1,
+    facts: [],
     reports,
     ...(worker === undefined ? {} : { worker }),
   });
@@ -118,10 +116,10 @@ test("keeps legacy records unbound and recovers complete worker records with uni
   const store = new SessionStore(stateDir);
   const put = (sessionId, state, detached, threadId) => store.put({
     ownerId: "parent", sessionId, threadId, cwd: "/work", state,
-    approvals: [], events: [], nextEventSequence: 1, reports: [],
+    approvals: [], facts: [], reports: [],
     worker: { parentSessionId: "parent", owner: "agent", name: sessionId, detached },
   });
-  store.put({ ownerId: "parent", sessionId: "legacy", threadId: "legacy-thread", cwd: "/work", state: "idle", approvals: [], events: [], nextEventSequence: 1, reports: [] });
+  store.put({ ownerId: "parent", sessionId: "legacy", threadId: "legacy-thread", cwd: "/work", state: "idle", approvals: [], facts: [], reports: [] });
   put("attached", "idle", false, "attached-thread");
   put("detached-idle", "idle", true, "free-thread");
   put("detached-running", "running", true, "busy-thread");
@@ -147,7 +145,7 @@ test("rejects partial or owner-mismatched worker blocks", () => {
   ]) {
     const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-invalid-worker-"));
     const store = new SessionStore(stateDir);
-    store.put({ ownerId: "parent", sessionId: "worker", cwd: "/work", state: "idle", approvals: [], events: [], nextEventSequence: 1, reports: [], worker });
+    store.put({ ownerId: "parent", sessionId: "worker", cwd: "/work", state: "idle", approvals: [], facts: [], reports: [], worker });
     store.close();
     assert.throws(() => new SessionStore(stateDir), /Invalid Session worker/);
     rmSync(stateDir, { recursive: true });
@@ -170,4 +168,31 @@ test("a lock left by a process that died is reclaimed, a live owner's is not", a
   writeFileSync(join(stateDir, "owner.lock", "pid"), String(process.pid));
   assert.throws(() => new SessionStore(stateDir), /already owned by pid/);
   rmSync(join(stateDir, "owner.lock"), { recursive: true, force: true });
+});
+
+test("a record written with the notification mirror is projected once on load", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-legacy-mirror-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  mkdirSync(join(stateDir, "sessions"), { recursive: true });
+  const legacy = {
+    ownerId: "owner", sessionId: "session", cwd: "/work", state: "idle", approvals: [], reports: [],
+    nextEventSequence: 3,
+    events: [{ sequence: 1, event: { type: "thread.notification", method: "item/completed", params: {
+      threadId: "thread-1", turnId: "turn-1",
+      item: { id: "cmd-1", type: "commandExecution", command: "printf MIGRATED", status: "completed", exitCode: 0, aggregatedOutput: "MIGRATED" } } } }],
+  };
+  writeFileSync(join(stateDir, "sessions", "session.json"), `${JSON.stringify(legacy, null, 2)}\n`);
+
+  const store = new SessionStore(stateDir);
+  const record = store.get("owner", "session");
+  assert.deepEqual(record.facts.map(line => line.text), [
+    "[source: codex thread=thread-1 turn=turn-1 item=cmd-1] command: printf MIGRATED (exit 0)",
+    "[source: codex thread=thread-1 turn=turn-1 item=cmd-1] MIGRATED",
+  ], "the mirrored notifications project into the facts they described");
+  store.close();
+
+  const rewritten = JSON.parse(readFileSync(join(stateDir, "sessions", "session.json"), "utf8"));
+  assert.equal("events" in rewritten, false, "the migration is durable, not only in memory");
+  assert.equal("nextEventSequence" in rewritten, false);
+  assert.equal(rewritten.facts.length, 2);
 });

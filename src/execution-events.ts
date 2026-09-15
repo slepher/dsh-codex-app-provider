@@ -1,4 +1,4 @@
-import type { SequencedBackendEvent } from "./browser-types.js";
+import type { BackendEvent, ExecutionFactLine, SequencedBackendEvent } from "./browser-types.js";
 
 /** Informational Codex item facts; omission never changes DSH execution or model history. */
 export interface CodexExecutionEvent {
@@ -93,12 +93,25 @@ export function reduceExecutionEvents(events: readonly SequencedBackendEvent[]):
 }
 
 /** One rendered fact line plus the durable identity a reader can resolve it by. */
-export interface CodexExecutionFactLine {
-  /** Sourced line, already marked as an executed fact rather than an instruction. */
-  text: string;
-  threadId: string;
-  turnId: string;
-  itemId: string;
+export type CodexExecutionFactLine = ExecutionFactLine;
+
+/**
+ * Whether one recorded backend event can contribute to an execution fact.
+ *
+ * The projection reads item lifecycle, the public reasoning summary, command
+ * output, and the two events that resolve items a turn left unfinished. Model
+ * text and status notices are not part of it, which is why they are published
+ * but never retained.
+ * @param event - one recorded backend event.
+ * @returns whether the projection reads it.
+ */
+export function feedsExecutionFacts(event: BackendEvent): boolean {
+  if (event.type === "session.uncertain" || event.type === "turn.state") return true;
+  if (event.type !== "thread.notification") return false;
+  return event.method === "item/started"
+    || event.method === "item/completed"
+    || event.method === "item/reasoning/summaryTextDelta"
+    || event.method === "item/commandExecution/outputDelta";
 }
 
 /** Render one string value, shortening long output and naming where the rest lives. */

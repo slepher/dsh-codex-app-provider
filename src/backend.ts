@@ -12,6 +12,7 @@ import type {
   CodexBackend,
   Conversation,
   CreateSessionOptions,
+  ExecutionFactLine,
   CreateWorkerInput,
   PendingConfig,
   Report,
@@ -36,6 +37,7 @@ import type {
   WorkerManagementEvent,
 } from "./browser-types.js";
 import { conversation } from "./conversation.js";
+import { feedsExecutionFacts, projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
 import { modelSettings } from "./models.js";
 import { AppServer, RpcError, type RpcMessage, UncertainError } from "./rpc.js";
 import { listSkills } from "./skills.js";
@@ -56,6 +58,8 @@ interface Runtime {
   inputs: Map<string, { rpcId: number | string; request: UserInputRequest; record: StoredSession }>;
   /** Live status of every native command item this thread has reported. */
   commands: Map<string, string>;
+  /** Events of the turn in flight that an execution fact can be projected from. */
+  facts: SequencedBackendEvent[];
 }
 
 interface ThreadResult {
@@ -81,6 +85,8 @@ export class CodexSessionBackend implements CodexBackend {
   private readonly store: SessionStore;
   private readonly live = new Map<string, Runtime>();
   private readonly releasing = new Set<Promise<void>>();
+  /** Monotonic sequence for the live subscriber stream; only subscribers read it. */
+  private sequence = 0;
   private readonly listeners = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly interactive = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly workerListeners = new Map<string, Set<(event: WorkerManagementEvent) => void>>();
@@ -117,8 +123,7 @@ export class CodexSessionBackend implements CodexBackend {
       reasoningEffort: options.reasoningEffort,
       approvals: [],
       options: normalizedOptions,
-      events: [],
-      nextEventSequence: 1,
+      facts: [],
       reports: [],
     };
     this.store.put(record);
@@ -170,8 +175,7 @@ export class CodexSessionBackend implements CodexBackend {
       reasoningEffort: options.reasoningEffort,
       approvals: [],
       options: normalizedOptions,
-      events: [],
-      nextEventSequence: 1,
+      facts: [],
       reports: [],
       worker: {
         parentSessionId: ownerIdentity(caller),
@@ -496,7 +500,7 @@ export class CodexSessionBackend implements CodexBackend {
       ownerId, sessionId, threadId, cwd: thread.cwd, state: "idle",
       model: result.model, reasoningEffort: result.reasoningEffort,
       approvals: [], options: { model: result.model, reasoningEffort: result.reasoningEffort },
-      events: [], nextEventSequence: 1,
+      facts: [],
       reports: [],
     };
     this.store.put(record);
@@ -607,7 +611,7 @@ export class CodexSessionBackend implements CodexBackend {
       const target: StoredSession = { ownerId, sessionId: request.toSessionId, threadId: from.threadId, cwd: from.cwd,
         executionCwd, state: "idle",
         model: request.model, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
-        approvals: [], options, events: [], nextEventSequence: 1, reports: [],
+        approvals: [], options, facts: [], reports: [],
         handoffFrom: { fromSessionId: request.fromSessionId, requestId: request.requestId, at: Date.now() } };
       this.store.put(target);
       return { toSessionId: target.sessionId, threadId: from.threadId, state: target.state };
@@ -808,8 +812,8 @@ export class CodexSessionBackend implements CodexBackend {
     return conversation({ turns: result.thread?.turns ?? [] });
   }
 
-  async readEvents(owner: string | Caller, sessionId: string, afterSequence = 0): Promise<readonly SequencedBackendEvent[]> {
-    return structuredClone(this.required(owner, sessionId).events.filter(item => item.sequence > afterSequence));
+  async readFacts(owner: string | Caller, sessionId: string): Promise<readonly ExecutionFactLine[]> {
+    return structuredClone(this.required(owner, sessionId).facts);
   }
 
   async readReports(owner: string | Caller, sessionId: string): Promise<readonly Report[]> {
@@ -964,7 +968,7 @@ export class CodexSessionBackend implements CodexBackend {
 
   private attach(record: StoredSession): Runtime {
     if (this.closed) throw new Error("Codex backend is closed");
-    const runtime: Runtime = { rpc: this.factory(), requests: new Map(), inputs: new Map(), commands: new Map() };
+    const runtime: Runtime = { rpc: this.factory(), requests: new Map(), inputs: new Map(), commands: new Map(), facts: [] };
     this.live.set(record.sessionId, runtime);
     runtime.rpc.on("notification", (message: RpcMessage) => {
       if (!runtime.uncertain && this.live.get(record.sessionId) === runtime && !this.closed) this.notification(record, message, runtime);
@@ -985,6 +989,7 @@ export class CodexSessionBackend implements CodexBackend {
       runtime.requests.clear();
       runtime.inputs.clear();
       this.publish(record, { type: "session.uncertain", error: `Execution state unknown: ${String(error)}` });
+      this.projectFacts(record);
       if (record.worker !== undefined) this.notifyWorker(record, "uncertain");
     };
     runtime.rpc.on("uncertain", uncertain);
@@ -1088,6 +1093,7 @@ export class CodexSessionBackend implements CodexBackend {
       ...(error === undefined ? {} : { error }),
     };
     this.commitEvents(record, [rawEvent, event, reportReady].filter((item): item is BackendEvent => item !== undefined));
+    this.projectFacts(record);
     if (reportReady !== undefined) this.notifyWorker(record, "report");
   }
 
@@ -1178,9 +1184,27 @@ export class CodexSessionBackend implements CodexBackend {
     this.commitEvents(record, [event]);
   }
 
+  /**
+   * Fold the turn's retained events into durable fact lines.
+   *
+   * The reduction resolves every item the turn left unfinished, so once the lines
+   * exist the notifications that carried them are no longer needed.
+   * @param record - the record whose turn just reached a terminal state.
+   */
+  private projectFacts(record: StoredSession): void {
+    const runtime = this.live.get(record.sessionId);
+    if (runtime === undefined || runtime.facts.length === 0) return;
+    record.facts.push(...projectExecutionFacts(reduceExecutionEvents(runtime.facts)));
+    runtime.facts = [];
+    this.store.put(record);
+  }
+
   private commitEvents(record: StoredSession, events: BackendEvent[]): void {
-    const committed = events.map(event => ({ sequence: record.nextEventSequence++, event: structuredClone(event) }));
-    record.events.push(...committed);
+    const runtime = this.live.get(record.sessionId);
+    const committed = events.map(event => ({ sequence: ++this.sequence, event: structuredClone(event) }));
+    // Only the events a fact can be projected from are retained; the stream that
+    // carries model text and status notices is published, not stored.
+    for (const item of committed) if (runtime !== undefined && feedsExecutionFacts(item.event)) runtime.facts.push(item);
     this.store.put(record);
     for (const { event, sequence } of committed) {
       for (const listener of this.listeners.get(record.sessionId) ?? []) listener(structuredClone(event), sequence);

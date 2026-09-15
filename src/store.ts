@@ -8,9 +8,11 @@ import {
 } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
+import { projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
 import type {
   ApprovalRequest,
   CreateSessionOptions,
+  ExecutionFactLine,
   PendingConfig,
   Report,
   RunState,
@@ -66,8 +68,8 @@ export interface StoredSession extends SessionSnapshot {
   released?: boolean;
   approvals: ApprovalRequest[];
   options?: CreateSessionOptions;
-  events: SequencedBackendEvent[];
-  nextEventSequence: number;
+  /** Projected execution facts, in transcript order; the raw notifications are not kept. */
+  facts: ExecutionFactLine[];
   reports: Report[];
   worker?: StoredWorker;
 }
@@ -89,7 +91,10 @@ export class SessionStore {
         if (!name.endsWith(".json")) continue;
         const record = parseRecord(readFileSync(resolve(this.directory, name), "utf8"));
         if (this.records.has(record.sessionId)) throw new Error(`Duplicate Session ${record.sessionId}`);
-        this.records.set(record.sessionId, recover(record));
+        const recovered = recover(record);
+        this.records.set(recovered.sessionId, recovered);
+        // A projected record is written back, so the mirror is gone from disk too.
+        if (record.events !== undefined) this.write(recovered);
       }
     } catch (error) {
       this.close();
@@ -205,29 +210,44 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-function recover(record: StoredSession): StoredSession {
+/**
+ * A record as written while the provider still mirrored every notification.
+ *
+ * The mirror is projected once on load so an existing state directory is
+ * rewritten in the current form instead of being unreadable.
+ */
+interface LegacyMirror {
+  events?: SequencedBackendEvent[];
+  nextEventSequence?: number;
+}
+
+type LoadedRecord = Omit<StoredSession, "facts"> & Partial<Pick<StoredSession, "facts">> & LegacyMirror;
+
+function recover(record: LoadedRecord): StoredSession {
+  const { events, nextEventSequence: _cursor, ...rest } = record;
+  const facts = record.facts ?? projectExecutionFacts(reduceExecutionEvents(events ?? []));
+  const current: StoredSession = { ...rest, facts: [...facts] };
   if (record.worker !== undefined) {
     const savedState = record.state === "saved" ? record.worker.savedState : record.state;
-    return { ...record, state: "saved", worker: { ...record.worker, savedState }, approvals: [], events: record.events ?? [], nextEventSequence: record.nextEventSequence ?? 1, reports: record.reports ?? [] };
+    return { ...current, state: "saved", worker: { ...record.worker, savedState }, approvals: [], reports: record.reports ?? [] };
   }
   const state: RunState = record.state === "running" || record.state === "waiting-approval"
     ? "unknown"
     : record.state;
-  return { ...record, state, approvals: [], events: record.events ?? [], nextEventSequence: record.nextEventSequence ?? 1, reports: record.reports ?? [] };
+  return { ...current, state, approvals: [], reports: record.reports ?? [] };
 }
 
-function parseRecord(text: string): StoredSession {
+function parseRecord(text: string): LoadedRecord {
   const value: unknown = JSON.parse(text);
   if (typeof value !== "object" || value === null) throw new Error("Invalid Session record");
-  const record = value as Partial<StoredSession>;
+  const record = value as Partial<LoadedRecord>;
   if (
     typeof record.ownerId !== "string"
     || typeof record.sessionId !== "string"
     || typeof record.cwd !== "string"
     || typeof record.state !== "string"
     || !Array.isArray(record.approvals)
-    || !Array.isArray(record.events)
-    || typeof record.nextEventSequence !== "number"
+    || !Array.isArray(record.facts) && !Array.isArray(record.events)
   ) throw new Error("Invalid Session record");
   if (record.worker !== undefined && (!validWorker(record.worker, record.state) || record.worker.parentSessionId !== record.ownerId)) {
     throw new Error("Invalid Session worker");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -117,7 +117,7 @@ test("binds one thread and deduplicates native retries with approval identity", 
     });
     assert.equal((await backend.readSession("owner", "session")).state, "idle");
     assert.equal(events.at(-1).turn.state, "interrupted");
-    const eventCount = (await backend.readEvents("owner", "session")).length;
+    const facts = await backend.readFacts("owner", "session");
     servers[0].emit("request", {
       id: "late",
       method: "item/fileChange/requestApproval",
@@ -125,7 +125,7 @@ test("binds one thread and deduplicates native retries with approval identity", 
     });
     assert.equal((await backend.readSession("owner", "session")).state, "idle");
     assert.equal((await backend.pendingApprovals("owner", "session")).length, 0);
-    assert.equal((await backend.readEvents("owner", "session")).length, eventCount);
+    assert.deepEqual(await backend.readFacts("owner", "session"), facts, "a rejected late request records no execution fact");
     assert.deepEqual(servers[0].responses.slice(-2), [
       { id: "while-interrupting", result: { decision: "cancel" } },
       { id: "late", message: "No active turn" },
@@ -161,6 +161,8 @@ test("surfaces an approval request from a bounded execution instead of declining
     boundary: { cwd: "/work", writableRoots: ["/lane"], network: "disabled" },
   });
   const turn = await backend.startTurn("owner", "boundary", "work");
+  const published = [];
+  backend.subscribe("owner", "boundary", event => published.push(event.type));
   // A declared task boundary constrains where the thread may write; it is not an
   // approval policy. A request Codex sends to this client is surfaced and
   // decided on its real identity, never declined on Codex's behalf.
@@ -174,7 +176,7 @@ test("surfaces an approval request from a bounded execution instead of declining
   assert.equal(pending.length, 1);
   assert.equal(pending[0].method, "item/commandExecution/requestApproval");
   assert.equal((await backend.readSession("owner", "boundary")).state, "waiting-approval");
-  assert.ok((await backend.readEvents("owner", "boundary")).some(({ event }) => event.type === "approval.requested"));
+  assert.ok(published.includes("approval.requested"), "the native approval reaches a subscriber");
   await backend.decideApproval("owner", pending[0].requestId, "accept");
   assert.deepEqual(servers[0].responses, [{ id: "unexpected", result: { decision: "accept" } }]);
   assert.equal((await backend.pendingApprovals("owner", "boundary")).length, 0);
@@ -330,7 +332,7 @@ test("imports an original thread once, preserves typed skills, and marks compact
   await backend.compactSession("owner", "imported");
   runtime.emit("notification", { method: "turn/started", params: { threadId: "history-thread", turn: { id: "compact-1" } } });
   runtime.emit("notification", { method: "turn/completed", params: { threadId: "history-thread", turn: { id: "compact-1", status: "completed" } } });
-  assert.equal((await backend.readEvents("owner", "imported")).at(-1).event.operation, "compact");
+  assert.equal((await backend.readReports("owner", "imported")).length, 1, "a compact turn is maintenance: it records no report");
   await backend.closeSession("owner", "imported");
   assert.equal((await backend.readSession("owner", "imported")).threadId, "history-thread", "close preserves durable history identity");
   assert.equal((await backend.occupiedThreads()).includes("history-thread"), false, "idle close releases occupancy");
@@ -561,4 +563,30 @@ test("a terminal turn the thread reports twice is applied once", async t => {
   restartedServers[0].emit("notification", completed);
   assert.equal((await restarted.readSession("owner", "session")).reports.length, 1,
     "a restarted process reaches the same conclusion from the record alone");
+});
+
+test("a record keeps the executed facts and not the notifications that carried them", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-facts-only-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const servers = [];
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
+  t.after(() => backend.close());
+  await backend.createSession("owner", "session", "/work");
+  const turn = await backend.startTurn("owner", "session", "work");
+  const server = servers[0];
+  // One stream the projection does not read, and one item it does.
+  server.emit("notification", { method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: turn.turnId, itemId: "msg", delta: "STREAMED_PROSE" } });
+  server.emit("notification", { method: "item/started", params: { threadId: "thread-1", turnId: turn.turnId,
+    item: { id: "cmd-1", type: "commandExecution", command: "printf OK", status: "inProgress" } } });
+  server.emit("notification", { method: "item/completed", params: { threadId: "thread-1", turnId: turn.turnId,
+    item: { id: "cmd-1", type: "commandExecution", command: "printf OK", status: "completed", exitCode: 0, aggregatedOutput: "OK" } } });
+  server.emit("notification", { method: "turn/completed", params: { threadId: "thread-1", turn: { id: turn.turnId, status: "completed" } } });
+
+  const facts = await backend.readFacts("owner", "session");
+  assert.equal(facts.length, 2, "the executed command projects to its fact lines");
+  assert.match(facts[0].text, /command: printf OK/);
+  const onDisk = JSON.parse(readFileSync(join(stateDir, "sessions", `${encodeURIComponent("session")}.json`), "utf8"));
+  assert.equal("events" in onDisk, false, "the notification mirror is not stored");
+  assert.equal("nextEventSequence" in onDisk, false, "the live subscriber cursor is not durable state");
+  assert.equal(JSON.stringify(onDisk).includes("STREAMED_PROSE"), false, "model text never enters the record");
 });
