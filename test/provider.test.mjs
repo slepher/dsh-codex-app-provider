@@ -58,18 +58,29 @@ const system = text => ({ id: "sys", role: "system", content: [{ type: "text", t
 const assistant = (id, text, provider = "other", replayState) => ({ id, role: "assistant", content: [{ type: "text", text }], source: { kind: "model", provider, model: "x", ...(replayState === undefined ? {} : { replayState }) } });
 const toolCall = (id, callId, name, args) => ({ id, role: "assistant", content: [{ type: "tool-call", id: callId, name, arguments: args }], source: { kind: "model", provider: "other", model: "x" } });
 const toolResult = (id, callId, text) => ({ id, role: "user", content: [{ type: "tool-result", toolCallId: callId, content: [{ type: "text", text }] }], source: { kind: "tool", callId } });
+/** A DSH compaction checkpoint: real history that replaced the range it shadows. */
+const checkpoint = (id, text, compactionId) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "plugin", plugin: "compact", compactionId } });
+/** A plugin notice DSH appended after the last native turn: never sent to Codex yet. */
+const notice = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: text } });
 
 /**
  * A DSH Session stand-in whose `append` is a real instance method.
  *
  * The private field makes a detached `append` throw exactly as the core's
  * Session does, so the fact import cannot regress to calling an unbound method.
+ * `snapshotEvents()` carries the sequence numbers the real log assigns, because
+ * the input boundary reads them to decide what the native thread already saw.
  */
 class FakeAppendSession {
   #log = [];
+  #seq = 0;
   constructor(id, cwd) { this.id = id; this.header = { cwd }; }
-  append(type, data, intent) { this.#log.push({ type, data, intent }); return { type, data }; }
-  snapshotEvents() { return this.#log.map(entry => ({ type: entry.type, data: entry.data })); }
+  append(type, data, intent) {
+    const event = { type, seq: ++this.#seq, time: Date.now(), data, ...(intent ?? {}) };
+    this.#log.push(Object.assign(event, { intent }));
+    return event;
+  }
+  snapshotEvents() { return this.#log.map(({ intent, ...event }) => event); }
   get appended() { return this.#log; }
 }
 
@@ -398,6 +409,9 @@ test("drops DSH-injected context from imports while keeping checkpoints and reca
     { id: "ins", role: "user", content: [{ type: "text", text: "AGENTS_MARK" }], source: { kind: "agent-instructions", form: "instructions", changes: [] } },
     { id: "cat", role: "user", content: [{ type: "text", text: "CATALOG_MARK" }], source: { kind: "skill-catalog", form: "catalog", entries: [] } },
     { id: "snap", role: "user", content: [{ type: "text", text: "SNAPSHOT_MARK" }], source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot", sections: [] } },
+    // Already executed natively, so the thread must never be handed it back.
+    { id: "codex-executed:t0:turn0:i0", role: "user", content: [{ type: "text", text: "EXECUTED_FACT_MARK" }],
+      source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },
   ];
   const history = [
     ...injected,
@@ -415,7 +429,7 @@ test("drops DSH-injected context from imports while keeping checkpoints and reca
   assert.equal(input.length, 2);
   const imported = input[0].text;
   assert.match(imported, /^\[DSH history import/);
-  for (const mark of ["DSH_SYSTEM_PROMPT_MARK", "AGENTS_MARK", "CATALOG_MARK", "SNAPSHOT_MARK"]) {
+  for (const mark of ["DSH_SYSTEM_PROMPT_MARK", "AGENTS_MARK", "CATALOG_MARK", "SNAPSHOT_MARK", "EXECUTED_FACT_MARK"]) {
     assert.equal(imported.includes(mark), false, `${mark} must not reach Codex`);
   }
   assert.match(imported, /CHECKPOINT_MARK/);
@@ -706,7 +720,41 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   assert.equal((await fixture.backend.readEvents(OWNER, "codex:child-a")).some(item => item.event.type === "report.ready"), false, "the DSH child stays outside the worker report path");
 });
 
-test("compacts the native thread and rebuilds it before the DSH summary", async t => {
+/** One codex reply in the DSH log, carrying the identity that marks the thread's history. */
+function appendCodexReply(session, threadId, { id, text, turnId, input }) {
+  session.append("assistant/message", { turn: 1, step: 0, stream: [],
+    message: assistant(id, text, "codex", { response: { threadId, turnId, input } }) });
+}
+
+/**
+ * One DSH compaction in the log, in the order the real core writes it: the
+ * lifecycle events, the summary carrying its shadowed range, then the
+ * checkpoint message that replaced that range on the surface.
+ */
+function appendCompaction(session, { compactionId, shadowedSeqs, summary, checkpointId }) {
+  const start = shadowedSeqs[0], end = shadowedSeqs.at(-1);
+  session.append("compaction/start", { compactionId });
+  session.append("compaction/summary", { compactionId, shadowedSeqs, shadowedRange: { start, end }, summary });
+  const message = checkpoint(checkpointId, summary, compactionId);
+  session.append("user/message", message, { surfaceOp: { op: "replace", startSeq: start, endSeq: end }, sourceEventSeqs: shadowedSeqs });
+  return message;
+}
+
+/** One executed-fact notice the provider appends to the log after a native turn. */
+function appendImportedFact(session, threadId, itemId) {
+  const message = {
+    id: `codex-executed:${threadId}:turn-1:${itemId}`, role: "user",
+    content: [{ type: "text", text: `[source: codex thread=${threadId} turn=turn-1 item=${itemId}] command: run-fake-command (exit 0)` }],
+    source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: run-fake-command" },
+  };
+  session.append("user/message", message, { surfaceOp: "append" });
+  return message;
+}
+
+/** The turn/start calls one native server accepted, in order. */
+const turnStarts = server => server.calls.filter(call => call.method === "turn/start");
+
+test("native compaction keeps the main thread and takes the summary from an isolated thread", async t => {
   const fixture = setup("dsh-provider-compact-");
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
@@ -716,46 +764,280 @@ test("compacts the native thread and rebuilds it before the DSH summary", async 
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
   const main = sessionServer(fixture.hub);
-  const oldThread = main.threadId;
+  const threadId = main.threadId;
 
   const done = collect(adapter.stream(options("s1", [user("u1", "first"), user("t1", "summarize")], { purpose: "compaction" })));
   await waitFor(() => main.calls?.some(call => call.method === "thread/compact/start"), "compact start");
-  main.notify("turn/started", { threadId: oldThread, turn: { id: "compact-turn" } });
-  main.notify("turn/completed", { threadId: oldThread, turn: { id: "compact-turn", status: "completed" } });
-  await waitFor(() => (main.closed ?? 0) >= 1, "old runtime closed");
-  await waitFor(() => fixture.hub.servers.some(server => server !== main && server.calls?.some(call => call.method === "thread/start")), "rebuilt thread");
-  const rebuilt = fixture.hub.servers.find(server => server !== main && server.calls?.some(call => call.method === "thread/start"));
-  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.threadId === rebuilt.threadId, "rebuilt identity");
-  assert.notEqual(rebuilt.threadId, oldThread, "the rebuilt Session never reuses the compacted thread");
+  main.notify("turn/started", { threadId, turn: { id: "compact-turn" } });
+  main.notify("turn/completed", { threadId, turn: { id: "compact-turn", status: "completed" } });
+  await waitFor(() => fixture.hub.servers.some(server => server !== main && turnStarts(server).length > 0), "auxiliary summary turn");
+  const aux = fixture.hub.servers.find(server => server !== main && turnStarts(server).length > 0);
+  await waitFor(async () => (await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId && record.turnId === aux.turnId), "auxiliary turn identity");
+  aux.notify("item/completed", { threadId: aux.threadId, turnId: aux.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Summary" } });
+  aux.notify("turn/completed", { threadId: aux.threadId, turn: { id: aux.turnId, status: "completed" } });
 
-  const doneSummary = await (async () => {
-    await waitFor(() => fixture.hub.servers.some(server => server !== main && server !== rebuilt && server.calls?.some(call => call.method === "thread/start")), "auxiliary thread");
-    const aux = fixture.hub.servers.find(server => server !== main && server !== rebuilt && server.calls?.some(call => call.method === "thread/start"));
-    await waitFor(() => aux.calls.some(call => call.method === "turn/start"), "auxiliary turn/start");
-    await waitFor(async () => (await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId && record.turnId === aux.turnId), "auxiliary turn identity");
-    aux.notify("item/completed", { threadId: aux.threadId, turnId: aux.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Summary" } });
-    aux.notify("turn/completed", { threadId: aux.threadId, turn: { id: aux.turnId, status: "completed" } });
-    return done;
-  })();
-  const chunks = await doneSummary;
+  const chunks = await done;
   assert.equal(chunks.find(chunk => chunk.type === "block-end").block.text, "Summary");
   assert.equal(chunks.at(-1).reason.kind, "stop");
+  assert.equal((await fixture.backend.readSession(OWNER, "codex:s1")).threadId, threadId, "the compacted thread stays bound to the Session");
+  assert.equal(fixture.hub.servers.filter(server => server.calls?.some(call => call.method === "thread/start")).length, 2,
+    "only the isolated summary starts a thread; the main thread is never rebuilt");
 
-  const next = collect(adapter.stream(options("s1", [
-    user("u1", "first"),
-    assistant("a1", "Summary", "codex", { response: { threadId: oldThread, turnId: "turn-1", input: "u1" } }),
-    user("u2", "second"),
-  ])));
-  await waitFor(() => rebuilt.calls.filter(call => call.method === "turn/start").length === 1, "rebuilt turn/start");
-  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === rebuilt.turnId, "rebuilt turn identity");
-  rebuilt.notify("item/completed", { threadId: rebuilt.threadId, turnId: rebuilt.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
-  rebuilt.notify("turn/completed", { threadId: rebuilt.threadId, turn: { id: rebuilt.turnId, status: "completed" } });
-  assert.equal((await next).at(-1).reason.kind, "stop");
-  assert.equal((await fixture.backend.readSession(OWNER, "codex:s1")).threadId, rebuilt.threadId, "the rebuilt thread serves the next turn");
-  const turnStart = rebuilt.calls.find(call => call.method === "turn/start");
-  assert.equal(turnStart.params.input.length, 2, "the rebuilt thread imports the post-compaction visible history");
-  assert.match(turnStart.params.input[0].text, /^\[DSH history import/);
-  assert.equal(turnStart.params.input[1].text, "second");
+  // The compacted thread, not a replacement, serves the next turn.
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  const u1 = user("u1", "first");
+  session.append("user/message", u1);
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  const cp = appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2], summary: "first summary", checkpointId: "cp1" });
+  const u2 = user("u2", "second");
+  session.append("user/message", u2);
+  const next = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  const before = turnStarts(main).length;
+  const doneNext = collect(next.stream(options("s1", [cp, u2])));
+  await waitFor(() => turnStarts(main).length === before + 1, "next turn on the compacted thread");
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === main.turnId, "next turn identity");
+  main.notify("item/completed", { threadId: main.threadId, turnId: main.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
+  main.notify("turn/completed", { threadId: main.threadId, turn: { id: main.turnId, status: "completed" } });
+  assert.equal((await doneNext).at(-1).reason.kind, "stop");
+  assert.deepEqual(turnStarts(main).at(-1).params.input.map(item => item.text), ["second"],
+    "the compacted thread continues without re-importing the history it already owns");
+});
+
+test("native compaction hides the replay marker, so only new input reaches the thread", async t => {
+  const fixture = setup("dsh-provider-compact-input-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const first = adapterFor(fixture, { sessions: new Map([["s1", { id: "s1", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const server = sessionServer(fixture.hub);
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:s1")).threadId;
+
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  session.append("user/message", user("u1", "first"));
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  const cp = appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2], summary: "first summary", checkpointId: "cp1" });
+  const u2 = user("u2", "second");
+  session.append("user/message", u2);
+
+  // No in-memory cursor: the boundary can only come from the Session log.
+  const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  const before = turnStarts(server).length;
+  const done = collect(adapter.stream(options("s1", [cp, u2])));
+  await waitFor(() => turnStarts(server).length === before + 1, "next turn/start");
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === server.turnId, "turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+
+  const start = turnStarts(server).at(-1);
+  assert.deepEqual(start.params.input.map(item => item.text), ["second"],
+    "the compacted history and the DSH checkpoint that replaced it are never resent");
+  assert.equal(server.calls.filter(call => call.method === "thread/start").length, 1, "the same native thread is continued");
+});
+
+test("native compaction chains without resending twice-covered history", async t => {
+  const fixture = setup("dsh-provider-compact-chain-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const first = adapterFor(fixture, { sessions: new Map([["s1", { id: "s1", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const server = sessionServer(fixture.hub);
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:s1")).threadId;
+
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  session.append("user/message", user("u1", "first"));
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2], summary: "first summary", checkpointId: "cp1" });
+  session.append("user/message", user("u2", "second"));
+  appendCodexReply(session, threadId, { id: "a2", text: "Ok", turnId: "turn-2", input: "u2" });
+  const cp2 = appendCompaction(session, { compactionId: "c2", shadowedSeqs: [5, 6, 7], summary: "second summary", checkpointId: "cp2" });
+  const u3 = user("u3", "third");
+  session.append("user/message", u3);
+
+  const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  const before = turnStarts(server).length;
+  const done = collect(adapter.stream(options("s1", [cp2, u3])));
+  await waitFor(() => turnStarts(server).length === before + 1, "chained turn/start");
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === server.turnId, "chained turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Third" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+  assert.deepEqual(turnStarts(server).at(-1).params.input.map(item => item.text), ["third"],
+    "a chained checkpoint is recognized through the range the first one covered");
+});
+
+test("native compaction still sends content appended after the checkpoint", async t => {
+  const fixture = setup("dsh-provider-compact-suffix-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const first = adapterFor(fixture, { sessions: new Map([["s1", { id: "s1", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const server = sessionServer(fixture.hub);
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:s1")).threadId;
+
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  session.append("user/message", user("u1", "first"));
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  const cp = appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2], summary: "first summary", checkpointId: "cp1" });
+  const pending = notice("n1", "worker says hi");
+  session.append("user/message", pending);
+  const u2 = user("u2", "second");
+  session.append("user/message", u2);
+
+  const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  const before = turnStarts(server).length;
+  const done = collect(adapter.stream(options("s1", [cp, pending, u2])));
+  await waitFor(() => turnStarts(server).length === before + 1, "turn/start after the checkpoint");
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === server.turnId, "turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+
+  const input = turnStarts(server).at(-1).params.input;
+  assert.equal(input.length, 2, "the unsent notice is imported next to the new message");
+  assert.match(input[0].text, /\[DSH history import/);
+  assert.match(input[0].text, /worker says hi/, "content the native thread never saw is never dropped");
+  assert.doesNotMatch(input[0].text, /first summary/);
+  assert.equal(input[1].text, "second");
+});
+
+test("native compaction recognizes a checkpoint that also replaced executed facts", async t => {
+  const fixture = setup("dsh-provider-compact-facts-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const first = adapterFor(fixture, { sessions: new Map([["s1", { id: "s1", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const server = sessionServer(fixture.hub);
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:s1")).threadId;
+
+  // The real surface a compaction replaces holds the executed-fact notice the
+  // previous turn imported after its assistant message, so the shadowed range
+  // reaches past the last native replay marker.
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  session.append("user/message", user("u1", "first"));
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  appendImportedFact(session, threadId, "item-1");
+  const cp = appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2, 3], summary: "first summary", checkpointId: "cp1" });
+  const u2 = user("u2", "second");
+  session.append("user/message", u2);
+
+  const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  const before = turnStarts(server).length;
+  const done = collect(adapter.stream(options("s1", [cp, u2])));
+  await waitFor(() => turnStarts(server).length === before + 1, "turn/start after a fact-bearing compaction");
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === server.turnId, "turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+  assert.deepEqual(turnStarts(server).at(-1).params.input.map(item => item.text), ["second"],
+    "an executed fact inside the replaced range does not hide the checkpoint");
+});
+
+test("native compaction reports a failed native compaction without rebuilding or summarizing", async t => {
+  const fixture = setup("dsh-provider-compact-failed-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
+  const adapter = adapterFor(fixture, { sessions });
+  await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const main = sessionServer(fixture.hub);
+  const threadId = main.threadId;
+
+  const done = collect(adapter.stream(options("s1", [user("u1", "first"), user("t1", "summarize")], { purpose: "compaction" })));
+  await waitFor(() => main.calls?.some(call => call.method === "thread/compact/start"), "compact start");
+  main.notify("turn/started", { threadId, turn: { id: "compact-turn" } });
+  main.notify("turn/completed", { threadId, turn: { id: "compact-turn", status: "failed", error: { message: "compact boom" } } });
+  await assert.rejects(done, /native compaction did not complete/);
+  assert.equal(main.calls.filter(call => call.method === "thread/start").length, 1, "a failed compaction never starts a replacement thread");
+  assert.equal(fixture.hub.servers.filter(server => server !== main && turnStarts(server).length > 0).length, 0,
+    "a failed compaction does not fall back to a DSH summary thread");
+  assert.equal((await fixture.backend.readSession(OWNER, "codex:s1")).threadId, threadId, "the thread stays bound after a failed compaction");
+});
+
+test("native compaction aborted before its turn identity claims nothing was stopped", async t => {
+  const fixture = setup("dsh-provider-compact-abort-early-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
+  const adapter = adapterFor(fixture, { sessions });
+  await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const main = sessionServer(fixture.hub);
+  const controller = new AbortController();
+  const done = collect(adapter.stream(options("s1", [user("u1", "first"), user("t1", "summarize")], { purpose: "compaction", signal: controller.signal })));
+  await waitFor(() => main.calls?.some(call => call.method === "thread/compact/start"), "compact start");
+  controller.abort();
+  await assert.rejects(done, /compaction aborted/);
+  assert.equal(main.interrupted, undefined, "a turn whose identity is unknown is not reported as stopped");
+});
+
+test("native compaction aborted after its turn identity interrupts that turn", async t => {
+  const fixture = setup("dsh-provider-compact-abort-late-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
+  const adapter = adapterFor(fixture, { sessions });
+  await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const main = sessionServer(fixture.hub);
+  const threadId = main.threadId;
+  const controller = new AbortController();
+  const done = collect(adapter.stream(options("s1", [user("u1", "first"), user("t1", "summarize")], { purpose: "compaction", signal: controller.signal })));
+  await waitFor(() => main.calls?.some(call => call.method === "thread/compact/start"), "compact start");
+  main.notify("turn/started", { threadId, turn: { id: "compact-turn" } });
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === "compact-turn", "compact turn identity");
+  controller.abort();
+  await assert.rejects(done, /compaction aborted/);
+  await waitFor(() => main.interrupted !== undefined, "compact interrupt");
+  assert.deepEqual(main.interrupted, { threadId, turnId: "compact-turn" }, "a compaction with a known identity is stopped");
+});
+
+test("native compaction survives a restart and resumes the same thread without replay", async t => {
+  const fixture = setup("dsh-provider-compact-restart-");
+  const first = adapterFor(fixture, { sessions: new Map([["s1", { id: "s1", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:s1")).threadId;
+  await fixture.backend.close();
+  fixture.hub.servers.length = 0;
+  const restarted = new CodexSessionBackend(fixture.stateDir, () => new FakeServer(fixture.hub));
+  t.after(async () => { await restarted.close(); cleanup(fixture); });
+
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  session.append("user/message", user("u1", "first"));
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  const cp = appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2], summary: "first summary", checkpointId: "cp1" });
+  const u2 = user("u2", "second");
+  session.append("user/message", u2);
+
+  const adapter = adapterFor({ ...fixture, backend: restarted }, { sessions: new Map([["s1", session]]) });
+  const done = collect(adapter.stream(options("s1", [cp, u2])));
+  await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "turn/start")), "recovered turn/start");
+  const server = fixture.hub.servers.find(server => server.calls?.some(call => call.method === "turn/start"));
+  await waitFor(async () => (await restarted.readSession(OWNER, "codex:s1"))?.turnId === server.turnId, "recovered turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+
+  const resumed = fixture.hub.servers.flatMap(item => item.calls ?? []).filter(call => call.method === "thread/resume");
+  assert.equal(resumed.length, 1, "the compacted thread is resumed, not rebuilt");
+  assert.equal(resumed[0].params.threadId, threadId);
+  assert.deepEqual(turnStarts(server).at(-1).params.input.map(item => item.text), ["second"],
+    "a cold recovery re-derives the same boundary it would have had in memory");
 });
 
 test("abort cancels pending approvals, interrupts the turn, and settles interrupted", async t => {

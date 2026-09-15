@@ -284,21 +284,20 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   /**
-   * Compact the user's native thread with `thread/compact/start` and then
-   * rebuild it as a fresh thread. The DSH checkpoint summary still comes from
-   * the isolated auxiliary request; native state is a disposable optimization
-   * and the next user turn imports the post-compaction DSH history.
+   * Compact the native thread in place. DSH still receives an isolated summary
+   * for its own checkpoint; subsequent native turns keep the compacted thread.
    */
   private async compactNativeThread(sessionId: string, signal: AbortSignal): Promise<void> {
     const owner = OWNER_ID, backendId = backendSessionId(sessionId), backend = this.deps.backend;
     const record = await backend.readSession(owner, backendId).catch(() => undefined);
-    if (record === undefined || record.threadId === undefined || record.state !== "idle" || signal.aborted) return;
+    if (signal.aborted) throw new LlmError("Codex compaction aborted", "ABORTED");
+    if (record === undefined || record.threadId === undefined) return;
     const channel = new EventChannel(signal);
     const off = backend.subscribe(owner, backendId, event => channel.push(event));
     try {
       await backend.compactSession(owner, backendId);
       let completed = false;
-      for await (const { event, sequence } of channel) {
+      for await (const { event } of channel) {
         if (signal.aborted) break;
         if (event.type === "session.uncertain") throw new LlmError(event.error, "EXECUTION_UNKNOWN");
         if (event.type === "turn.state" && event.operation === "compact") {
@@ -306,17 +305,17 @@ export class CodexProviderAdapter extends LlmAdapter {
           break;
         }
       }
-      if (signal.aborted || !completed) {
-        if (!completed && !signal.aborted) this.deps.logger.warn("Codex native compaction did not complete; keeping the current thread");
-        return;
-      }
-      await backend.restartSession(owner, backendId);
-      this.cursors.delete(sessionId);
-    } catch (error) {
-      this.deps.logger.warn(`Codex native compaction failed; the DSH checkpoint still applies: ${String(error)}`);
+      if (signal.aborted) throw new LlmError("Codex compaction aborted", "ABORTED");
+      if (!completed) throw new LlmError("Codex native compaction did not complete", "COMPACTION_FAILED");
     } finally {
       off();
       channel.close();
+      if (signal.aborted) {
+        const current = await backend.readSession(owner, backendId);
+        if (current?.turnId !== undefined && current.state !== "idle") {
+          await cancelTurn(backend, owner, backendId, current.turnId, this.deps.logger);
+        }
+      }
     }
   }
 
@@ -543,7 +542,8 @@ export class CodexProviderAdapter extends LlmAdapter {
     // an imported one. Its first request must resume that exact thread.
     const prepared = record !== undefined && record.turnId === undefined && record.threadId !== undefined && record.state === "idle";
     const successor = prepared ? await this.bindPreparedThread(record!, options) : false;
-    const plan = await planInput(options.messages, record?.threadId, this.cursors.get(sessionId), this.imageResolver);
+    const plan = await planInput(options.messages, record?.threadId, this.cursors.get(sessionId), this.imageResolver,
+      this.deps.sessions.get(sessionId)?.snapshotEvents?.());
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
       record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective });
@@ -845,6 +845,7 @@ async function planInput(
   threadId: string | undefined,
   cursor: string | undefined,
   image: ImageResolver,
+  events?: readonly { type: string; seq?: number; data: unknown }[],
 ): Promise<{ input: string | TurnInput[]; key: string }> {
   const lastUser = [...messages].reverse().find(message => message.role === "user" && message.source.kind !== "tool");
   if (lastUser === undefined) throw new LlmError("Codex provider received no user input", "INVALID_REQUEST");
@@ -858,6 +859,9 @@ async function planInput(
   if (start === -1 && cursor !== undefined) {
     const index = messages.findIndex(message => String(message.id) === cursor);
     if (index !== -1) start = index === messages.length - 1 ? index - 1 : index;
+  }
+  if (start === -1 && threadId !== undefined && events !== undefined) {
+    start = nativeHistoryCursor(messages, threadId, events);
   }
   const segment = messages.slice(start + 1).filter(isCodexVisible);
   const current = segment[segment.length - 1];
@@ -875,6 +879,60 @@ async function planInput(
   if (currentText !== "" || currentParts.length === 0) parts.push({ type: "text", text: currentText });
   for (const part of currentParts) if (part.type !== "text") parts.push(part);
   return { input: parts, key };
+}
+
+/** Recover the input boundary when DSH checkpoints hide the native replay marker. */
+function nativeHistoryCursor(
+  messages: readonly Message[],
+  threadId: string,
+  events: readonly { type: string; seq?: number; data: unknown }[],
+): number {
+  let last = -1;
+  for (const [index, event] of events.entries()) {
+    if (event.type !== "assistant/message") continue;
+    const message = (event.data as { message?: Message }).message;
+    if (message?.source.kind === "model" && message.source.provider === CODEX_PROVIDER
+      && replayThread(message.source.replayState) === threadId) last = index;
+  }
+  if (last === -1) return -1;
+  // Everything up to the last native marker is already in the thread, and DSH
+  // context the provider never sends cannot be missing from it either. A real
+  // checkpoint also replaces the executed-fact notices an earlier turn imported,
+  // so those must not make an otherwise covered range look unknown.
+  const covered = new Set<number>();
+  for (const [index, event] of events.entries()) {
+    if (event.seq === undefined) continue;
+    const message = eventMessage(event);
+    if (index <= last || message !== undefined && isInjectedContext(message)) covered.add(event.seq);
+  }
+  const summaries = new Map<string, readonly number[]>();
+  const known = new Set<string>();
+  for (const [index, event] of events.entries()) {
+    if (event.type === "compaction/summary") {
+      const data = event.data as { compactionId: string; shadowedSeqs: readonly number[] };
+      summaries.set(data.compactionId, data.shadowedSeqs);
+    }
+    const message = eventMessage(event);
+    if (message === undefined) continue;
+    const source = message.source as { kind: string; plugin?: string; compactionId?: string };
+    const shadowed = source.kind === "plugin" && source.plugin === "compact" && source.compactionId !== undefined
+      ? summaries.get(source.compactionId) : undefined;
+    if (index <= last || shadowed !== undefined && shadowed.length > 0 && shadowed.every(seq => covered.has(seq))) {
+      known.add(String(message.id));
+      if (event.seq !== undefined) covered.add(event.seq);
+    }
+  }
+  let cursor = -1;
+  for (const [index, message] of messages.entries()) if (known.has(String(message.id))) cursor = index;
+  // Keep the final input available for the existing idempotent retry path.
+  return Math.min(cursor, messages.length - 2);
+}
+
+/** The message one surface event carries, when it produces one. */
+function eventMessage(event: { type: string; data: unknown }): Message | undefined {
+  if (event.type === "user/message") return event.data as Message;
+  if (event.type === "assistant/message") return (event.data as { message?: Message }).message;
+  return undefined;
 }
 
 /**
