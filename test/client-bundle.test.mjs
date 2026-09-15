@@ -37,9 +37,6 @@ function loadBundle() {
 function harness() {
   const effects = [], rows = [], definitions = [], opened = [], navigated = [], handlers = new Map();
   const components = new Map();
-  let position = "sidebar";
-  const scope = { getSnapshot: () => ({ status: "ready", mode: "host", writable: true,
-    ...(position === undefined ? { value: {} } : { value: { subagentOpenPosition: position } }) }) };
   const runEffect = fn => {
     const result = fn();
     if (typeof result === "function") effects.push(result);
@@ -65,7 +62,6 @@ function harness() {
     effect(fn) { runEffect(fn); },
     on(name, handler) { handlers.set(name, handler); return () => handlers.delete(name); },
     locale: { register(ns) { assert.equal(ns, "dsh-codex-app-provider"); return () => {}; } },
-    settingsScope: { bind(spec) { assert.equal(spec.namespace, "dsh-codex-app-provider"); return scope; } },
     slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
   };
   const ctx = {
@@ -76,13 +72,15 @@ function harness() {
       fn(view);
     },
   };
-  return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components, setPosition: value => { position = value; } } };
+  return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components } };
 }
 
 test("shipped client registers the child pane, the additive child entry and the execution node", async () => {
   const module = loadBundle();
   const { ctx, state } = harness();
   module.apply(ctx);
+  assert.equal(state.rows.some(row => row.name === "settings.general.item"), false, "no opening-position setting is registered");
+  assert.equal(module.inject.includes("settingsScope"), false);
   assert.equal(state.definitions.length, 2, "both Codex conversation node definitions are registered");
 
   // The execution node still renders through the shared JSX runtime.
@@ -103,11 +101,11 @@ test("shipped client registers the child pane, the additive child entry and the 
     "a child the shell did not retain is left to the official catalog rather than guessed at");
 
   const action = state.components.get("codex-child-open");
-  assert.equal(action({ sessionId: "unrelated", addressOf: openFace.addressOf, position: openFace.position,
-    openSidebar: openFace.openSidebar, openMain: openFace.openMain, t: key => key }), null,
+  assert.equal(action({ sessionId: "unrelated", addressOf: openFace.addressOf,
+    openSidebar: openFace.openSidebar, t: key => key }), null,
     "an ordinary Session renders nothing");
-  const button = action({ sessionId: "child-1", addressOf: openFace.addressOf, position: openFace.position,
-    openSidebar: openFace.openSidebar, openMain: openFace.openMain, t: key => key });
+  const button = action({ sessionId: "child-1", addressOf: openFace.addressOf,
+    openSidebar: openFace.openSidebar, t: key => key });
   assert.equal(button.type, "button");
   assert.match(button.props.title, /childOpen → childPositionSidebar/,
     "the entry states where it will open, which the official catalog beside it does not");
@@ -116,19 +114,6 @@ test("shipped client registers the child pane, the additive child entry and the 
   assert.equal(state.opened[0].address, "dsh-resource://codex-child/parent/child-1/continuable");
   assert.deepEqual(state.opened[0].options.params, address);
   assert.deepEqual(state.navigated, [], "the sidebar route does not touch the main area");
-
-  // With the main-area position configured the same click uses the core entry.
-  state.setPosition("main");
-  button.props.onClick();
-  assert.deepEqual(state.navigated, [address]);
-  assert.equal(state.opened.length, 1, "no sidebar resource is opened for the main-area position");
-  // A preference the client cannot read yet opens the plugin's own pane rather
-  // than silently repeating the official catalog's main-area navigation.
-  state.setPosition(undefined);
-  button.props.onClick();
-  assert.equal(state.opened.length, 2, "an unreadable preference still opens the plugin's own pane");
-  assert.deepEqual(state.navigated, [address], "and still never navigates the main area by itself");
-  state.setPosition("sidebar");
 
   // The pane registers a tab type and a body; no mount field is invented.
   const panel = state.rows.find(row => row.key === "codex-child");

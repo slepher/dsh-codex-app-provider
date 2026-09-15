@@ -65,7 +65,6 @@ function load() {
   const own = {
     slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
     locale: { register() { return () => {}; } },
-    settingsScope: { bind() { return { getSnapshot: () => ({ status: "ready", value: { subagentOpenPosition: "sidebar" } }) }; } },
   };
   const ctx = {
     ...own,

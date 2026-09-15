@@ -1,5 +1,3 @@
-import type {} from "@deepseek-ai/dsh-settings";
-import { SETTINGS_NAMESPACE, SettingsSchema } from "./settings.js";
 import type { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { resolve } from "node:path";
@@ -37,9 +35,6 @@ export const inject = ["agents", "sessions", "llm"];
 
 /** Install one Codex execution owner and its native DSH route. */
 export function apply(ctx: Context, config: Config = {}): void {
-  ctx.inject(["settings"], settingsCtx => {
-    settingsCtx.settings.register(SETTINGS_NAMESPACE, SettingsSchema, { applies: "live" });
-  });
   ctx.effect(function* () {
     const backend = new CodexSessionBackend(
       resolve(config.stateDir ?? ".dsh-state"),

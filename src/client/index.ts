@@ -1,6 +1,5 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type {} from "@deepseek-ai/dsh-client-locale/client";
-import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
 import type {} from "@deepseek-ai/dsh-client-ui-slots";
 import type {} from "@deepseek-ai/dsh-client-ui-renderer/client";
 import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
@@ -12,11 +11,7 @@ import type { SubagentAddress, SubagentPromptRequestId } from "@deepseek-ai/dsh-
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
 import { SessionEventStream } from "@deepseek-ai/dsh-api-session-controller/client";
 import { executionDefinition, executionEndDefinition, ExecutionNode } from "./ExecutionNode.js";
-import { SETTINGS_NAMESPACE, type Settings } from "../settings.js";
-import { en, zh } from "./locales.js";
-import { SidebarSetting, type SidebarSettingInjected } from "./SidebarSetting.js";
-import { savePosition } from "./settings.js";
-import { openPosition } from "./settings.js";
+import { LOCALE_NAMESPACE, en, zh } from "./locales.js";
 import { ChildConversation, type ChildConversationInjected } from "./ChildConversation.js";
 import { ChildAction, type ChildActionInjected } from "./ChildAction.js";
 import { createChildViews } from "./child-view.js";
@@ -59,18 +54,17 @@ function remoteValue<T>(result: unknown): T {
   throw new Error(typeof failure === "string" ? failure : failure instanceof Error ? failure.message : "The subagent request failed");
 }
 
-export const inject = ["slots", "locale", "settingsScope"];
+export const inject = ["slots", "locale"];
 export function apply(ctx: Context): void {
   installClientStyles();
-  const settings = ctx.settingsScope.bind<Settings>({ namespace: SETTINGS_NAMESPACE });
   ctx.inject(["uiConversation"], scope => {
     scope.uiConversation.events.register(executionDefinition);
     scope.uiConversation.events.register(executionEndDefinition);
     scope.slots.inject("conversation.chat.node", () => scope.slots.register({
-      name: "conversation.chat.node", key: "codex-execution", locale: SETTINGS_NAMESPACE,
+      name: "conversation.chat.node", key: "codex-execution", locale: LOCALE_NAMESPACE,
     }, ExecutionNode));
   });
-  ctx.effect(() => ctx.locale.register(SETTINGS_NAMESPACE, { zh, en }), "Codex settings locales");
+  ctx.effect(() => ctx.locale.register(LOCALE_NAMESPACE, { zh, en }), "Codex locales");
   // `remote.session` is the stream carrier the pane's own event stream reads, and
   // it is a service of its own: declaring the `remote` head does not grant it.
   ctx.inject(["sessions", "sidebarRight", "sidebarRightTabs", "remote", "remote.session", "remote.subagents", "connection"], sidebar => {
@@ -81,7 +75,7 @@ export function apply(ctx: Context): void {
     // it need the Session services, which a conversation-scoped inject face
     // does not carry.
     sidebar.slots.inject("conversation.session.header.actions", () => sidebar.slots.register({
-      name: "conversation.session.header.actions", id: "codex-child-open", order: 20, locale: SETTINGS_NAMESPACE,
+      name: "conversation.session.header.actions", id: "codex-child-open", order: 20, locale: LOCALE_NAMESPACE,
       inject: (): ChildActionInjected => ({
         // `subagentAddress` is the shell's documented feature-plugin accessor: it
         // returns the durable direct-parent address the Session controller
@@ -89,9 +83,7 @@ export function apply(ctx: Context): void {
         // controller's catalog-navigation helper is not part of the client
         // service, so asking for it here would throw inside the header slot.
         addressOf: sessionId => (sidebar.sessions as unknown as ChildSessionFace).subagentAddress(asSessionId(sessionId)),
-        position: () => openPosition(settings.getSnapshot()),
-        openSidebar: address => openPosition(settings.getSnapshot()) === "sidebar" && openChildTab(sidebar.sidebarRight, address),
-        openMain: address => (sidebar.sessions as unknown as ChildSessionFace).openSubagent(address),
+        openSidebar: address => openChildTab(sidebar.sidebarRight, address),
       }),
     }, ChildAction));
     // Codex approvals are answered on the plugin's own authenticated channel,
@@ -118,7 +110,7 @@ export function apply(ctx: Context): void {
         title: address => (address as unknown as SubagentAddress | undefined)?.childSessionId ?? "Codex",
       });
       yield sidebar.slots.register({
-        name: "sidebar.right.pane.tab", key: CHILD_TAB_KIND, locale: SETTINGS_NAMESPACE,
+        name: "sidebar.right.pane.tab", key: CHILD_TAB_KIND, locale: LOCALE_NAMESPACE,
         inject: (): ChildConversationInjected => ({
           openMain: address => (sidebar.sessions as unknown as ChildSessionFace).openSubagent(address),
           attach: (address, listener) => views.attach(address, listener),
@@ -140,10 +132,6 @@ export function apply(ctx: Context): void {
       }, ChildConversation);
     }));
   });
-  ctx.slots.inject("settings.general.item", () => ctx.slots.register({
-    name: "settings.general.item", id: "codex-subagent-open-position", order: 30, locale: SETTINGS_NAMESPACE,
-    inject: (): SidebarSettingInjected => ({ hooks: { settings }, savePosition: value => savePosition(settings, value) }),
-  }, SidebarSetting));
 }
 
 /**
@@ -153,13 +141,11 @@ export function apply(ctx: Context): void {
  * non-current child without changing the main area's selection.
  * @param sidebarRight - the sidebar controller.
  * @param address - the direct child conversation to open.
- * @returns whether a resource was opened.
  */
 function openChildTab(sidebarRight: { openResource(address: string, options: { kind: string; params: SubagentAddress }): void },
-  address: SubagentAddress): boolean {
+  address: SubagentAddress): void {
   sidebarRight.openResource(
     `dsh-resource://${CHILD_TAB_KIND}/${encodeURIComponent(address.parentSessionId)}/${encodeURIComponent(address.childSessionId)}/${address.mode}`,
     { kind: CHILD_TAB_KIND, params: address },
   );
-  return true;
 }
