@@ -35,11 +35,13 @@ import type {
   WorkerManagementEvent,
 } from "./browser-types.js";
 import { conversation } from "./conversation.js";
+import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { feedsExecutionFacts, projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
 import { modelSettings } from "./models.js";
 import { AppServer, RpcError, type RpcMessage, UncertainError } from "./rpc.js";
 import { listSkills } from "./skills.js";
 import { SessionStore, type StoredSession } from "./store.js";
+import type { CodexGateBridge, GateRecordFacts } from "./tool-gate.js";
 
 export interface BackendTransport extends EventEmitter {
   connect(): Promise<void>;
@@ -89,12 +91,43 @@ export class CodexSessionBackend implements CodexBackend {
   private readonly interactive = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly workerListeners = new Map<string, Set<(event: WorkerManagementEvent) => void>>();
   private closed = false;
+  /** The workflow gate registry, once the Host capability is installed. */
+  private gate?: CodexGateBridge;
 
   constructor(
     stateDir: string,
     private readonly factory: () => BackendTransport = () => new AppServer(),
   ) {
     this.store = new SessionStore(stateDir);
+  }
+
+  /**
+   * Attach the workflow gate registry.
+   *
+   * The registry reads a Session's recorded binding back through this backend,
+   * so a repeated `bind` can only restate what the record already carries.
+   * @param gate - the installed Host gate capability.
+   */
+  attachGate(gate: CodexGateBridge): void {
+    this.gate = gate;
+    gate.useRecordReader(sessionId => this.gateFacts(sessionId));
+  }
+
+  /**
+   * The provider record facts a gate validation reads.
+   * @param session - DSH Session identity.
+   * @returns the recorded binding, execution cwd and thread usability, or undefined without a record.
+   */
+  gateFacts(session: string): GateRecordFacts | undefined {
+    const record = this.store.lookup(nativeSessionId(session));
+    if (record === undefined) return undefined;
+    const gate = record.options?.gate;
+    return {
+      ...(gate === undefined ? {} : { gate: structuredClone(gate) }),
+      cwd: record.executionCwd ?? record.cwd,
+      ...(record.turnId === undefined ? {} : { turnId: record.turnId }),
+      closed: record.released === true || record.handedOff !== undefined,
+    };
   }
 
 
@@ -106,7 +139,11 @@ export class CodexSessionBackend implements CodexBackend {
   ): Promise<SessionSnapshot> {
     if (!ownerId || !sessionId || !isAbsolute(cwd)) throw new Error("Owner, Session ID, and absolute cwd are required");
     const boundary = normalizedBoundary(options.boundary);
-    const normalizedOptions = { ...options, ...(boundary === undefined ? {} : { boundary }) };
+    // The gate a Host bound before this Session's first start is persisted with
+    // the record, so a resume, a restart or a cold recovery of the same Session
+    // keeps exactly the authority its first request carried.
+    const gate = options.gate ?? this.gate?.bindingFor(dshSessionId(sessionId));
+    const normalizedOptions = { ...options, ...(gate === undefined ? {} : { gate }), ...(boundary === undefined ? {} : { boundary }) };
     const existing = this.store.get(ownerId, sessionId);
     if (existing !== undefined) return snapshot(existing);
     const record: StoredSession = {

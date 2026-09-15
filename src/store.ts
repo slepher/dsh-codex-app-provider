@@ -256,6 +256,7 @@ function parseRecord(text: string): LoadedRecord {
     throw new Error("Invalid Session reports");
   }
   if (!validPending(record.pending)) throw new Error("Invalid Session pending configuration");
+  if (!validGate(record.options?.gate)) throw new Error("Invalid Session gate binding");
   if (!validHandoff(record.handedOff, ["toSessionId", "requestId"]) || !validHandoff(record.handoffFrom, ["fromSessionId", "requestId"])) {
     throw new Error("Invalid Session handoff record");
   }
@@ -281,6 +282,21 @@ function validPending(value: unknown): value is PendingConfig | undefined {
   if (Object.keys(pending).some(key => key !== "model" && key !== "reasoningEffort")) return false;
   return (pending.model === undefined || typeof pending.model === "string" && pending.model.length > 0)
     && (pending.reasoningEffort === undefined || typeof pending.reasoningEffort === "string" && pending.reasoningEffort.length > 0);
+}
+
+/**
+ * A recorded gate is optional as a whole, but never partially malformed: a
+ * Session whose binding cannot be read back must not be started as if it were
+ * ungated, so an unreadable one fails the whole record.
+ */
+function validGate(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const gate = value as Record<string, unknown>;
+  if (Object.keys(gate).some(key => key !== "role" && key !== "hook" && key !== "args")) return false;
+  return typeof gate.role === "string" && gate.role.length > 0
+    && typeof gate.hook === "string" && gate.hook.length > 0
+    && typeof gate.args === "object" && gate.args !== null && !Array.isArray(gate.args);
 }
 
 /** Whether one record still owns and may operate its native thread. */

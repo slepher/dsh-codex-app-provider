@@ -12,10 +12,13 @@ import { agentCaller, assertAgentIdentity, captureAgentIdentity } from "./identi
 import { executeWorkerAction, type WorkerAction } from "./worker-actions.js";
 import { installWorkerControl, type WorkerControl } from "./worker-control.js";
 import { installWorkerDelivery, type WorkerDelivery } from "./worker-delivery.js";
+import { CodexGateBridge } from "./tool-gate.js";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
   CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
 } from "./handoff.js";
+export { WORKFLOW_PRE_TOOL_USE, CodexGateBridge } from "./tool-gate.js";
+export type { CodexToolGate, GateBinding, GateDecision, GateEvent, GateHandler } from "./tool-gate.js";
 
 export interface Config {
   stateDir?: string;
@@ -46,6 +49,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     let untool: (() => void) | undefined;
     let delivery: WorkerDelivery | undefined;
     let control: WorkerControl | undefined;
+    // The workflow gate is a Host capability, not a model-facing tool: the
+    // workflow plugin registers the one business handler and binds each child it
+    // starts, and the provider only carries the binding to its execution points.
+    const toolGate = new CodexGateBridge();
+    backend.attachGate(toolGate);
     // The Host owns a Session's lifecycle and reports disposal as a fact. The
     // Codex record that backed the Session is this plugin's to release, so the
     // two are joined here rather than by asking the core for a teardown
@@ -76,6 +84,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       providerCwd: resolve(config.providerCwd ?? process.cwd()),
     });
     unregister = ctx.llm.registerAdapter([CODEX_PROVIDER], provider);
+    ctx.provide("codexToolGate", toolGate);
     ctx.provide("codexExecution", {
       read: nativeSessionId => provider!.readExecution(nativeSessionId),
       facts: nativeSessionId => provider!.facts(nativeSessionId),
