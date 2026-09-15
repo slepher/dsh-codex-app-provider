@@ -24,8 +24,6 @@ export interface StoredWorker {
   parentSessionId: string;
   main?: true;
   owner: WorkerOwner;
-  managedBy?: "workflow";
-  role?: string;
   name: string;
   detached: boolean;
   savedState?: WorkerState;
@@ -168,9 +166,7 @@ export class SessionStore {
     this.write(record);
   }
 
-  assertWritable(record: StoredSession): void {
-    if (!validRoleSnapshot(record)) throw new Error("Invalid Session role execution snapshot");
-  }
+  assertWritable(_record: StoredSession): void {}
 
   private write(record: StoredSession): void {
     this.persist(record);
@@ -299,10 +295,8 @@ function validWorker(value: unknown, state: unknown): value is StoredWorker {
   if (typeof value !== "object" || value === null) return false;
   const worker = value as Partial<StoredWorker>;
   return typeof worker.parentSessionId === "string" && worker.parentSessionId.length > 0
-    && (worker.main === undefined || worker.main === true && worker.owner === "user" && !worker.detached && worker.managedBy === undefined)
+    && (worker.main === undefined || worker.main === true && worker.owner === "user" && !worker.detached)
     && (worker.owner === "user" || worker.owner === "agent")
-    && (worker.managedBy === undefined || worker.managedBy === "workflow")
-    && (worker.role === undefined || typeof worker.role === "string" && worker.role.length > 0)
     && typeof worker.name === "string"
     && typeof worker.detached === "boolean"
     && validWorkerState(state)
@@ -316,15 +310,6 @@ function validWorkerState(value: unknown): value is WorkerState {
   ].includes(value);
 }
 
-function validRoleSnapshot(record: Partial<StoredSession>): boolean {
-  if (record.worker?.role === undefined) return true;
-  const options = record.options;
-  return typeof options?.model === "string" && options.model.length > 0
-    && typeof options.reasoningEffort === "string" && options.reasoningEffort.length > 0
-    && typeof options.developerInstructions === "string" && options.developerInstructions.length > 0
-    && record.model === options.model
-    && record.reasoningEffort === options.reasoningEffort;
-}
 
 function validReports(record: Partial<StoredSession>): boolean {
   if (record.reports === undefined) return true;

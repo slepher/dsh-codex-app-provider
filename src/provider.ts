@@ -466,7 +466,7 @@ export class CodexProviderAdapter extends LlmAdapter {
    *
    * Stock core does not fill `GenerateOptions.execution`, so the request is
    * preferred when it carries inputs but the live Agent's creation snapshot is
-   * the fallback that keeps a managed child's role instructions and boundary.
+   * the fallback that keeps a dispatched child's instructions and boundary.
    * The declared inputs travel verbatim: this plugin never rewrites a task
    * boundary into the Session workspace or widens its writable roots, and an
    * explicit request must still be authorized by the live Agent's route. A

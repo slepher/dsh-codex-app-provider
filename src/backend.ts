@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, statSync } from "node:fs";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute, resolve } from "node:path";
 
 import type {
@@ -37,9 +36,6 @@ import type {
   UserInputRequest,
   WorkerProjection,
   WorkerManagementEvent,
-  WorkflowProvider,
-  WorkflowRegistration,
-  WorkflowRole,
 } from "./browser-types.js";
 import { conversation } from "./conversation.js";
 import { modelSettings } from "./models.js";
@@ -96,8 +92,6 @@ export class CodexSessionBackend implements CodexBackend {
   private readonly interactive = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly workerListeners = new Map<string, Set<(event: WorkerManagementEvent) => void>>();
   private readonly guards = new Set<(mutation: BackendMutation) => void>();
-  private readonly workflowPermission = new AsyncLocalStorage<WorkflowPermission>();
-  private workflow?: { identity: object; provider: WorkflowProvider };
   private closed = false;
 
   constructor(
@@ -107,36 +101,6 @@ export class CodexSessionBackend implements CodexBackend {
     this.store = new SessionStore(stateDir);
   }
 
-  registerWorkflow(provider: WorkflowProvider): WorkflowRegistration {
-    if (this.workflow !== undefined) throw new Error("Workflow backend integration is already registered");
-    const identity = {}, active = (): boolean => this.workflow?.identity === identity;
-    this.workflow = { identity, provider };
-    return {
-      listRoles: () => { if (!active()) throw new Error("Workflow backend integration is unavailable"); return this.workflowRoles(); },
-      resolveRole: name => { if (!active()) throw new Error("Workflow backend integration is unavailable"); return this.resolveWorkflowRole(name); },
-      run: async (caller, workerId, action, operation) => {
-        validateCaller(caller);
-        if (!active()) throw new Error("Workflow backend integration is unavailable");
-        return this.workflowPermission.run({ registration: identity, caller: structuredClone(caller), workerId, action }, operation);
-      },
-      dispose: () => { if (active()) this.workflow = undefined; },
-    };
-  }
-
-  workflowRoles(): readonly WorkflowRole[] {
-    if (this.workflow === undefined) throw new Error("Workflow role provider is unavailable");
-    const roles = this.workflow.provider.listRoles();
-    for (const role of roles) validateWorkflowRole(role);
-    return structuredClone(roles);
-  }
-
-  resolveWorkflowRole(name: string): WorkflowRole {
-    if (this.workflow === undefined) throw new Error("Workflow role provider is unavailable");
-    const role = this.workflow.provider.resolveRole(name);
-    validateWorkflowRole(role);
-    if (role.name !== name) throw new Error("Workflow role provider returned a different role");
-    return structuredClone(role);
-  }
 
   async createSession(
     ownerId: string,
@@ -201,7 +165,7 @@ export class CodexSessionBackend implements CodexBackend {
     return this.getWorker(caller, record.sessionId);
   }
 
-  async createMainWorker(caller: MainCaller, input: Omit<CreateWorkerInput, "id" | "role">): Promise<WorkerProjection> {
+  async createMainWorker(caller: MainCaller, input: Omit<CreateWorkerInput, "id">): Promise<WorkerProjection> {
     privateCaller(caller);
     const key = caller.conversationId;
     let flight = this.mainFlights.get(key);
@@ -226,15 +190,7 @@ export class CodexSessionBackend implements CodexBackend {
       throw new Error("Parent, name and an existing absolute cwd are required");
     }
     if (this.store.has(sessionId)) throw new Error("Invalid or occupied worker identity");
-    const managed = this.managedCreation(caller, sessionId);
-    const { id: _, name: __, cwd: ___, role, ...requestedOptions } = input;
-    const resolvedRole = role === undefined || role === "" ? undefined : this.resolveWorkflowRole(role);
-    const options = resolvedRole === undefined ? requestedOptions : {
-      ...requestedOptions,
-      model: resolvedRole.model,
-      reasoningEffort: resolvedRole.reasoningEffort,
-      developerInstructions: resolvedRole.developerInstructions,
-    };
+    const { id: _, name: __, cwd: ___, ...options } = input;
     const boundary = normalizedBoundary(options.boundary);
     const normalizedOptions = { ...options, ...(boundary === undefined ? {} : { boundary }) };
     this.guard({ ownerId: ownerIdentity(caller), sessionId, action: "create", cwd: input.cwd, ...(boundary === undefined ? {} : { boundary }) });
@@ -257,8 +213,6 @@ export class CodexSessionBackend implements CodexBackend {
         owner: caller.source === "agent" ? "agent" : "user",
         name: input.name,
         detached: false,
-        ...(managed ? { managedBy: "workflow" as const } : {}),
-        ...(resolvedRole === undefined ? {} : { role: resolvedRole.name }),
       },
     };
     this.store.put(record);
@@ -342,7 +296,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (matches.length === 1 && matches[0].worker === undefined) {
       throw new Error("Legacy Session requires explicit identity migration before adoption");
     }
-    if (matches[0]?.worker?.managedBy === "workflow") throw new Error("Managed workflow workers cannot be adopted");
     if (matches[0]?.worker?.main) throw new Error("Main conversation binding is fixed");
     if (matches[0]?.worker !== undefined) this.store.assertWritable(matches[0]);
     if (this.store.occupiedThreads().includes(threadId)) throw new Error("This Codex session is already occupied");
@@ -354,7 +307,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (currentMatches.length !== matches.length || currentMatches[0]?.sessionId !== matches[0]?.sessionId) {
       throw new Error("Worker adoption target changed");
     }
-    if (currentMatches[0]?.worker?.managedBy === "workflow") throw new Error("Managed workflow workers cannot be adopted");
     if (thread.status?.type === "active" || this.store.occupiedThreads().includes(threadId)) {
       throw new Error("This Codex session is already occupied");
     }
@@ -427,7 +379,6 @@ export class CodexSessionBackend implements CodexBackend {
       throw new Error("Unknown execution ownership; confirm the prior process stopped before resume");
     }
     if (record.threadId === undefined) throw new Error("No thread identity to resume");
-    this.managed(record, owner, "resume");
     this.guard({ ownerId, sessionId, action: "resume", cwd: record.cwd });
     if (prior !== undefined) {
       await prior.rpc.close();
@@ -477,7 +428,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (record.worker?.main) throw new Error("Main conversation binding is fixed");
     if (record.state !== "idle" && record.state !== "saved") throw new Error(`Cannot rebuild a Session while it is ${record.state}`);
     const ownerId = ownerIdentity(owner);
-    this.managed(record, owner, "resume");
     this.guard({ ownerId, sessionId, action: "resume", cwd: record.cwd });
     if ("model" in options) record.model = options.model;
     if ("reasoningEffort" in options) record.reasoningEffort = options.reasoningEffort;
@@ -519,12 +469,7 @@ export class CodexSessionBackend implements CodexBackend {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "configure its thread");
     this.store.assertWritable(record);
-    const managed = this.managed(record, owner, "configure");
-    if (typeof owner !== "string" && owner.source !== "ui" && !managed) throw new Error("Only UI callers can configure a worker");
-    if (record.worker?.role !== undefined && (
-      options.model !== undefined && options.model !== record.options?.model
-      || options.reasoningEffort !== undefined && options.reasoningEffort !== record.options?.reasoningEffort
-    )) throw new Error("Role execution profile cannot be overridden");
+    if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can configure a worker");
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId, action: "configure", cwd: record.cwd });
     if ("model" in options) record.model = options.model;
@@ -558,7 +503,6 @@ export class CodexSessionBackend implements CodexBackend {
         throw new Error("Process pending reports with accept or ack before closing");
       }
       if (hasActiveCommand(record)) throw new Error("Tracked task command still running; verify its completion before closing");
-      this.managed(record, owner, "close");
       this.guard({ ownerId, sessionId, action: "close", cwd: record.cwd });
       record.state = "starting";
       this.store.put(record);
@@ -758,11 +702,6 @@ export class CodexSessionBackend implements CodexBackend {
       return turnSnapshot(record, record.lastTurnState ?? record.state);
     }
     if (record.state !== "idle") throw new Error(`Cannot start a turn while Session is ${record.state}; do not redispatch`);
-    if (record.worker?.role !== undefined && (
-      options.model !== undefined && options.model !== record.options?.model
-      || options.reasoningEffort !== undefined && options.reasoningEffort !== record.options?.reasoningEffort
-    )) throw new Error("Role execution profile cannot be overridden");
-    this.managed(record, owner, "start");
     this.guard({ ownerId, sessionId, action: "start", cwd: record.cwd });
     // A turn may request a model/effort other than the last confirmed one. The
     // request is recorded as a pending target; `record.model` keeps the
@@ -817,8 +756,7 @@ export class CodexSessionBackend implements CodexBackend {
     this.assertThreadOwnership(record, "compact its thread");
     this.store.assertWritable(record);
     if (record.state !== "idle") throw new Error("Wait for the current turn before compacting");
-    const managed = this.managed(record, owner, "compact");
-    if (typeof owner !== "string" && owner.source !== "ui" && !managed) throw new Error("Only UI callers can compact a worker");
+    if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can compact a worker");
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId, action: "compact", cwd: record.cwd });
     const runtime = await this.runtime(record, owner);
@@ -842,8 +780,7 @@ export class CodexSessionBackend implements CodexBackend {
     this.assertThreadOwnership(record, "start a review on its thread");
     this.store.assertWritable(record);
     if (record.state !== "idle") throw new Error(`Cannot review while Session is ${record.state}`);
-    const managed = this.managed(record, owner, "review");
-    if (typeof owner !== "string" && owner.source !== "ui" && !managed) throw new Error("Only UI callers can review a worker");
+    if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can review a worker");
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId, action: "review", cwd: record.cwd });
     const runtime = await this.runtime(record, owner);
@@ -894,7 +831,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (record.state !== "running") throw new Error("Steer precondition failed");
     const runtime = this.live.get(record.sessionId);
     if (runtime === undefined) throw new Error("Turn runtime unavailable");
-    this.managed(record, owner, "steer");
     this.guard({ ownerId, sessionId: record.sessionId, action: "steer", cwd: record.cwd });
     await runtime.rpc.request("turn/steer", {
       threadId: record.threadId,
@@ -913,7 +849,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (record.state !== "running" && record.state !== "interrupt-requested") throw new Error("Interrupt precondition failed");
     const runtime = this.live.get(record.sessionId);
     if (runtime === undefined) throw new Error("Turn runtime unavailable");
-    this.managed(record, owner, "interrupt");
     this.guard({ ownerId, sessionId: record.sessionId, action: "interrupt", cwd: record.cwd });
     await runtime.rpc.request("turn/interrupt", { threadId: record.threadId, turnId });
     if (record.state === "running") record.state = "interrupt-requested";
@@ -965,8 +900,7 @@ export class CodexSessionBackend implements CodexBackend {
       || !["running", "waiting-approval", "interrupt-requested"].includes(record.state)) {
       throw new Error("Approval no longer pending");
     }
-    const managed = this.managed(record, owner, "decide-approval");
-    if (typeof owner !== "string" && owner.source !== "ui" && !managed) throw new Error("Only UI callers can decide worker approvals");
+    if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can decide worker approvals");
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId: record.sessionId, action: "decide-approval", cwd: record.cwd });
     runtime.rpc.respond(rpcId, approvalResponse(request, decision));
@@ -999,7 +933,6 @@ export class CodexSessionBackend implements CodexBackend {
     const ownerId = ownerIdentity(owner);
     const report = record.reports.find(item => item.turnId === turnId);
     if (report === undefined) throw new Error("Unknown report");
-    this.managed(record, owner, "ack-report");
     this.guard({ ownerId, sessionId, action: "ack-report", cwd: record.cwd });
     if (report.acknowledgedAt === undefined) {
       report.acknowledgedAt = Date.now();
@@ -1019,7 +952,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (acceptance === "accepted" && (report.protocolError !== undefined || !report.result.trim())) {
       throw new Error("Cannot accept a report without a deliverable result");
     }
-    this.managed(record, owner, "accept-report");
     this.guard({ ownerId, sessionId, action: "accept-report", cwd: record.cwd });
     report.acceptance = acceptance;
     if (acceptance !== "pending") report.acknowledgedAt ??= Date.now();
@@ -1375,34 +1307,6 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  private managedCreation(caller: Caller, workerId: string): boolean {
-    const permission = this.workflowPermission.getStore();
-    if (permission === undefined) return false;
-    if (!this.permissionMatches(permission, caller, workerId, "create")) {
-      throw new Error("Managed workflow worker: create requires matching codex_workflow permission");
-    }
-    if (caller.source !== "agent") throw new Error("Managed workflow workers require an Agent caller");
-    this.workflow!.provider.authorize(structuredClone(caller), workerId, "create");
-    return true;
-  }
-
-  private managed(record: StoredSession, owner: string | Caller, action: BackendMutation["action"]): boolean {
-    if (record.worker?.managedBy !== "workflow") return false;
-    if (typeof owner === "string" || owner.conversationId !== undefined) throw new Error(`Managed workflow worker: ${action} requires codex_workflow`);
-    const permission = this.workflowPermission.getStore();
-    if (permission === undefined || !this.permissionMatches(permission, owner, record.sessionId, action)) {
-      throw new Error(`Managed workflow worker: ${action} requires codex_workflow`);
-    }
-    this.workflow!.provider.authorize(structuredClone(owner), record.sessionId, action);
-    return true;
-  }
-
-  private permissionMatches(permission: WorkflowPermission, caller: Caller, workerId: string, action: BackendMutation["action"]): boolean {
-    return this.workflow?.identity === permission.registration
-      && permission.workerId === workerId
-      && permission.action === action
-      && sameCaller(permission.caller, caller);
-  }
 
   private guard(mutation: BackendMutation): void {
     for (const guard of this.guards) guard(mutation);
@@ -1627,10 +1531,10 @@ function reconcileBoundary(record: StoredSession, result: ThreadResult): void {
 }
 
 function checkExecutionModel(record: StoredSession, result: ThreadResult): void {
-  if (record.worker?.role === undefined && record.options?.developerInstructions === undefined && record.options?.boundary === undefined) return;
+  if (record.options?.developerInstructions === undefined && record.options?.boundary === undefined) return;
   if (record.model !== undefined && result.model !== record.model
     || record.reasoningEffort !== undefined && result.reasoningEffort !== record.reasoningEffort) {
-    throw new Error("App Server did not apply the requested execution model/effort (Workflow role profile when present)");
+    throw new Error("App Server did not apply the requested execution model/effort");
   }
 }
 
@@ -1734,15 +1638,6 @@ function sameCaller(left: Caller, right: Caller): boolean {
     && left.parentAgent?.nativeSessionId === right.parentAgent?.nativeSessionId;
 }
 
-function validateWorkflowRole(role: WorkflowRole): void {
-  if (typeof role?.name !== "string" || role.name.length === 0
-    || typeof role.developerInstructions !== "string" || role.developerInstructions.length === 0
-    || typeof role.model !== "string" || role.model.length === 0
-    || typeof role.reasoningEffort !== "string" || role.reasoningEffort.length === 0) {
-    throw new Error("Invalid Workflow role provider result");
-  }
-}
-
 function agentCaller(caller: Caller): void {
   validateCaller(caller);
   if (caller.source !== "agent" || !validAgentContext(caller)) throw new Error("Invalid contextual caller");
@@ -1790,8 +1685,6 @@ function workerProjection(record: StoredSession): WorkerProjection {
     ...(worker.main ? { main: worker.main, conversationId: record.sessionId.slice(5), updatedAt: record.updatedAt } : {}),
     parentSessionId: worker.parentSessionId,
     owner: worker.owner,
-    managedBy: worker.managedBy,
-    role: worker.role,
     name: worker.name,
     detached: worker.detached,
     cwd: record.cwd,

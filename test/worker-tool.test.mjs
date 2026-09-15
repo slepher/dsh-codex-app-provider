@@ -64,8 +64,10 @@ test("the provider registers codex_workers and its prompt section", async t => {
   const tool = registered.find(definition => definition.name === "codex_workers");
   assert.ok(tool, "the ordinary delegation tool is registered");
   assert.deepEqual(tool.parameters.required, ["action"]);
+  assert.equal(tool.parameters.properties.role, undefined, "the ordinary surface carries no workflow roles");
+  assert.equal(tool.parameters.properties.action.enum.includes("roles"), false);
   assert.deepEqual(tool.parameters.properties.action.enum,
-    ["create", "roles", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"]);
+    ["create", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"]);
   assert.equal(tool.presentCall({ action: "list" }).kind, "read", "a query is presented as a read");
   assert.equal(tool.presentCall({ action: "append" }).kind, "execute");
   assert.equal(sections.filter(section => section.name === "tool:codex-workers").length, 1, "the prompt section is contributed once");
@@ -153,7 +155,6 @@ test("append runs a worker turn and its report arrives as pending, then accept a
 test("worker actions enforce the backend's state preconditions", async () => {
   const calls = [];
   const backend = {
-    workflowRoles: () => [{ name: "reviewer" }],
     listWorkers: () => [{ id: "w1", state: "running" }],
     pendingReports: () => [],
     getWorker: async (_caller, id) => ({ id, state: "running", turnId: "turn-1" }),
@@ -167,7 +168,9 @@ test("worker actions enforce the backend's state preconditions", async () => {
     closeSession: async () => {},
   };
   const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
-  assert.deepEqual(await executeWorkerAction(backend, caller, "/parent", { action: "roles" }), [{ name: "reviewer" }]);
+  // Roles are the workflow owner's content, so the ordinary surface has no
+  // role lookup: a stray `role` argument is ignored rather than resolved.
+  assert.deepEqual(await executeWorkerAction(backend, caller, "/parent", { action: "list" }), [{ id: "w1", state: "running" }]);
   // `append` requires confirmed idleness; a running worker is refused before any dispatch.
   await assert.rejects(executeWorkerAction(backend, caller, "/parent", { action: "append", workerId: "w1", text: "more" }), /Worker is running/);
   // `steer` is the action for an active turn and needs that turn's identity.

@@ -118,7 +118,6 @@ export function apply(ctx: Context, config: Config = {}): void {
         description: "Create, query, and control persistent Codex workers owned by this parent Session. Reports are durable; acknowledgement and acceptance are separate.",
         parameters: {
           action: { type: "string", required: true, enum: [...WORKER_ACTIONS] },
-          role: { type: "string" },
           workerId: { type: "string" },
           name: { type: "string" },
           cwd: { type: "string" },
@@ -152,10 +151,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 }
 
 /** Actions that only read worker state; everything else mutates it. */
-const WORKER_READ_ACTIONS = new Set(["roles", "list", "get", "reports"]);
+const WORKER_READ_ACTIONS = new Set(["list", "get", "reports"]);
 
 /** Every `codex_workers` action, in the order the tool documents them. */
-const WORKER_ACTIONS = ["create", "roles", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"] as const;
+const WORKER_ACTIONS = ["create", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"] as const;
 
 /**
  * The registered DSH Session's workspace, when it is still readable.

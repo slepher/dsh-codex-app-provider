@@ -158,7 +158,6 @@ export interface CreateWorkerInput extends CreateSessionOptions {
   id?: SessionId;
   name: string;
   cwd: string;
-  role?: string;
 }
 
 export interface StartTurnOptions extends TurnOptions {
@@ -273,8 +272,6 @@ export interface WorkerProjection {
   updatedAt?: number;
   parentSessionId: string;
   owner: WorkerOwner;
-  managedBy?: "workflow";
-  role?: string;
   name: string;
   detached: boolean;
   cwd: string;
@@ -368,26 +365,6 @@ export type BackendMutationAction =
   | "detach"
   | "adopt";
 
-export interface WorkflowRole {
-  name: string;
-  developerInstructions: string;
-  model?: string;
-  reasoningEffort?: string;
-}
-
-export interface WorkflowProvider {
-  listRoles(): readonly WorkflowRole[];
-  resolveRole(name: string): WorkflowRole;
-  authorize(caller: Caller, workerId: SessionId, action: BackendMutationAction): void;
-}
-
-export interface WorkflowRegistration {
-  listRoles(): readonly WorkflowRole[];
-  resolveRole(name: string): WorkflowRole;
-  run<T>(caller: Caller, workerId: SessionId, action: BackendMutationAction, operation: () => T | Promise<T>): Promise<T>;
-  dispose(): void;
-}
-
 export interface BackendMutation {
   ownerId: string;
   action: BackendMutationAction;
@@ -406,12 +383,9 @@ export interface SubscribeOptions {
 }
 
 export interface CodexBackend {
-  registerWorkflow(provider: WorkflowProvider): WorkflowRegistration;
-  workflowRoles(): readonly WorkflowRole[];
-  resolveWorkflowRole(name: string): WorkflowRole;
   createSession(ownerId: string, sessionId: SessionId, cwd: string, options?: CreateSessionOptions): Promise<SessionSnapshot>;
   createWorker(caller: AccessCaller, input: CreateWorkerInput): Promise<WorkerProjection>;
-  createMainWorker(caller: MainCaller, input: Omit<CreateWorkerInput, "id" | "role">): Promise<WorkerProjection>;
+  createMainWorker(caller: MainCaller, input: Omit<CreateWorkerInput, "id">): Promise<WorkerProjection>;
   getMainWorker(caller: MainCaller): Promise<WorkerProjection | undefined>;
   listMainConversations(cwd: string): Promise<readonly WorkerProjection[]>;
   listWorkers(caller: AccessCaller): Promise<readonly WorkerProjection[]>;

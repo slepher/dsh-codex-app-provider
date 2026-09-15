@@ -13,13 +13,12 @@ import type { Caller, CodexBackend, ReportAcceptance, TurnInput } from "./browse
 
 /** The actions `codex_workers` accepts. */
 export type WorkerActionName =
-  | "create" | "roles" | "list" | "get" | "reports" | "append" | "steer" | "interrupt" | "resume" | "accept" | "ack" | "close";
+  | "create" | "list" | "get" | "reports" | "append" | "steer" | "interrupt" | "resume" | "accept" | "ack" | "close";
 
 /** One ordinary delegation request. */
 export interface WorkerAction {
   action: WorkerActionName;
   workerId?: string;
-  role?: string;
   name?: string;
   cwd?: string;
   model?: string;
@@ -48,7 +47,6 @@ export async function executeWorkerAction(
   revalidate: () => void = () => {},
 ): Promise<unknown> {
   switch (input.action) {
-    case "roles": return backend.workflowRoles();
     case "list": return backend.listWorkers(caller);
     case "reports": return backend.pendingReports(caller);
     case "create": {
@@ -57,7 +55,6 @@ export async function executeWorkerAction(
         ...(input.workerId === undefined ? {} : { id: input.workerId }),
         name: required(input.name, "name"),
         cwd: input.cwd ?? parentCwd,
-        ...(input.role === undefined || input.role === "" ? {} : { role: input.role }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { reasoningEffort: input.effort }),
       });
