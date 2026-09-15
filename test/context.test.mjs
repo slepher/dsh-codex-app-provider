@@ -17,6 +17,9 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
     { id: "agents", role: "user", content: [{ type: "text", text: "AGENTS" }], source: { kind: "agent-instructions", form: "instructions", changes: [] } },
     { id: "catalog", role: "user", content: [{ type: "text", text: "catalog" }], source: { kind: "skill-catalog", form: "catalog", entries: [] } },
     { id: "snapshot", role: "user", content: [{ type: "text", text: "snapshot" }], source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot", sections: [] } },
+    // An imported executed fact is shaped exactly like a worker notice, so only
+    // its identity distinguishes native work the thread already performed.
+    { id: "codex-executed:t1:turn1:i1", role: "user", content: [{ type: "text", text: "executed" }], source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },
   ];
   const kept = [
     { id: "user", role: "user", content: [{ type: "text", text: "hello" }], source: { kind: "user" } },
@@ -30,7 +33,7 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
 
   const other = { id: "other", options: { provider: "deepseek" }, session: { id: "s2" } };
   const untouched = await preStep({ agent: other, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [...injected, ...kept] }));
-  assert.equal(untouched.messages.length, 8, "other providers keep their injected context");
+  assert.equal(untouched.messages.length, 9, "other providers keep their injected context");
   const sameArray = untouched.messages;
 
   projections.stateOf = () => ({ lastUsed: null, pending: { provider: "codex", model: "x" } });
