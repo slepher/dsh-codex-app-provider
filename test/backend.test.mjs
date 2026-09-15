@@ -17,18 +17,15 @@ class FakeServer extends EventEmitter {
     this.calls.push({ method, params });
     if (method === "thread/start" || method === "thread/resume") {
       if (method === "thread/resume") this.threadId = params.threadId;
-      const permissions = params.config?.permissions?.["dsh-task"];
-      const writableRoots = permissions === undefined ? []
-        : Object.entries(permissions.filesystem).filter(([, mode]) => mode === "write").map(([path]) => path);
       return {
         thread: { id: this.threadId, path: this.threadPath, status: { type: "idle" }, turns: [] },
         cwd: params.cwd,
         model: "test-model",
         ...(params.approvalPolicy === undefined ? {} : { approvalPolicy: params.approvalPolicy }),
-        ...(permissions === undefined ? {} : {
-          sandbox: { type: "workspaceWrite", writableRoots, excludeSlashTmp: true, excludeTmpdirEnvVar: true,
-            networkAccess: permissions.network?.enabled === true },
-        }),
+        // The sandbox is Codex's own configuration, so the scripted server
+        // reports one without being asked; the plugin authors no permissions.
+        sandbox: { type: "workspaceWrite", writableRoots: [params.cwd], excludeSlashTmp: true,
+          excludeTmpdirEnvVar: true, networkAccess: false },
       };
     }
     if (method === "turn/start") {
@@ -360,4 +357,61 @@ test("maps base64 and host-path images and rejects invalid image payloads before
     { type: "image", url: "data:image/png;base64,AA" },
     { type: "localImage", path: "/attachments/b.png" },
   ]);
+});
+
+test("a stopped worker-less Session needs explicit confirmation to close, a live one does not", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-close-session-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const first = new CodexSessionBackend(stateDir, () => new FakeServer());
+  await first.createSession("owner", "codex:child", "/work");
+  await first.startTurn("owner", "codex:child", "in flight");
+  // A process that ends with a turn in flight leaves the record uncertain.
+  await first.close();
+
+  const second = new CodexSessionBackend(stateDir, () => new FakeServer());
+  t.after(() => second.close());
+  assert.equal((await second.readSession("owner", "codex:child")).state, "unknown");
+  assert.equal((await second.listSessions("owner")).some(session => session.sessionId === "codex:child"), true);
+  // The worker branch has always accepted a confirmed stop; the worker-less
+  // branch must not be the one record nobody can release.
+  await assert.rejects(second.closeSession("owner", "codex:child"), /idle Session/);
+  await second.closeSession("owner", "codex:child", true);
+  assert.equal((await second.listSessions("owner")).some(session => session.sessionId === "codex:child"), false,
+    "a released Session is no longer owned");
+});
+
+test("a live runtime is not uncertain, so confirmation cannot bypass it", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-close-live-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const backend = new CodexSessionBackend(stateDir, () => new FakeServer());
+  t.after(() => backend.close());
+  await backend.createSession("owner", "codex:child", "/work");
+  await backend.startTurn("owner", "codex:child", "running here");
+  await assert.rejects(backend.closeSession("owner", "codex:child", true), /idle Session/,
+    "this process holds the runtime, so there is nothing to confirm away");
+});
+
+test("a disposed DSH Session releases the record that backed it", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-disposed-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const servers = [];
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
+  t.after(() => backend.close());
+  const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
+  const work = mkdtempSync(join(tmpdir(), "dsh-codex-disposed-cwd-"));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const worker = await backend.createWorker(caller, { name: "worker", cwd: work });
+  await backend.createSession("owner", "codex:conversation", work);
+  assert.equal((await backend.listWorkers(caller)).length, 1);
+  assert.equal((await backend.listSessions("owner")).some(session => session.sessionId === "codex:conversation"), true);
+
+  // The Host owns the Session lifecycle and reports the disposal as a fact.
+  backend.releaseDisposed("codex:conversation");
+  backend.releaseDisposed(worker.id);
+  assert.equal((await backend.listSessions("owner")).some(session => session.sessionId === "codex:conversation"), false,
+    "the released conversation is no longer owned");
+  assert.equal((await backend.listWorkers(caller)).length, 0, "a released worker is detached from its parent");
+  // A second disposal is a no-op rather than an error.
+  backend.releaseDisposed("codex:conversation");
+  backend.releaseDisposed("codex:never-existed");
 });

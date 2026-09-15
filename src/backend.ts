@@ -523,10 +523,39 @@ export class CodexSessionBackend implements CodexBackend {
         throw error;
       }
     }
-    if (record.state !== "idle") throw new Error("Only an idle Session can close");
+    // A Session this process still holds is not uncertain, so it must be idle to
+    // close. Once no runtime is here, the caller may confirm the prior process
+    // stopped, exactly as the worker branch above allows: an `unknown` record
+    // left by a dead process is otherwise unreachable.
+    const live = this.live.get(sessionId);
+    const confirmed = confirmedStopped && live === undefined && (record.state === "unknown" || record.state === "saved");
+    if (record.state !== "idle" && !confirmed) throw new Error("Only an idle Session can close; confirm a stopped one explicitly");
     this.guard({ ownerId, sessionId, action: "close", cwd: record.cwd });
-    await this.live.get(sessionId)?.rpc.close();
-    this.live.delete(sessionId);
+    if (live !== undefined) { await live.rpc.close(); this.live.delete(sessionId); }
+    record.released = true;
+    this.store.put(record);
+  }
+
+  /**
+   * Release the record that backed one DSH Session the Host has disposed.
+   *
+   * The Host owns a Session's lifecycle and publishes the disposal as a fact;
+   * the Codex record that backed it is this plugin's to clean up. Releasing
+   * closes any runtime this process still holds and marks the record released,
+   * whatever its state was: nothing can resume a Session that no longer exists,
+   * so leaving an `unknown` record behind would only strand the thread.
+   * @param backendId - provider-side Session identity.
+   */
+  releaseDisposed(backendId: string): void {
+    const record = this.store.lookup(backendId);
+    if (record === undefined || record.released) return;
+    const runtime = this.live.get(backendId);
+    if (runtime !== undefined) {
+      void runtime.rpc.close().catch(() => {});
+      this.live.delete(backendId);
+    }
+    this.dropSubscribers(backendId);
+    if (record.worker !== undefined) record.worker.detached = true;
     record.released = true;
     this.store.put(record);
   }

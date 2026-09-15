@@ -131,6 +131,18 @@ export class SessionStore {
     return [...new Set([...this.records.values()].flatMap(record => claimsThread(record) && record.threadId !== undefined ? [record.threadId] : []))];
   }
 
+  /**
+   * One record by Session identity, whatever backs it.
+   *
+   * The Host's own Session lifecycle reports disposal as a fact, not as a
+   * caller, so the release path cannot go through an ownership-checked getter.
+   * @param sessionId - provider-side Session identity.
+   * @returns the record, when this store has one.
+   */
+  lookup(sessionId: string): StoredSession | undefined {
+    return this.records.get(sessionId);
+  }
+
   get(ownerId: string, sessionId: string): StoredSession | undefined {
     const record = this.records.get(sessionId);
     if (record?.worker !== undefined) throw new Error("Contextual caller required for bound worker");

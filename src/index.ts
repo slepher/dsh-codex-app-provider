@@ -7,7 +7,7 @@ import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
-import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
+import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { agentCaller, assertAgentIdentity, captureAgentIdentity } from "./identity.js";
@@ -50,7 +50,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     let unfilter: (() => void) | undefined;
     let untool: (() => void) | undefined;
     let delivery: WorkerDelivery | undefined;
+    // The Host owns a Session's lifecycle and reports disposal as a fact. The
+    // Codex record that backed the Session is this plugin's to release, so the
+    // two are joined here rather than by asking the core for a teardown
+    // primitive it has no authority to execute.
+    const onDisposed = ctx.on("session/disposed", session => { backend.releaseDisposed(backendSessionId(String(session.id))); });
     yield async () => {
+      onDisposed();
       provider?.close();
       unregister?.();
       unfilter?.();
