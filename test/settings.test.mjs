@@ -27,7 +27,7 @@ test("native settings schema defaults, validates, and preserves committed value 
   assert.equal(scope.get().subagentOpenPosition, "main");
 });
 
-test("client saves only ready writable Host settings, and falls back to main before readiness", async () => {
+test("client saves only ready writable Host settings, and keeps its own pane before readiness", async () => {
   const ready = { status: "ready", mode: "host", writable: true, value: { subagentOpenPosition: "sidebar" } };
   let snapshot = ready;
   const calls = [];
@@ -39,8 +39,13 @@ test("client saves only ready writable Host settings, and falls back to main bef
     snapshot = { ...ready, ...patch };
     assert.equal(canSave(snapshot), false);
     await assert.rejects(savePosition(scope, "main"));
-    if (patch.writable !== false) assert.equal(openPosition(snapshot), "main");
+    // An unreadable preference must not send the plugin's entry into the main
+    // area: the official catalog already owns that navigation.
+    assert.equal(openPosition({ ...snapshot, value: {} }), "sidebar");
   }
+  // A preference the client can read still wins, including one stored in a
+  // process-local document.
+  assert.equal(openPosition({ status: "ready", mode: "memory", value: { subagentOpenPosition: "main" } }), "main");
   snapshot = ready;
   scope.set = async () => { throw new Error("revision conflict"); };
   await assert.rejects(savePosition(scope, "main"), /revision conflict/);

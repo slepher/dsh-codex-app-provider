@@ -38,7 +38,8 @@ function harness() {
   const effects = [], rows = [], definitions = [], opened = [], navigated = [], handlers = new Map();
   const components = new Map();
   let position = "sidebar";
-  const scope = { getSnapshot: () => ({ status: "ready", mode: "host", value: { subagentOpenPosition: position } }) };
+  const scope = { getSnapshot: () => ({ status: "ready", mode: "host", writable: true,
+    ...(position === undefined ? { value: {} } : { value: { subagentOpenPosition: position } }) }) };
   const runEffect = fn => {
     const result = fn();
     if (typeof result === "function") effects.push(result);
@@ -119,6 +120,12 @@ test("shipped client registers the child pane, the additive child entry and the 
   button.props.onClick();
   assert.deepEqual(state.navigated, [address]);
   assert.equal(state.opened.length, 1, "no sidebar resource is opened for the main-area position");
+  // A preference the client cannot read yet opens the plugin's own pane rather
+  // than silently repeating the official catalog's main-area navigation.
+  state.setPosition(undefined);
+  button.props.onClick();
+  assert.equal(state.opened.length, 2, "an unreadable preference still opens the plugin's own pane");
+  assert.deepEqual(state.navigated, [address], "and still never navigates the main area by itself");
   state.setPosition("sidebar");
 
   // The pane registers a tab type and a body; no mount field is invented.
