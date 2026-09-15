@@ -24,6 +24,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   BackendEvent,
+  Caller,
   CodexBackend,
   InputModality,
   ModelOption,
@@ -608,9 +609,9 @@ export class CodexProviderAdapter extends LlmAdapter {
           if (signal?.aborted) break;
           if (event.type === "session.uncertain") throw new LlmError(event.error, "EXECUTION_UNKNOWN");
           if (event.type === "approval.requested") {
-            void this.bridgeApproval(owner, sessionId, event.request, signal);
+            void this.bridgeApproval(owner, sessionId, event.request, this.deps.agents.get(sessionId), signal);
           } else if (event.type === "userInput.requested") {
-            void this.bridgeUserInput(owner, sessionId, event.request, signal);
+            void this.bridgeUserInput(owner, sessionId, event.request, this.deps.agents.get(sessionId), signal);
           } else if (event.type === "turn.output" && event.turnId === turn.turnId) {
             if (typeof event.item === "string") {
               text += event.item;
@@ -675,7 +676,10 @@ export class CodexProviderAdapter extends LlmAdapter {
       // session carries no approval policy and no sandbox of this plugin's
       // choosing. A request Codex does raise is carried to the user below.
       await backend.createSession(owner, backendId, cwd, { ...turnOptions(options) });
-      off = backend.subscribe(owner, backendId, event => channel.push(event));
+      // The auxiliary loop below forwards approvals and questions like the main
+      // path, so its subscription declares that ability: without it the backend
+      // answers a native question empty before anything can be asked.
+      off = backend.subscribe(owner, backendId, event => channel.push(event), { interactive: true });
       let turn: TurnSnapshot;
       try {
         turn = await backend.startTurn(owner, backendId, input === "" ? " " : input, turnOptions(options));
@@ -695,9 +699,9 @@ export class CodexProviderAdapter extends LlmAdapter {
           // An auxiliary call runs on the user's behalf like any other turn, so a
           // request Codex addresses to the user is carried to DSH here too.
           if (event.type === "approval.requested") {
-            void this.bridgeApproval(owner, sessionId, event.request, signal);
+            void this.bridgeApproval(owner, sessionId, event.request, this.deps.agents.get(sessionId), signal);
           } else if (event.type === "userInput.requested") {
-            void this.bridgeUserInput(owner, sessionId, event.request, signal);
+            void this.bridgeUserInput(owner, sessionId, event.request, this.deps.agents.get(sessionId), signal);
           } else if (event.type === "turn.output" && event.turnId === turn.turnId) {
             if (typeof event.item === "string") output += event.item;
             else if (isAgentMessage(event.item)) completedText = event.item.text;
@@ -745,17 +749,19 @@ export class CodexProviderAdapter extends LlmAdapter {
    * @param owner - the provider's own owner identity.
    * @param sessionId - the DSH Session whose turn raised the request.
    * @param request - the native request the App Server addressed to this client.
+   * @param agent - the Agent whose approval surface answers; absent fails closed.
    * @param signal - the turn's cancellation lifetime.
+   * @param caller - the owning caller for a worker's approval; absent means the
+   *   request belongs to one of the provider's own Session records.
    */
-  private async bridgeApproval(owner: string, sessionId: string, request: ApprovalRequest, signal?: AbortSignal): Promise<void> {
-    const decision = await this.askUserForApproval(sessionId, request, signal);
-    await this.decide(owner, request.requestId, decision).catch(() => {});
+  private async bridgeApproval(owner: string, sessionId: string, request: ApprovalRequest, agent: Agent | undefined, signal?: AbortSignal, caller?: Caller): Promise<void> {
+    const decision = await this.askUserForApproval(sessionId, request, agent, signal);
+    await this.decide(owner, sessionId, request.requestId, decision, caller).catch(() => {});
   }
 
   /** Resolve one native approval through the DSH answerer chain, failing closed. */
-  private async askUserForApproval(sessionId: string, request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
+  private async askUserForApproval(sessionId: string, request: ApprovalRequest, agent: Agent | undefined, signal?: AbortSignal): Promise<ApprovalDecision> {
     const seam = this.deps.approval;
-    const agent = this.deps.agents.get(sessionId);
     if (seam === undefined || agent === undefined) {
       this.deps.logger.warn(`No DSH approval answerer is composed for ${sessionId}; the native approval was declined fail-closed`);
       return "decline";
@@ -779,8 +785,44 @@ export class CodexProviderAdapter extends LlmAdapter {
     return outcome === "cancelled" ? "cancel" : "decline";
   }
 
-  private async decide(owner: string, requestId: string, decision: ApprovalDecision): Promise<void> {
-    await this.deps.backend.decideApproval(owner, requestId, decision);
+  /**
+   * Apply one decision to the request's recorded owner.
+   *
+   * A provider Session is decided by its owner string; an ordinary worker's
+   * records are owned by its parent Session, so its decision travels through the
+   * same owning caller that started the turn.
+   */
+  private async decide(owner: string, sessionId: string, requestId: string, decision: ApprovalDecision, caller?: Caller): Promise<void> {
+    if (caller === undefined) await this.deps.backend.decideApproval(owner, requestId, decision);
+    else await this.deps.backend.decideApproval(caller, sessionId, requestId, decision);
+  }
+
+  /**
+   * Carry one ordinary worker's native requests to the user.
+   *
+   * A `codex_workers` turn is started by the tool rather than by an
+   * `adapter.stream` call, so no stream loop watches the worker's Session: a
+   * request Codex raises to the user is recorded and the worker waits in
+   * `waiting-approval` with no path to an answer. This installs the same bridge
+   * the stream paths use — declared interactive, so a native question is asked
+   * instead of answered empty — and returns the unsubscribe the caller holds
+   * while the worker exists.
+   * @param caller - the validated parent caller that owns the worker.
+   * @param workerId - the worker's native Session identity.
+   * @param agent - the parent Agent whose approval and question surfaces answer.
+   * @returns the unsubscribe that ends the watch.
+   */
+  watchWorkerRequests(caller: Caller, workerId: string, agent: Agent): () => void {
+    // The worker's records are owned by its parent Session, not by this
+    // provider, so its owner string is the caller's Session identity.
+    const owner = caller.nativeSessionId;
+    return this.deps.backend.subscribe(caller, workerId, event => {
+      if (event.type === "approval.requested") {
+        void this.bridgeApproval(owner, workerId, event.request, agent, undefined, caller);
+      } else if (event.type === "userInput.requested") {
+        void this.bridgeUserInput(owner, workerId, event.request, agent);
+      }
+    }, { interactive: true });
   }
 
   /**
@@ -794,11 +836,11 @@ export class CodexProviderAdapter extends LlmAdapter {
    * @param owner - the provider's own owner identity.
    * @param sessionId - the DSH Session the question belongs to.
    * @param request - the native question request.
+   * @param agent - the Agent whose structured-question surface answers; absent fails closed.
    * @param signal - the turn's cancellation lifetime.
    */
-  private async bridgeUserInput(owner: string, sessionId: string, request: UserInputRequest, signal?: AbortSignal): Promise<void> {
+  private async bridgeUserInput(owner: string, sessionId: string, request: UserInputRequest, agent: Agent | undefined, signal?: AbortSignal): Promise<void> {
     const seam = this.deps.questions;
-    const agent = this.deps.agents.get(sessionId);
     if (seam === undefined || agent === undefined) {
       this.deps.logger.warn(`No DSH question answerer is composed for ${sessionId}; the native question was answered empty fail-closed`);
       await this.answerEmpty(owner, request);

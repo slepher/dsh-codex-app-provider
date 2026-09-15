@@ -793,7 +793,10 @@ export class CodexSessionBackend implements CodexBackend {
       || !["running", "waiting-approval", "interrupt-requested"].includes(record.state)) {
       throw new Error("Approval no longer pending");
     }
-    if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can decide worker approvals");
+    // `required` already resolved the record through this caller's ownership,
+    // so a contextual decision only has to be one of the allowed verdicts: the
+    // UI conversation a worker was started from and the parent Agent that
+    // answers for it are both its owner, and no other caller can reach it.
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId: record.sessionId, action: "decide-approval", cwd: record.cwd });
     runtime.rpc.respond(rpcId, approvalResponse(request, decision));

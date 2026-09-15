@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,15 +14,22 @@ import { installWorkerDelivery } from "../lib/worker-delivery.js";
 
 const FAKE = fileURLToPath(new URL("./fake-codex-app-server.mjs", import.meta.url));
 
-function setup() {
+/** Every scripted-server environment variable a test may set, and its restore point. */
+const FAKE_ENV = ["DSH_FAKE_CODEX_LOG", "DSH_FAKE_CODEX_STATE", "DSH_FAKE_CODEX_APPROVALS", "DSH_FAKE_CODEX_QUESTIONS"];
+
+function setup(options = {}) {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-worker-tool-"));
   const cwd = mkdtempSync(join(tmpdir(), "dsh-worker-tool-cwd-"));
-  const previous = { log: process.env.DSH_FAKE_CODEX_LOG, state: process.env.DSH_FAKE_CODEX_STATE };
+  const previous = Object.fromEntries(FAKE_ENV.map(name => [name, process.env[name]]));
+  for (const name of FAKE_ENV) delete process.env[name];
   process.env.DSH_FAKE_CODEX_STATE = join(stateDir, "fake-threads");
-  delete process.env.DSH_FAKE_CODEX_LOG;
-  return { stateDir, cwd, restore: () => {
-    if (previous.log === undefined) delete process.env.DSH_FAKE_CODEX_LOG; else process.env.DSH_FAKE_CODEX_LOG = previous.log;
-    if (previous.state === undefined) delete process.env.DSH_FAKE_CODEX_STATE; else process.env.DSH_FAKE_CODEX_STATE = previous.state;
+  // A scripted native request needs the inbound log to prove what was answered.
+  if (options.log === true) process.env.DSH_FAKE_CODEX_LOG = join(stateDir, "requests.jsonl");
+  for (const [name, value] of Object.entries(options)) if (FAKE_ENV.includes(name)) process.env[name] = String(value);
+  return { stateDir, cwd, log: join(stateDir, "requests.jsonl"), restore: () => {
+    for (const name of FAKE_ENV) {
+      if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
+    }
   } };
 }
 
@@ -297,4 +304,76 @@ test("the restored entry serves legacy worker data without migrating or re-ident
   // reviewed path that gives it an identity — never an implicit migration.
   const execution = await ctx.codexExecution.read("legacy-session");
   assert.equal(execution, undefined, "an unbound legacy Session outside the provider owner is not claimed");
+});
+
+/** The plugin host plus its registered `codex_workers` tool, over the scripted server. */
+async function workerHost(t, { seams = {}, ...options } = {}) {
+  const fixture = setup(options);
+  const ctx = new Context();
+  new LlmRuntime(ctx);
+  const { parent } = host(ctx, fixture.cwd);
+  const registered = [];
+  ctx.provide("tools", { register(definition) { registered.push(definition); return () => {}; } });
+  ctx.provide("systemPrompt", { section() { return () => {}; }, getSectionOrder: () => 10 });
+  for (const [name, value] of Object.entries(seams)) ctx.provide(name, value);
+  t.after(async () => { await ctx.fiber.dispose(); fixture.restore(); rmSync(fixture.stateDir, { recursive: true, force: true }); rmSync(fixture.cwd, { recursive: true, force: true }); });
+  await ctx.plugin(plugin, { stateDir: fixture.stateDir, command: FAKE, providerCwd: fixture.cwd });
+  return { fixture, ctx, parent, tool: registered.find(definition => definition.name === "codex_workers") };
+}
+
+/** Every response the scripted server received, in order. */
+function nativeResponses(log) {
+  return readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line))
+    .filter(entry => entry.response !== undefined).map(entry => entry.response);
+}
+
+/**
+ * A `codex_workers` turn is started by the tool, not by an adapter stream, so
+ * without an explicit bridge the request is recorded and the worker waits in
+ * `waiting-approval` with no path to an answer.
+ */
+test("a worker's native approval reaches the parent's answerer and is applied", async t => {
+  const asked = [];
+  const { fixture, parent, tool } = await workerHost(t, {
+    DSH_FAKE_CODEX_APPROVALS: "1", log: true,
+    seams: { approval: { request: async request => { asked.push(request); return "allowed-once"; } } },
+  });
+  const created = JSON.parse(await tool.execute({ action: "create", name: "approver", cwd: fixture.cwd }, exec(parent)));
+  await tool.execute({ action: "append", workerId: created.id, text: "do the task" }, exec(parent));
+
+  const approval = await waitFor(() => asked[0], "the native approval to reach the parent's answerer");
+  assert.equal(approval.agent, parent, "the request is put to the Agent that owns the worker");
+  assert.equal(approval.toolName, "item/commandExecution/requestApproval");
+
+  // The decision is written back to the worker's own record, not merely shown.
+  const released = await waitFor(async () => {
+    const worker = JSON.parse(await tool.execute({ action: "get", workerId: created.id }, exec(parent)));
+    return worker.approvals.length === 0 && worker.state !== "waiting-approval" ? worker : false;
+  }, "the approval decision to reach the worker");
+  assert.equal(released.approvals.length, 0);
+
+  const report = await waitFor(async () => JSON.parse(await tool.execute({ action: "reports" }, exec(parent)))[0], "the worker report");
+  assert.equal(report.status, "completed", "the blocked turn finishes once the user has answered");
+  assert.deepEqual(nativeResponses(fixture.log).map(response => response.result), [{ decision: "accept" }],
+    "the native request receives the decision instead of a fail-closed default");
+});
+
+test("a worker's native question reaches the parent's question surface with its answer", async t => {
+  const asked = [];
+  const { fixture, parent, tool } = await workerHost(t, {
+    DSH_FAKE_CODEX_QUESTIONS: "1", log: true,
+    seams: { userQuestions: { ask: async request => { asked.push(request); return { answers: [{ id: "q1", selected: ["Yes"], custom: "note" }] }; } } },
+  });
+  const created = JSON.parse(await tool.execute({ action: "create", name: "asker", cwd: fixture.cwd }, exec(parent)));
+  await tool.execute({ action: "append", workerId: created.id, text: "do the task" }, exec(parent));
+
+  const question = await waitFor(() => asked[0], "the native question to reach the parent's question surface");
+  assert.equal(question.agent, parent, "the question is put to the Agent that owns the worker");
+  assert.deepEqual(question.questions.map(item => item.id), ["q1"]);
+
+  const report = await waitFor(async () => JSON.parse(await tool.execute({ action: "reports" }, exec(parent)))[0], "the worker report");
+  assert.equal(report.status, "completed", "the blocked turn finishes once the user has answered");
+  assert.deepEqual(nativeResponses(fixture.log).map(response => response.result),
+    [{ answers: { q1: { answers: ["Yes", "note"] } } }],
+    "the user's answer reaches the native request instead of an empty default");
 });

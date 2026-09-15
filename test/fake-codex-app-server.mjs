@@ -11,13 +11,17 @@
  * that created the thread.
  *
  * Every inbound request is appended to `DSH_FAKE_CODEX_LOG` as one JSON line, so
- * a test can assert which native calls actually happened, in order.
+ * a test can assert which native calls actually happened, in order. A response
+ * to a request this server made is appended as `{ "response": { ... } }`, so the
+ * same log shows what the client answered a blocked turn.
  *
  * Environment:
  *   DSH_FAKE_CODEX_LOG             request log path (JSONL)
  *   DSH_FAKE_CODEX_STATE           durable thread-state directory
  *   DSH_FAKE_CODEX_FINAL           final assistant text (default "fake-final-answer")
  *   DSH_FAKE_CODEX_COMMAND_OUTPUT  command item output (default "fake-command-output")
+ *   DSH_FAKE_CODEX_APPROVALS       how many turns block on a command approval request
+ *   DSH_FAKE_CODEX_QUESTIONS       how many turns block on a structured question request
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -28,6 +32,8 @@ const logPath = process.env.DSH_FAKE_CODEX_LOG;
 const stateDir = process.env.DSH_FAKE_CODEX_STATE ?? join(process.cwd(), ".fake-codex-state");
 const finalText = process.env.DSH_FAKE_CODEX_FINAL ?? "fake-final-answer";
 const commandOutput = process.env.DSH_FAKE_CODEX_COMMAND_OUTPUT ?? "fake-command-output";
+const approvalTurns = Number(process.env.DSH_FAKE_CODEX_APPROVALS ?? 0);
+const questionTurns = Number(process.env.DSH_FAKE_CODEX_QUESTIONS ?? 0);
 
 mkdirSync(stateDir, { recursive: true });
 
@@ -40,6 +46,11 @@ const recall = threadId => {
 };
 
 let turnCounter = 0;
+/** Server-initiated requests still waiting for the client's answer, by request id. */
+const blocking = new Map();
+let requestCounter = 0;
+let approvalsSent = 0;
+let questionsSent = 0;
 
 /**
  * The configuration the App Server reports it applied for one thread request.
@@ -114,17 +125,49 @@ function commandOutputFor(threadId) {
 
 function completeTurn(threadId, id) {
   notify("turn/started", { threadId, turn: { id, status: "inProgress" } });
-  notify("item/completed", { threadId, turnId: id, item: {
-    id: `item-${id}`, type: "commandExecution", command: "run-fake-command", status: "completed",
-    exitCode: 0, cwd: recall(threadId)?.cwd, aggregatedOutput: `${commandOutputFor(threadId)}\n` } });
-  notify("item/completed", { threadId, turnId: id, item: { type: "agentMessage", phase: "final_answer", text: finalTextFor(threadId) } });
-  notify("turn/completed", { threadId, turn: { id, status: "completed" } });
+  const finish = () => {
+    notify("item/completed", { threadId, turnId: id, item: {
+      id: `item-${id}`, type: "commandExecution", command: "run-fake-command", status: "completed",
+      exitCode: 0, cwd: recall(threadId)?.cwd, aggregatedOutput: `${commandOutputFor(threadId)}\n` } });
+    notify("item/completed", { threadId, turnId: id, item: { type: "agentMessage", phase: "final_answer", text: finalTextFor(threadId) } });
+    notify("turn/completed", { threadId, turn: { id, status: "completed" } });
+  };
+  // A native request blocks the turn exactly as real Codex does: the turn only
+  // ends once the client answers the request it was sent.
+  const scripted = [];
+  if (approvalTurns > approvalsSent) {
+    approvalsSent += 1;
+    scripted.push({ method: "item/commandExecution/requestApproval", params: { threadId, turnId: id, itemId: `item-${id}`,
+      command: "run-fake-command", cwd: recall(threadId)?.cwd, reason: "fake approval", environmentId: null, startedAtMs: 1 } });
+  }
+  if (questionTurns > questionsSent) {
+    questionsSent += 1;
+    scripted.push({ method: "item/tool/requestUserInput", params: { threadId, turnId: id, itemId: `item-${id}`,
+      isBlocking: true, autoResolutionMs: null,
+      questions: [{ id: "q1", header: "Fake", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }] }] } });
+  }
+  if (scripted.length === 0) return finish();
+  let outstanding = scripted.length;
+  const answered = () => { if (--outstanding === 0) finish(); };
+  for (const request of scripted) {
+    const requestId = `ask-${++requestCounter}`;
+    blocking.set(requestId, answered);
+    write({ id: requestId, method: request.method, params: request.params });
+  }
 }
 const lines = createInterface({ input: process.stdin });
 lines.on("line", line => {
   let message;
   try { message = JSON.parse(line); } catch { return; }
-  if (typeof message?.method !== "string") return;
+  if (typeof message?.method !== "string") {
+    // A response to a request this server made: resume the turn it blocked.
+    if (logPath !== undefined && message?.id !== undefined) {
+      appendFileSync(logPath, `${JSON.stringify({ response: { id: message.id, result: message.result ?? null, error: message.error ?? null } })}\n`);
+    }
+    const answered = message?.id === undefined ? undefined : blocking.get(message.id);
+    if (answered !== undefined) { blocking.delete(message.id); answered(); }
+    return;
+  }
   const params = message.params ?? {};
   if (logPath !== undefined) appendFileSync(logPath, `${JSON.stringify({ method: message.method, params })}\n`);
   const reply = result => { if (message.id !== undefined) write({ id: message.id, result }); };

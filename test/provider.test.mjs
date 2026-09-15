@@ -639,6 +639,39 @@ test("leaves a native question for the pane and answers it with the real values"
   assert.deepEqual(await fixture.backend.pendingUserInputs(OWNER, "codex:s1"), []);
 });
 
+/**
+ * An auxiliary call runs on the user's behalf like any other turn. Its stream
+ * loop already forwards a native question to the DSH seam, but the backend
+ * answers empty unless the subscription declared itself interactive, so the
+ * forwarding branch could never be reached.
+ */
+test("carries an auxiliary call's native question to the DSH question seam", async t => {
+  const fixture = setup("dsh-provider-aux-question-");
+  t.after(() => { cleanup(fixture); return fixture.backend.close(); });
+  const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
+  const agents = new Map([["s1", { id: "s1", session: sessions.get("s1") }]]);
+  const asked = [];
+  const questions = { ask: async request => { asked.push(request); return { answers: [{ id: "q1", selected: ["Yes"], custom: "note" }] }; } };
+  const adapter = adapterFor(fixture, { sessions, agents, questions });
+
+  const done = collect(adapter.stream(options("s1", [user("t1", "summarize this")], { purpose: "session-title" })));
+  await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "thread/start")), "auxiliary thread");
+  const aux = fixture.hub.servers.find(server => server.calls?.some(call => call.method === "thread/start"));
+  await waitFor(() => aux.calls.some(call => call.method === "turn/start"), "auxiliary turn/start");
+  await waitFor(async () => (await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId && record.turnId === aux.turnId), "auxiliary turn identity");
+  aux.ask(61, "item/tool/requestUserInput", {
+    threadId: aux.threadId, turnId: aux.turnId, itemId: "i1", isBlocking: true, autoResolutionMs: null,
+    questions: [{ id: "q1", header: "Pick", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }] }],
+  });
+  await waitFor(() => aux.responded?.length > 0, "auxiliary user-input answer");
+  assert.equal(asked.length, 1, "the auxiliary call reaches the same question seam the main path uses");
+  assert.deepEqual(aux.responded, [{ id: 61, result: { answers: { q1: { answers: ["Yes", "note"] } } } }],
+    "the real answer reaches the native request instead of the empty fail-closed default");
+  aux.notify("item/completed", { threadId: aux.threadId, turnId: aux.turnId, item: { type: "agentMessage", phase: "final_answer", text: "A title" } });
+  aux.notify("turn/completed", { threadId: aux.threadId, turn: { id: aux.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+});
+
 test("fails closed for user input without a seam and for MCP elicitation", async t => {
   const fixture = setup("dsh-provider-failclosed-");
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
