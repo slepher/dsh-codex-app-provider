@@ -941,6 +941,43 @@ test("native compaction recognizes a checkpoint that also replaced executed fact
     "an executed fact inside the replaced range does not hide the checkpoint");
 });
 
+test("native compaction sends a checkpoint whose replaced range also carried unsent content", async t => {
+  const fixture = setup("dsh-provider-compact-unsent-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const first = adapterFor(fixture, { sessions: new Map([["s1", { id: "s1", header: { cwd: fixture.cwd } }]]) });
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Hello" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const server = sessionServer(fixture.hub);
+  const threadId = (await fixture.backend.readSession(OWNER, "codex:s1")).threadId;
+
+  // The replaced range also holds a visible notice the native thread never saw.
+  // Treating the checkpoint as known here would silently drop that content, so
+  // the checkpoint must still be handed over.
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  session.append("user/message", user("u1", "first"));
+  appendCodexReply(session, threadId, { id: "a1", text: "Hello", turnId: "turn-1", input: "u1" });
+  session.append("user/message", notice("n1", "worker says hi"));
+  const cp = appendCompaction(session, { compactionId: "c1", shadowedSeqs: [1, 2, 3], summary: "first summary", checkpointId: "cp1" });
+  const u2 = user("u2", "second");
+  session.append("user/message", u2);
+
+  const adapter = adapterFor(fixture, { sessions: new Map([["s1", session]]) });
+  const before = turnStarts(server).length;
+  const done = collect(adapter.stream(options("s1", [cp, u2])));
+  await waitFor(() => turnStarts(server).length === before + 1, "turn/start after a partially covered compaction");
+  await waitFor(async () => (await fixture.backend.readSession(OWNER, "codex:s1"))?.turnId === server.turnId, "turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
+
+  const input = turnStarts(server).at(-1).params.input;
+  assert.equal(input.length, 2, "the checkpoint is handed over together with the new input");
+  assert.match(input[0].text, /first summary/, "the checkpoint that replaced unsent content still reaches the thread");
+  assert.equal(input[1].text, "second");
+});
+
 test("native compaction reports a failed native compaction without rebuilding or summarizing", async t => {
   const fixture = setup("dsh-provider-compact-failed-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
