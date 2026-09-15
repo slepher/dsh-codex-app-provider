@@ -41,7 +41,10 @@ import { modelSettings } from "./models.js";
 import { AppServer, RpcError, type RpcMessage, UncertainError } from "./rpc.js";
 import { listSkills } from "./skills.js";
 import { SessionStore, type StoredSession } from "./store.js";
-import type { CodexGateBridge, GateRecordFacts } from "./tool-gate.js";
+import type { CodexGateBridge, GateRecordFacts, HookRunEvidence } from "./tool-gate.js";
+
+/** Hook runs kept per live runtime as deployment evidence. */
+const HOOK_RUN_LIMIT = 50;
 
 export interface BackendTransport extends EventEmitter {
   connect(): Promise<void>;
@@ -60,6 +63,8 @@ interface Runtime {
   commands: Map<string, string>;
   /** Events of the turn in flight that an execution fact can be projected from. */
   facts: SequencedBackendEvent[];
+  /** Hook runs Codex reported for this runtime, oldest first. */
+  hooks: HookRunEvidence[];
 }
 
 interface ThreadResult {
@@ -96,7 +101,7 @@ export class CodexSessionBackend implements CodexBackend {
 
   constructor(
     stateDir: string,
-    private readonly factory: () => BackendTransport = () => new AppServer(),
+    private readonly factory: (options?: { env?: NodeJS.ProcessEnv }) => BackendTransport = () => new AppServer(),
   ) {
     this.store = new SessionStore(stateDir);
   }
@@ -111,6 +116,31 @@ export class CodexSessionBackend implements CodexBackend {
   attachGate(gate: CodexGateBridge): void {
     this.gate = gate;
     gate.useRecordReader(sessionId => this.gateFacts(sessionId));
+  }
+
+  /**
+   * The hook runs Codex reported for one Session's current runtime.
+   *
+   * A gate refusal shows up here as a started hook run; a tool call Codex never
+   * attempted shows up as nothing at all. The two must never be confused when a
+   * live experiment is judged.
+   * @param session - DSH Session identity.
+   * @returns the recorded runs, oldest first.
+   */
+  readHookRuns(session: string): readonly HookRunEvidence[] {
+    return structuredClone(this.live.get(nativeSessionId(session))?.hooks ?? []);
+  }
+
+  /** Record one HookRunSummary notification against its runtime. */
+  private recordHookRun(record: StoredSession, runtime: Runtime, method: string, params: unknown): void {
+    runtime.hooks.push({ method, params: structuredClone(params), at: Date.now() });
+    if (runtime.hooks.length > HOOK_RUN_LIMIT) runtime.hooks.splice(0, runtime.hooks.length - HOOK_RUN_LIMIT);
+    this.publish(record, { type: "thread.notification", method, params });
+  }
+
+  /** Retire the runtime key of one Session whose live runtime is being dropped. */
+  private releaseGateRuntime(sessionId: string): void {
+    this.gate?.releaseRuntime(dshSessionId(sessionId));
   }
 
   /**
@@ -163,6 +193,9 @@ export class CodexSessionBackend implements CodexBackend {
     const runtime = this.attach(record);
     try {
       await runtime.rpc.connect();
+      // A gated Session is refused before its thread exists when Codex would
+      // silently skip the hook: present-but-untrusted is not a gate.
+      if (gate !== undefined) await this.gate!.preflight((method, params) => runtime.rpc.request(method, params), record.executionCwd ?? cwd);
       const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
       if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
       record.threadId = result.thread.id;
@@ -291,6 +324,7 @@ export class CodexSessionBackend implements CodexBackend {
     const runtime = this.attach(record);
     try {
       await runtime.rpc.connect();
+      if (record.options?.gate !== undefined) await this.gate?.preflight((method, params) => runtime.rpc.request(method, params), record.executionCwd ?? record.cwd);
       const result = await runtime.rpc.request<ThreadResult>("thread/resume", {
         ...threadParams(record),
         threadId: record.threadId,
@@ -313,6 +347,7 @@ export class CodexSessionBackend implements CodexBackend {
       record.state = "unknown";
       this.store.put(record);
       if (record.worker !== undefined) this.notifyWorker(record, "uncertain");
+      this.releaseGateRuntime(sessionId);
       this.live.delete(sessionId);
       await runtime.rpc.close().catch(() => {});
       throw error;
@@ -334,6 +369,7 @@ export class CodexSessionBackend implements CodexBackend {
     if ("reasoningEffort" in options) record.reasoningEffort = options.reasoningEffort;
     record.options = { ...record.options, model: record.model, reasoningEffort: record.reasoningEffort };
     await this.live.get(sessionId)?.rpc.close().catch(() => {});
+    this.releaseGateRuntime(sessionId);
     this.live.delete(sessionId);
     record.approvals = [];
     record.turnId = undefined;
@@ -343,6 +379,7 @@ export class CodexSessionBackend implements CodexBackend {
     const runtime = this.attach(record);
     try {
       await runtime.rpc.connect();
+      if (record.options?.gate !== undefined) await this.gate?.preflight((method, params) => runtime.rpc.request(method, params), record.executionCwd ?? record.cwd);
       const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
       if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
       record.threadId = result.thread.id;
@@ -360,6 +397,7 @@ export class CodexSessionBackend implements CodexBackend {
     } catch (error) {
       record.state = "unknown";
       this.store.put(record);
+      this.releaseGateRuntime(sessionId);
       this.live.delete(sessionId);
       await runtime.rpc.close().catch(() => {});
       throw new Error(`Session rebuild is uncertain; inspect before retrying: ${String(error)}`);
@@ -403,6 +441,7 @@ export class CodexSessionBackend implements CodexBackend {
       this.store.put(record);
       try {
         await this.live.get(sessionId)?.rpc.close();
+        this.releaseGateRuntime(sessionId);
         this.live.delete(sessionId);
         record.state = "saved";
         record.worker.savedState = "idle";
@@ -425,7 +464,7 @@ export class CodexSessionBackend implements CodexBackend {
     const live = this.live.get(sessionId);
     const confirmed = confirmedStopped && live === undefined && (record.state === "unknown" || record.state === "saved");
     if (record.state !== "idle" && !confirmed) throw new Error("Only an idle Session can close; confirm a stopped one explicitly");
-    if (live !== undefined) { await live.rpc.close(); this.live.delete(sessionId); }
+    if (live !== undefined) { await live.rpc.close(); this.releaseGateRuntime(sessionId); this.live.delete(sessionId); }
     record.released = true;
     this.store.put(record);
   }
@@ -445,6 +484,7 @@ export class CodexSessionBackend implements CodexBackend {
     if (record === undefined || record.released) return Promise.resolve();
     const runtime = this.live.get(backendId);
     const closing = runtime === undefined ? undefined : this.trackClose(runtime.rpc.close());
+    this.releaseGateRuntime(backendId);
     if (runtime !== undefined) this.live.delete(backendId);
     this.dropSubscribers(backendId);
     if (record.worker !== undefined) record.worker.detached = true;
@@ -555,6 +595,10 @@ export class CodexSessionBackend implements CodexBackend {
         ...(request.approvalPolicy === undefined ? {} : { approvalPolicy: request.approvalPolicy }),
         ...(request.approvalsReviewer === undefined ? {} : { approvalsReviewer: request.approvalsReviewer }),
         ...(request.sandbox === undefined ? {} : { sandbox: request.sandbox }),
+        // A continuation keeps the same task scope: the successor carries the
+        // source's binding verbatim, so handing over a thread never drops the
+        // gate the assignment ran under.
+        ...(from.options?.gate === undefined ? {} : { gate: structuredClone(from.options.gate) }),
         ...(boundary === undefined ? {} : { boundary }) };
       // The source marker is written first: it is the de-authorization
       // boundary, so a crash before the successor exists can only be retried
@@ -584,6 +628,7 @@ export class CodexSessionBackend implements CodexBackend {
   /** Close one record's live App Server runtime without touching its thread. */
   private async detach(sessionId: string): Promise<void> {
     const live = this.live.get(sessionId);
+    this.releaseGateRuntime(sessionId);
     if (live === undefined) return;
     this.live.delete(sessionId);
     await live.rpc.close().catch(() => {});
@@ -864,6 +909,7 @@ export class CodexSessionBackend implements CodexBackend {
   async close(): Promise<void> {
     this.closed = true;
     await Promise.allSettled([...this.live.values()].map(runtime => runtime.rpc.close()));
+    for (const sessionId of [...this.live.keys()]) this.releaseGateRuntime(sessionId);
     this.live.clear();
     // A released Session left the live map, but its process still has to exit
     // before teardown reports the backend closed.
@@ -918,7 +964,13 @@ export class CodexSessionBackend implements CodexBackend {
 
   private attach(record: StoredSession): Runtime {
     if (this.closed) throw new Error("Codex backend is closed");
-    const runtime: Runtime = { rpc: this.factory(), requests: new Map(), inputs: new Map(), commands: new Map(), facts: [] };
+    // A new runtime replaces whatever ran before it for this Session, so the
+    // previous runtime key is retired before a new one is minted: an old key can
+    // never address the new process.
+    const session = dshSessionId(record.sessionId);
+    this.gate?.releaseRuntime(session);
+    const env = this.gate?.envFor(session);
+    const runtime: Runtime = { rpc: this.factory(env === undefined ? undefined : { env }), requests: new Map(), inputs: new Map(), commands: new Map(), facts: [], hooks: [] };
     this.live.set(record.sessionId, runtime);
     runtime.rpc.on("notification", (message: RpcMessage) => {
       if (!runtime.uncertain && this.live.get(record.sessionId) === runtime && !this.closed) this.notification(record, message, runtime);
@@ -948,6 +1000,13 @@ export class CodexSessionBackend implements CodexBackend {
 
   private notification(record: StoredSession, message: RpcMessage, runtime: Runtime): void {
     const params = objectValue(message.params);
+    // A hook run is evidence about the gate itself, not about a thread turn, so
+    // it is recorded before the thread filter. It is what tells a refusal apart
+    // from a tool call Codex never attempted.
+    if (message.method === "hook/started" || message.method === "hook/completed") {
+      this.recordHookRun(record, runtime, message.method, params);
+      return;
+    }
     if (params.threadId !== record.threadId) return;
     if (message.method === "turn/completed") {
       const turn = objectValue(params.turn);

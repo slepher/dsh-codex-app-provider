@@ -30,7 +30,7 @@ export class AppServer extends EventEmitter {
   /** Recent App Server stderr lines, kept only to explain an unexpected exit. */
   private readonly diagnostics: string[] = [];
 
-  constructor(readonly options: { command?: string; args?: string[]; timeoutMs?: number } = {}) {
+  constructor(readonly options: { command?: string; args?: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}) {
     super();
   }
 
@@ -38,6 +38,10 @@ export class AppServer extends EventEmitter {
     if (this.child !== undefined) throw new Error("App server already started");
     this.child = spawn(this.options.command ?? "codex", this.options.args ?? ["app-server", "--stdio"], {
       stdio: "pipe",
+      // A gated runtime is told where its hook transport lives through the
+      // spawn environment; the process environment itself is never modified, so
+      // an ungated runtime keeps exactly the environment it had.
+      ...(this.options.env === undefined ? {} : { env: { ...process.env, ...this.options.env } }),
     });
     const lines = createInterface({ input: this.child.stdout });
     lines.on("line", line => {

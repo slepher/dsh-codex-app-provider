@@ -13,12 +13,13 @@ import { executeWorkerAction, type WorkerAction } from "./worker-actions.js";
 import { installWorkerControl, type WorkerControl } from "./worker-control.js";
 import { installWorkerDelivery, type WorkerDelivery } from "./worker-delivery.js";
 import { CodexGateBridge } from "./tool-gate.js";
+import { fileURLToPath } from "node:url";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
   CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
 } from "./handoff.js";
 export { WORKFLOW_PRE_TOOL_USE, CodexGateBridge } from "./tool-gate.js";
-export type { CodexToolGate, GateBinding, GateDecision, GateEvent, GateHandler } from "./tool-gate.js";
+export type { CodexToolGate, GateBinding, GateDecision, GateEvent, GateHandler, HookRunEvidence } from "./tool-gate.js";
 
 export interface Config {
   stateDir?: string;
@@ -41,7 +42,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(function* () {
     const backend = new CodexSessionBackend(
       resolve(config.stateDir ?? ".dsh-state"),
-      () => new AppServer({ command: config.command, timeoutMs: config.requestTimeoutMs }),
+      // The transport factory carries a gated runtime's gate environment and
+      // leaves an ungated one with exactly the environment it had before.
+      options => new AppServer({ command: config.command, timeoutMs: config.requestTimeoutMs,
+        ...(options?.env === undefined ? {} : { env: options.env }) }),
     );
     let provider: CodexProviderAdapter | undefined;
     let unregister: (() => void) | undefined;
@@ -53,6 +57,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     // workflow plugin registers the one business handler and binds each child it
     // starts, and the provider only carries the binding to its execution points.
     const toolGate = new CodexGateBridge();
+    // The startup preflight matches the installed hook command, so this is the
+    // one entry the provider will accept as its own PreToolUse hook.
+    toolGate.useClient(fileURLToPath(new URL("./pretool-client.js", import.meta.url)));
     backend.attachGate(toolGate);
     // The Host owns a Session's lifecycle and reports disposal as a fact. The
     // Codex record that backed the Session is this plugin's to release, so the
@@ -70,6 +77,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       delivery?.close();
       control?.close();
       await backend.close();
+      await toolGate.close();
     };
     provider = new CodexProviderAdapter({
       backend,
