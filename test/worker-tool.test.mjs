@@ -187,6 +187,31 @@ test("worker actions enforce the backend's state preconditions", async () => {
   assert.equal(requested.cwd, "/parent");
 });
 
+test("an argument the chosen action never reads is refused, not silently dropped", async () => {
+  // `reports` once ignored a stray `workerId` and answered with an empty list,
+  // which reads like "this worker has reported nothing yet" and sends the
+  // caller away to wait instead of correcting the call.
+  const backend = {
+    listWorkers: () => [{ id: "w1", state: "idle" }],
+    pendingReports: () => [],
+    getWorker: async (_caller, id) => ({ id, state: "idle" }),
+  };
+  const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
+  await assert.rejects(
+    executeWorkerAction(backend, caller, "/parent", { action: "reports", workerId: "w1" }),
+    /codex_workers "reports" does not read "workerId"; it reads no other fields/,
+  );
+  await assert.rejects(
+    executeWorkerAction(backend, caller, "/parent", { action: "list", workerId: "w1" }),
+    /does not read "workerId"/,
+  );
+  // A field the action does read still passes, and an omitted optional field is
+  // not "present but unread".
+  assert.deepEqual(await executeWorkerAction(backend, caller, "/parent", { action: "reports" }), []);
+  assert.deepEqual(await executeWorkerAction(backend, caller, "/parent", { action: "get", workerId: "w1" }), { id: "w1", state: "idle" });
+  await assert.rejects(executeWorkerAction(backend, caller, "/parent", { action: "reposrts" }), /Unknown worker action/);
+});
+
 test("report notices are claimed once per parent and never fabricated as a decision", async () => {
   const listeners = new Map();
   const emitted = [];

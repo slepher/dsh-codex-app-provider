@@ -115,17 +115,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       const callerIdentity = (agent: Agent | undefined) => captureAgentIdentity(ctx, agent);
       untool = tools.tools.register(defineTool({
         name: "codex_workers",
-        description: "Create, query, and control persistent Codex workers owned by this parent Session. Give a worker its instructions as the prompt. This tool has no role concept: a role-bound child (a reviewer, an evidence runner, a tester) is dispatched by the workflow tool, which owns the role catalogue. Reports are durable; acknowledgement and acceptance are separate.",
+        description: "Create, query, and control persistent Codex workers owned by this parent Session. Give a worker its instructions as the prompt. This tool has no role concept: a role-bound child (a reviewer, an evidence runner, a tester) is dispatched by the workflow tool, which owns the role catalogue. Reports are durable; acknowledgement and acceptance are separate. The workers here are the ones this tool created: a child started by the workflow tool is a separate DSH subagent and cannot be reached through these actions.",
         parameters: {
-          action: { type: "string", required: true, enum: [...WORKER_ACTIONS] },
-          workerId: { type: "string" },
-          name: { type: "string" },
-          cwd: { type: "string" },
-          model: { type: "string" },
-          effort: { type: "string" },
-          text: { type: "string" },
-          turnId: { type: "string" },
-          acceptance: { type: "string", enum: ["pending", "accepted", "changes-requested"] },
+          action: { type: "string", required: true, enum: [...WORKER_ACTIONS], description: "The operation to perform. `list` and `reports` read this Session's own workers and take no other field." },
+          workerId: { type: "string", description: "The worker this action targets. Required by every action except `create` (which may name the id to create), `list` and `reports`. The provider tracks only the workers this tool created: a child started by the workflow tool is not one of them and cannot be read here." },
+          name: { type: "string", description: "`create` only: display name for the new worker." },
+          cwd: { type: "string", description: "`create` only: absolute working directory. Defaults to the parent Session's workspace." },
+          model: { type: "string", description: "`create` only: model id for the new worker." },
+          effort: { type: "string", description: "`create` only: reasoning effort for the new worker." },
+          text: { type: "string", description: "`append` and `steer`: the turn's prompt or the guidance to inject into the running turn." },
+          turnId: { type: "string", description: "`steer`, `interrupt`, `ack` and `accept`: the exact turn to act on." },
+          acceptance: { type: "string", enum: ["pending", "accepted", "changes-requested"], description: "`accept` only: the verdict recorded for the report." },
         },
         output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
         async execute(args, execution) {

@@ -29,6 +29,43 @@ export interface WorkerAction {
   skills?: readonly TurnInput[];
 }
 
+/** The fields each action reads; anything else in a call is the caller's mistake. */
+const ACTION_FIELDS: Readonly<Record<WorkerActionName, readonly (keyof WorkerAction)[]>> = {
+  list: [],
+  reports: [],
+  create: ["workerId", "name", "cwd", "model", "effort"],
+  get: ["workerId"],
+  append: ["workerId", "text", "skills"],
+  steer: ["workerId", "turnId", "text", "skills"],
+  interrupt: ["workerId", "turnId"],
+  resume: ["workerId"],
+  ack: ["workerId", "turnId"],
+  accept: ["workerId", "turnId", "acceptance"],
+  close: ["workerId"],
+};
+
+/**
+ * Reject arguments the chosen action never reads.
+ *
+ * A silently ignored field is worse than a refusal: `reports` once ignored a
+ * `workerId` and answered with an empty list, which reads like "this worker has
+ * reported nothing yet" and sends the caller away to wait instead of correcting
+ * the call. Every action here reads a known set, so a stray field is named.
+ * @param action - the action being executed.
+ * @param input - the call's arguments.
+ * @param accepted - the field names this action reads.
+ * @throws when the call carries a field outside `accepted`.
+ */
+function assertActionFields(action: WorkerActionName, input: WorkerAction, accepted: readonly (keyof WorkerAction)[]): void {
+  const fields = input as unknown as Record<string, unknown>;
+  const extra = Object.keys(input).filter(field => field !== "action"
+    && fields[field] !== undefined
+    && !accepted.includes(field as keyof WorkerAction));
+  if (extra.length === 0) return;
+  const reads = accepted.length === 0 ? "no other fields" : accepted.map(field => `"${field}"`).join(", ");
+  throw new Error(`codex_workers "${action}" does not read ${extra.map(field => `"${field}"`).join(", ")}; it reads ${reads}`);
+}
+
 /**
  * Execute one worker action against the backend.
  * @param backend - the single Codex backend that owns worker records.
@@ -37,7 +74,7 @@ export interface WorkerAction {
  * @param input - the validated action arguments.
  * @param revalidate - asked to re-prove the parent identity before each mutation.
  * @returns the action's canonical result, JSON-serializable.
- * @throws when a required field is missing or the backend refuses the action.
+ * @throws when a required field is missing, an unread field is present, or the backend refuses the action.
  */
 export async function executeWorkerAction(
   backend: CodexBackend,
@@ -46,6 +83,9 @@ export async function executeWorkerAction(
   input: WorkerAction,
   revalidate: () => void = () => {},
 ): Promise<unknown> {
+  const accepted = Object.hasOwn(ACTION_FIELDS, input.action) ? ACTION_FIELDS[input.action] : undefined;
+  if (accepted === undefined) throw new Error("Unknown worker action");
+  assertActionFields(input.action, input, accepted);
   switch (input.action) {
     case "list": return backend.listWorkers(caller);
     case "reports": return backend.pendingReports(caller);
