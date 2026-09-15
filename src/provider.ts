@@ -824,20 +824,26 @@ async function cancelTurn(backend: CodexBackend, owner: string, backendId: strin
   await backend.interruptTurn(owner, turnId).catch(error => { logger.warn(`Codex turn interrupt failed after abort: ${String(error)}`); });
 }
 
+/**
+ * The outcome of a turn that had already ended when this request observed it.
+ *
+ * The backend records one report per terminal turn, so the answer does not
+ * depend on replaying the notification stream that produced it.
+ * @param backend - the backend that owns the record.
+ * @param owner - the record owner identity.
+ * @param backendId - the native Session identity.
+ * @param turnId - the terminal turn to report.
+ * @returns the recorded output, terminal state and failure.
+ * @throws when the turn has no recorded report.
+ */
 async function replayTurn(backend: CodexBackend, owner: string, backendId: string, turnId: string): Promise<TurnOutcome> {
-  const events = await backend.readEvents(owner, backendId);
-  let output = "", error: string | undefined, status: TurnSnapshot["state"] = "completed";
-  for (const { event } of events) {
-    if (event.type === "turn.output" && event.turnId === turnId) {
-      if (typeof event.item === "string") output += event.item;
-      else if (isAgentMessage(event.item)) output = event.item.text;
-    } else if (event.type === "turn.state" && event.turn.turnId === turnId && TERMINAL_STATES.has(event.turn.state)) {
-      status = event.turn.state;
-      error = event.error;
-      if (event.finalOutput !== undefined) output = event.finalOutput;
-    }
+  const reports: readonly Report[] = (await backend.readSession(owner, backendId))?.reports ?? [];
+  let report: Report | undefined;
+  for (let index = reports.length - 1; index >= 0; index--) {
+    if (reports[index]!.turnId === turnId) { report = reports[index]; break; }
   }
-  return { status, output, ...(error === undefined ? {} : { error }) };
+  if (report === undefined) throw new LlmError("Codex turn has no recorded outcome", "EXECUTION_UNKNOWN");
+  return { status: report.status, output: report.result, ...(report.error === undefined ? {} : { error: report.error }) };
 }
 
 async function planInput(

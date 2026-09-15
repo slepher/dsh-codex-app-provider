@@ -54,6 +54,8 @@ interface Runtime {
   rpc: BackendTransport;
   requests: Map<string, number | string>;
   inputs: Map<string, { rpcId: number | string; request: UserInputRequest; record: StoredSession }>;
+  /** Live status of every native command item this thread has reported. */
+  commands: Map<string, string>;
 }
 
 interface ThreadResult {
@@ -392,7 +394,7 @@ export class CodexSessionBackend implements CodexBackend {
       if (record.reports.some(report => report.acceptance === "pending" && report.acknowledgedAt === undefined)) {
         throw new Error("Process pending reports with accept or ack before closing");
       }
-      if (hasActiveCommand(record)) throw new Error("Tracked task command still running; verify its completion before closing");
+      if (hasActiveCommand(this.live.get(sessionId))) throw new Error("Tracked task command still running; verify its completion before closing");
       this.guard({ ownerId, sessionId, action: "close", cwd: record.cwd });
       record.state = "starting";
       this.store.put(record);
@@ -962,10 +964,10 @@ export class CodexSessionBackend implements CodexBackend {
 
   private attach(record: StoredSession): Runtime {
     if (this.closed) throw new Error("Codex backend is closed");
-    const runtime: Runtime = { rpc: this.factory(), requests: new Map(), inputs: new Map() };
+    const runtime: Runtime = { rpc: this.factory(), requests: new Map(), inputs: new Map(), commands: new Map() };
     this.live.set(record.sessionId, runtime);
     runtime.rpc.on("notification", (message: RpcMessage) => {
-      if (!runtime.uncertain && this.live.get(record.sessionId) === runtime && !this.closed) this.notification(record, message);
+      if (!runtime.uncertain && this.live.get(record.sessionId) === runtime && !this.closed) this.notification(record, message, runtime);
     });
     runtime.rpc.on("request", (message: RpcMessage) => {
       if (runtime.uncertain || this.live.get(record.sessionId) !== runtime || this.closed) {
@@ -989,7 +991,7 @@ export class CodexSessionBackend implements CodexBackend {
     return runtime;
   }
 
-  private notification(record: StoredSession, message: RpcMessage): void {
+  private notification(record: StoredSession, message: RpcMessage, runtime: Runtime): void {
     const params = objectValue(message.params);
     if (params.threadId !== record.threadId) return;
     if (message.method === "turn/completed") {
@@ -1004,6 +1006,7 @@ export class CodexSessionBackend implements CodexBackend {
       if (typeof turnId !== "string" || this.finished(record, turnId) || record.turnId !== undefined && record.turnId !== turnId) return;
     }
     if (message.method !== undefined && (message.method.startsWith("item/") || message.method.startsWith("turn/"))) {
+      trackCommand(runtime, message.method, params);
       this.publish(record, { type: "thread.notification", method: message.method, params });
     }
     if (message.method === "turn/started") {
@@ -1089,10 +1092,7 @@ export class CodexSessionBackend implements CodexBackend {
   }
 
   private finished(record: StoredSession, turnId: string): boolean {
-    // ponytail: linear durable-event lookup; add a persisted terminal-turn index only if long-session profiles require it.
-    return record.events.some(({ event }) => event.type === "turn.state"
-      && event.turn.turnId === turnId
-      && terminalState(event.turn.state) !== undefined);
+    return record.turnId === turnId && terminalState(record.lastTurnState) !== undefined;
   }
 
   private serverRequest(record: StoredSession, runtime: Runtime, message: RpcMessage): void {
@@ -1555,13 +1555,32 @@ function workerProjection(record: StoredSession): WorkerProjection {
   });
 }
 
-function hasActiveCommand(record: StoredSession): boolean {
-  const statuses = new Map<string, string>();
-  for (const { event } of record.events) {
-    if (event.type !== "thread.notification" || !["item/started", "item/completed"].includes(event.method)) continue;
-    const item = objectValue(objectValue(event.params).item);
-    if (item.type !== "commandExecution" || typeof item.id !== "string") continue;
-    statuses.set(item.id, typeof item.status === "string" ? item.status : event.method === "item/started" ? "inProgress" : "completed");
-  }
-  return [...statuses.values()].some(status => status === "inProgress");
+/**
+ * Record one command item's live status.
+ *
+ * Only `commandExecution` items are tracked: they are the ones that can outlive
+ * the turn that asked for them, and a closed Session must not abandon one.
+ * @param runtime - the runtime that owns the thread the notification arrived on.
+ * @param method - the native notification method.
+ * @param params - the notification parameters.
+ */
+function trackCommand(runtime: Runtime, method: string, params: Record<string, unknown>): void {
+  if (method !== "item/started" && method !== "item/completed") return;
+  const item = objectValue(params.item);
+  if (item.type !== "commandExecution" || typeof item.id !== "string") return;
+  runtime.commands.set(item.id, typeof item.status === "string" ? item.status : method === "item/started" ? "inProgress" : "completed");
+}
+
+/**
+ * Whether the runtime still has a command item open.
+ *
+ * A runtime that is gone cannot be asked. Its record's own state already decides:
+ * only an idle or confirmed-stopped Session is closable, and a resume is refused
+ * while the thread reports a turn in progress, so an accepted runtime has no open
+ * command to lose.
+ * @param runtime - the runtime holding the Session, when this process holds one.
+ * @returns whether any tracked command item is still running.
+ */
+function hasActiveCommand(runtime: Runtime | undefined): boolean {
+  return [...(runtime?.commands.values() ?? [])].some(status => status === "inProgress");
 }
