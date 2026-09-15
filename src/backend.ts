@@ -1434,10 +1434,10 @@ function normalizedBoundary(boundary: CreateSessionOptions["boundary"]) {
  *
  * Only what the record actually declares is sent. `approvalPolicy`,
  * `approvalsReviewer` and `sandbox` travel when the caller declared them, and
- * Codex resolves the rest from its own configuration layers and cwd. A declared
- * task boundary adds the `dsh-task` permissions profile that expresses it; no
- * other feature flag is coupled to it, so Codex keeps its own native tools,
- * Apps, plugins and children.
+ * Codex resolves everything else from its own configuration layers and cwd:
+ * permissions are Codex's own subject, so the plugin injects no permission
+ * profile and couples no feature flag to a task boundary. A declared boundary
+ * contributes only the directory the task runs in.
  * @param record - the record whose thread is being started or resumed.
  * @returns the `thread/start` / `thread/resume` parameters.
  */
@@ -1455,37 +1455,18 @@ function threadParams(record: StoredSession): Record<string, unknown> {
     ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     config: {
       ...(record.reasoningEffort === undefined ? {} : { model_reasoning_effort: record.reasoningEffort }),
-      ...(boundary === undefined ? {} : {
-        default_permissions: "dsh-task",
-        permissions: {
-          "dsh-task": {
-            filesystem: {
-              ":root": "read",
-              ...Object.fromEntries(boundary.writableRoots.map(path => [path, "write"])),
-            },
-            network: {
-              enabled: boundary.network === "loopback",
-              ...(boundary.network === "loopback"
-                ? { allow_local_binding: true, domains: { "127.0.0.1": "allow", localhost: "allow" } }
-                : {}),
-            },
-          },
-        },
-        ...(boundary.network === "loopback" ? { "features.network_proxy": true } : {}),
-      }),
     },
     ephemeral: false,
   };
 }
 
 /**
- * Record the native configuration a thread request actually applied, and verify
- * any explicitly declared task boundary against it.
+ * Record the native configuration a thread request actually applied, and hold a
+ * declared task boundary to the directory it named.
  *
  * Recording happens for every request, so `applied` is native fact rather than
- * an echo of the request. Verification only covers a declared boundary: an
- * unscoped Session leaves Codex's own configuration alone and has nothing to
- * verify. Approval policy is never compared — Codex owns that decision.
+ * an echo of the request — including the sandbox Codex chose, which the plugin
+ * reports but never dictates. An unscoped Session has nothing to hold to.
  * @param record - the record being reconciled.
  * @param result - the App Server's thread result.
  * @throws when a declared boundary was not applied as declared.
@@ -1511,23 +1492,14 @@ function reconcileBoundary(record: StoredSession, result: ThreadResult): void {
   record.executionCwd = result.cwd ?? record.executionCwd ?? record.cwd;
   const boundary = record.options?.boundary;
   if (boundary === undefined) return;
-  const declared = [...new Set(boundary.writableRoots)].sort();
-  // Codex may omit an explicitly writable cwd from its report, so the declared
-  // execution cwd counts as writable when the declaration includes it. Nothing
-  // else is excused: a reported root the task did not declare is a widening and
-  // is refused, which is what makes a read-only contract verifiable.
-  const reported = [...new Set([
-    ...(result.sandbox?.writableRoots ?? []),
-    ...(result.cwd === boundary.cwd && declared.includes(result.cwd) ? [result.cwd] : []),
-  ])].sort();
-  if (
-    result.cwd !== undefined && result.cwd !== boundary.cwd
-    || result.sandbox?.type !== "workspaceWrite"
-    || JSON.stringify(reported) !== JSON.stringify(declared)
-    || result.sandbox.excludeSlashTmp !== true
-    || result.sandbox.excludeTmpdirEnvVar !== true
-    || result.sandbox.networkAccess !== (boundary.network === "loopback")
-  ) throw new Error(`App Server did not apply the declared task boundary: ${JSON.stringify({ declared: boundary, sandbox: result.sandbox, cwd: result.cwd })}`);
+  // Sandbox and approvals are Codex's own decision, so the native sandbox is
+  // recorded above as a fact and never compared against the declaration. What
+  // the plugin does hold is where the task runs: a declared boundary names a
+  // location — a lane worktree, for instance — and a thread that reports a
+  // different directory is refused rather than quietly redirected.
+  if (result.cwd !== undefined && result.cwd !== boundary.cwd) {
+    throw new Error(`App Server ran the declared task in another directory: ${JSON.stringify({ declared: boundary.cwd, cwd: result.cwd })}`);
+  }
 }
 
 function checkExecutionModel(record: StoredSession, result: ThreadResult): void {

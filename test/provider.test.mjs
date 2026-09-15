@@ -958,11 +958,12 @@ test("consumes explicit native execution inputs and rejects changed identity/con
   const start = server.calls.find(call => call.method === "thread/start").params;
   assert.equal(start.developerInstructions, execution.developerInstructions);
   assert.equal(start.cwd, fixture.cwd);
-  // The declared boundary adds the `dsh-task` permissions profile; approval
-  // policy and sandbox mode stay Codex's own decision and are never invented by
-  // the plugin.
+  // Permissions are Codex's own subject: approval policy, sandbox and the
+  // permission profile are never authored by the plugin, and a declared
+  // boundary reaches the thread only as the directory the task runs in.
   assert.equal("approvalPolicy" in start, false, "the plugin never forces an approval policy");
-  assert.equal(start.config.permissions["dsh-task"].filesystem[fixture.cwd], "write");
+  assert.equal("permissions" in start.config, false, "the plugin never injects a permission profile");
+  assert.equal("default_permissions" in start.config, false);
   const stored = await fixture.backend.readSession(OWNER, "codex:child");
   assert.deepEqual(stored.options.boundary, execution.boundary);
   assert.deepEqual(stored.applied, {
@@ -1084,7 +1085,7 @@ test("a declared boundary is snapshotted, so a caller mutating it cannot rewrite
   assert.deepEqual(recorded.options.boundary.writableRoots, [fixture.cwd]);
   assert.deepEqual((await fixture.backend.readSession(OWNER, "codex:child")).options.boundary.writableRoots, [fixture.cwd]);
   const start = sessionServer(fixture.hub).calls.find(call => call.method === "thread/start").params;
-  assert.deepEqual(Object.keys(start.config.permissions["dsh-task"].filesystem).filter(path => path !== ":root"), [fixture.cwd]);
+  assert.equal("permissions" in start.config, false, "a rewritten declaration cannot widen a permission profile the plugin no longer sends");
 });
 
 test("a cold recovery imports the facts a previous process recorded but never appended", async t => {
@@ -1127,7 +1128,7 @@ test("a managed child's first creation reads the live Agent execution when the s
   });
   const start = sessionServer(fixture.hub).calls.find(call => call.method === "thread/start").params;
   assert.equal(start.developerInstructions, execution.developerInstructions, "role instructions reach the native thread");
-  assert.equal(start.config.permissions["dsh-task"].filesystem[fixture.cwd], "write");
+  assert.equal("permissions" in start.config, false, "role instructions and the lane cwd travel without a plugin permission profile");
   assert.deepEqual((await fixture.backend.readSession(OWNER, "codex:child")).options.boundary, execution.boundary);
 });
 
@@ -1162,13 +1163,11 @@ test("a lane-scoped workflow boundary runs the thread in the lane and is never w
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
   const start = sessionServer(fixture.hub).calls.find(call => call.method === "thread/start").params;
-  const filesystem = start.config.permissions["dsh-task"].filesystem;
   // The lane is the task's real working location, so the native thread runs
-  // there and the Session workspace never enters the sandbox scope.
+  // there. What the task may write is Codex's own decision, so the declaration
+  // is recorded rather than translated into a sandbox the plugin authors.
   assert.equal(start.cwd, lane, "the native thread runs in the lane the task declared");
-  assert.equal(filesystem[lane], "write", "the lane is the declared writable root");
-  assert.equal(filesystem[fixture.cwd], undefined, "the host workspace is not silently made writable");
-  assert.equal(start.config.permissions["dsh-task"].network.enabled, true, "the requested network policy is preserved");
+  assert.equal("permissions" in start.config, false, "the declared write scope is Codex's subject, not a plugin parameter");
   assert.equal("approvalPolicy" in start, false, "a declared boundary does not force an approval policy");
   const record = await fixture.backend.readSession(OWNER, "codex:child");
   assert.deepEqual(record.options.boundary, execution.boundary, "the declared boundary travels verbatim");
@@ -1207,7 +1206,8 @@ test("a cold recovery without the live Agent continues from the recorded executi
   assert.equal(resumed.length, 1, "recovery resumes the recorded thread");
   assert.equal(resumed[0].params.threadId, threadId, "the thread identity is unchanged");
   assert.equal(resumed[0].params.developerInstructions, "Role A", "the recorded instructions are restored");
-  assert.equal(resumed[0].params.config.permissions["dsh-task"].filesystem[fixture.cwd], "write");
+  assert.equal(resumed[0].params.cwd, fixture.cwd, "the recovered thread keeps its recorded working directory");
+  assert.equal("permissions" in resumed[0].params.config, false);
 });
 
 test("projects recorded native items from the provider store and appends them as DSH facts", async t => {
@@ -1278,21 +1278,44 @@ test("readExecution reports the execution cwd, not the host workspace", async t 
     "a consumer reconciles the assignment against the directory the thread runs in");
 });
 
-test("a declaring execution is verified against native facts while approval policy stays Codex's", async t => {
-  for (const mismatch of ["roots", "cwd", "network", "tmp"]) {
-    const fixture = setup(`dsh-provider-boundary-${mismatch}-`);
+test("a declaring execution holds the task to its directory while Codex owns permissions", async t => {
+  // A declared boundary names a location. A thread that reports another
+  // directory did not run the declared task, so it is refused before any text
+  // is sent.
+  {
+    const fixture = setup("dsh-provider-boundary-cwd-");
     t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
     const execution = { boundary: { cwd: fixture.cwd, writableRoots: [fixture.cwd], network: "disabled" } };
-    fixture.hub.threadResult = { cwd: mismatch === "cwd" ? "/unexpected" : fixture.cwd, sandbox: {
-        type: "workspaceWrite", writableRoots: mismatch === "roots" ? ["/unexpected"] : [],
-        networkAccess: mismatch === "network", excludeSlashTmp: mismatch !== "tmp", excludeTmpdirEnvVar: true,
-      } };
+    fixture.hub.threadResult = { cwd: "/unexpected", sandbox: {
+      type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
     const session = { id: "child", header: { cwd: fixture.cwd } };
     const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
     const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
-    await assert.rejects(collect(adapter.stream(options("child", [user("u1", "must not send")], { execution }))), /declared task boundary/);
+    await assert.rejects(collect(adapter.stream(options("child", [user("u1", "must not send")], { execution }))), /another directory/);
     assert.equal(fixture.hub.servers.flatMap(server => server.calls).filter(call => call.method === "turn/start").length, 0);
     assert.equal((await fixture.backend.readSession(OWNER, "codex:child")).state, "unknown");
+  }
+  // The sandbox, its writable roots, the network policy and tmp handling are
+  // Codex's own configuration: a difference from the declaration is recorded as
+  // native fact rather than refused.
+  for (const mismatch of ["roots", "network", "tmp"]) {
+    const fixture = setup(`dsh-provider-boundary-${mismatch}-`);
+    t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+    const execution = { boundary: { cwd: fixture.cwd, writableRoots: [fixture.cwd], network: "disabled" } };
+    fixture.hub.threadResult = { cwd: fixture.cwd, sandbox: {
+      type: "workspaceWrite", writableRoots: mismatch === "roots" ? ["/unexpected"] : [],
+      networkAccess: mismatch === "network", excludeSlashTmp: mismatch !== "tmp", excludeTmpdirEnvVar: true } };
+    const session = { id: "child", header: { cwd: fixture.cwd } };
+    const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+    const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+    await liveTurn(adapter, fixture, "child", options("child", [user("u1", "task")], { execution }), async server => {
+      server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+      server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+    });
+    const record = await fixture.backend.readSession(OWNER, "codex:child");
+    assert.equal(record.applied.sandbox.networkAccess, mismatch === "network", "the native sandbox is recorded as reported");
+    assert.equal(record.applied.sandbox.writableRoots.length, mismatch === "roots" ? 1 : 0);
+    assert.notEqual(record.state, "unknown", `a native ${mismatch} difference never blocks the task`);
   }
 });
 

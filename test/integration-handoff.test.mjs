@@ -96,9 +96,11 @@ test("the handoff entry forwards the declared lane boundary and the successor re
   assert.equal(resume.params.developerInstructions, "successor role", "the target instructions reach the native thread");
   assert.equal("approvalPolicy" in resume.params, false, "Codex owns its approval policy, not the plugin");
   assert.equal(resume.params.cwd, fixture.lane, "the resumed thread stays in the task's declared lane");
-  const filesystem = resume.params.config.permissions["dsh-task"].filesystem;
-  assert.equal(filesystem[fixture.lane], "write", "the lane is the declared writable root");
-  assert.equal(filesystem[fixture.cwd], undefined, "the host workspace never becomes a sandbox root");
+  // Permissions stay Codex's own subject: the plugin authors no permission
+  // profile, so a declared task boundary reaches the thread only as the
+  // directory it runs in.
+  assert.equal("permissions" in resume.params.config, false, "no plugin-authored permission profile is sent");
+  assert.equal("default_permissions" in resume.params.config, false);
 
   // Execution facts live in the provider store, not the DSH session log.
   const facts = (await ctx.codexExecution.facts(opening.id)).join("\n");
