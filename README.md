@@ -300,3 +300,54 @@ P2 优先复用已有接口，不在确认 spawn 无法满足之前另建专用 
 - 原生外部执行事件是展示/事实输入，不是要求 DSH 再执行一次工具的命令；同一 thread/turn/item 的流式增量与最终项合并为一项，恢复读取不得重复执行。
 - child 打开接缝必须让显式 main 绕过默认路由，无处理者时只执行一次原生主区导航；侧栏的 Session 绑定必须可释放而不关闭实际 child。
 - 完整交付包含新插件、本次必需的 DSH 接缝和 workflow 原生 child 消费适配。P1 可独立交付基础 provider，但不能将其称为完整目标完成；旧 kit 删除是满足迁移条件后的单独收尾，不作为提前删数据的理由。
+
+## 11. workflow session gate：Codex → DSH 同步前置校验
+
+workflow Host 通过 `ctx.codexToolGate` 注册一个具名 handler（`workflow.preToolUse`），并把每个子 Session 绑定为 `{ role, hook, args }`。`role` 只是 Host 的业务标签，本包不枚举、不解释它。绑定在子 Session 首次启动前登记，随 `StoredSession.options.gate` 持久化；同一 Session 只能重述相同绑定，不同绑定必须新建 Session。
+
+执行路径：
+
+- provider 为该 App Server runtime 生成一次性随机 runtime key，并只在**带 gate 的 runtime** 的 spawn 环境注入 `DSH_PRETOOL_ENABLED=1`、`DSH_PRETOOL_SOCKET=<socket>`、`DSH_PRETOOL_RUNTIME=<key>`；不修改 `process.env`，普通 Session 行为不变。
+- socket 位于 `mkdtemp` 生成的 0700 目录，socket 本身 0600，插件 dispose 时删除。IPC 为「一连接一请求/响应」的单行 JSON：`{ runtime, event }` → `GateDecision`。
+- `lib/pretool-client.js` 是 hook command：未带 ENABLED 标记时 **退出 0 且无输出**；已启用但地址/key 缺失、stdin 非法、连接失败、3 秒超时或返回非法时，一律输出有效 deny。stdout 只输出协议，不打印 runtime key。
+- receiver 只用 runtime key 解析 Session：hook payload 里的 `session_id`、`role`、参数都不能替换 Host 绑定。过期/未知 key、已释放或已交接的 record、与 record 不符的 cwd、与当前 turn 不符的 `turn_id` 一律拒绝。
+- 每次 runtime 替换或释放都会作废旧 key，因此重启、交接后旧 key 失效。
+- provider 记录 `hook/started`/`hook/completed`，使「hook 已调用且 DSH 拒绝」与「Codex 根本没尝试该工具」可区分。
+
+### 11.1 部署前置：安装受管 hook 并确保其可信
+
+**未受管 hook 即使 `enabled: true` 也会被静默跳过**（`trustStatus: "untrusted"`，不报错）。因此 provider 在启用 gated Session 前对该 runtime 的 cwd 调用 `hooks/list`，要求存在一条 `command` 指向本包 `lib/pretool-client.js` 的 PreToolUse 条目、`enabled` 为真、无 `errors`，且 `trustStatus` 为 `managed` 或 `trusted`；任一不满足即拒绝启动并报告具体原因。
+
+受管部署（首选，Linux 为 `/etc/codex/requirements.toml`，需 root）。若目标配置已存在 `[features]`，把 `hooks = true` 合并进该表，**不要追加第二个 `[features]` 表**：
+
+```toml
+[features]
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "<absolute-node> <absolute-provider>/lib/pretool-client.js"
+timeout = 10
+```
+
+`matcher` 用 `"*"`：这是本机已受信插件 hook 的既有写法，且实测命中。
+
+用户配置 + 信任记录（无 root 时）：追加上述 `[[hooks.PreToolUse]]` 条目后，读取 `hooks/list` 返回条目的 `currentHash`，写入
+
+```toml
+[hooks.state."<sourcePath>:pre_tool_use:<matcherIndex>:<hookIndex>"]
+trusted_hash = "<currentHash>"
+```
+
+`sourcePath` 为该配置文件绝对路径；key 与 `currentHash` 相等后 `trustStatus` 变为 `trusted`。代用户写信任记录等于绕过信任提示，只在明确授权的部署步骤中执行。
+
+未修改部署配置时，请报告该部署前置未完成：DSH 原生 guard 不依赖本桥，可以单独完成与验收；但不得把 mock 测试记为 Codex 侧真实接入成功。
+
+### 11.2 覆盖范围
+
+覆盖：Codex `Bash` 等已知 shell 名与 `apply_patch`（整份 patch 的每个路径）、以及 Host 已注册的所有工具调用在 PreToolUse 阶段被拒。
+
+不覆盖：shell 程序内部的 `open/write/rename`、解释器、后台进程、任意 MCP 副作用；工具名清单追不上的 `mcp__<server>__<name>` 与可在运行时注册并执行代码的 `cordis_define`/`cordis_run`。本包不解析 shell AST，也不把命令字符串做成黑名单。首版不实现 Windows hook IPC。
