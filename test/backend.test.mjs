@@ -415,3 +415,68 @@ test("a disposed DSH Session releases the record that backed it", async t => {
   backend.releaseDisposed("codex:conversation");
   backend.releaseDisposed("codex:never-existed");
 });
+
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test("a record a dead process left mid-turn resumes without confirmation and is not redispatched", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-resume-dead-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const first = new CodexSessionBackend(stateDir, () => new FakeServer());
+  await first.createSession("owner", "codex:child", "/work");
+  await first.startTurn("owner", "codex:child", "in flight");
+  // The process ends with a turn in flight, so its record cannot say what ran.
+  await first.close();
+
+  const servers = [];
+  const second = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
+  t.after(() => second.close());
+  const stale = await second.readSession("owner", "codex:child");
+  assert.equal(stale.state, "unknown", "the dead process's record is still uncertain");
+
+  const resumed = await second.resumeSession("owner", "codex:child");
+  assert.equal(resumed.threadId, stale.threadId, "the recorded thread is resumed, not replaced");
+  assert.deepEqual(servers.flatMap(server => server.calls).map(call => call.method), ["thread/resume"]);
+  assert.equal(servers.flatMap(server => server.calls).some(call => call.method === "turn/start"), false,
+    "resuming is not a redispatch of the task the previous process recorded");
+});
+
+test("an uncertain runtime in this process refuses to resume instead of being replaced", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-resume-uncertain-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const servers = [];
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
+  t.after(() => backend.close());
+  await backend.createSession("owner", "codex:child", "/work");
+  await backend.startTurn("owner", "codex:child", "running here");
+  // A loss while this process still holds the runtime is the one case that stays
+  // unresolved: only its own owner can say whether the execution continues.
+  servers[0].emit("uncertain", new Error("lost connection"));
+
+  await assert.rejects(backend.resumeSession("owner", "codex:child"), /resolve it before resuming/);
+  assert.equal(servers.length, 1, "the uncertain runtime was not replaced by a second one");
+});
+
+test("releasing a disposed Session is awaitable and teardown waits for that process", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-release-await-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let closed = 0;
+  class SlowCloseServer extends FakeServer {
+    async close() { closed++; await gate; }
+  }
+  const backend = new CodexSessionBackend(stateDir, () => new SlowCloseServer());
+  await backend.createSession("owner", "codex:child", "/work");
+
+  const released = backend.releaseDisposed("codex:child");
+  const teardown = backend.close();
+  let releasedSettled = false, teardownSettled = false;
+  void released.then(() => { releasedSettled = true; });
+  void teardown.then(() => { teardownSettled = true; });
+  await tick();
+  assert.equal(releasedSettled, false, "release reports the process as still exiting");
+  assert.equal(teardownSettled, false, "teardown waits for the released process instead of assuming it stopped");
+  release();
+  await Promise.all([released, teardown]);
+  assert.equal(closed, 1, "the process was closed exactly once");
+});

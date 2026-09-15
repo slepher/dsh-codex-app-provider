@@ -174,8 +174,8 @@ test("every thread path on the source is refused after the handover, including c
   const cold = new CodexSessionBackend(fixture.stateDir, () => { const server = new HandoffServer(restartedHub); restartedHub.servers.push(server); return server; });
   t.after(() => cold.close());
   await assert.rejects(cold.startTurn(OWNER, OPENING, "after restart"), /can no longer start a turn on its thread/);
-  await assert.rejects(cold.resumeSession(OWNER, OPENING, true), /can no longer resume its thread/);
-  const recovered = await cold.resumeSession(OWNER, SUCCESSOR, true);
+  await assert.rejects(cold.resumeSession(OWNER, OPENING), /can no longer resume its thread/);
+  const recovered = await cold.resumeSession(OWNER, SUCCESSOR);
   assert.equal(recovered.threadId, source.threadId, "the successor cold-recovers on the original thread");
   assert.deepEqual([recovered.model, recovered.reasoningEffort], ["def-model", "medium"]);
   assert.equal(restartedHub.servers.flatMap(server => server.calls.filter(call => call.method === "thread/start")).length, 0,
@@ -236,7 +236,7 @@ test("a failed or mismatched continuation binding errors instead of starting a t
   // which is the same native resume path.
   fixture.hub.rejectResume = false;
   fixture.hub.resumeThreadId = "thread-impostor";
-  await assert.rejects(fixture.backend.resumeSession(OWNER, SUCCESSOR, true), /Recovered thread identity mismatch/);
+  await assert.rejects(fixture.backend.resumeSession(OWNER, SUCCESSOR), /Recovered thread identity mismatch/);
   assert.equal(methods(fixture, "thread/start").length, starts, "a mismatched thread identity never starts a replacement");
 });
 

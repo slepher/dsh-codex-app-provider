@@ -192,7 +192,7 @@ test("a confirmed switch survives a cold resume and never reverts to the creatio
   runtime.resumeResult = { model: "sol", reasoningEffort: "medium" };
   const resumed = new CodexSessionBackend(fixture.stateDir, () => runtime);
   t.after(() => resumed.close());
-  const record = await resumed.resumeSession(OWNER, id, true);
+  const record = await resumed.resumeSession(OWNER, id);
   assert.deepEqual([record.model, record.reasoningEffort], ["sol", "medium"], "cold restore keeps the switched configuration");
   assert.equal(record.options.model, "luna", "the initial snapshot is not rewritten");
 });
@@ -214,7 +214,7 @@ test("a pending switch is reconciled from native facts on resume instead of reve
   runtime.resumeResult = { model: "sol", reasoningEffort: "medium" };
   const resumed = new CodexSessionBackend(fixture.stateDir, () => runtime);
   t.after(() => resumed.close());
-  const record = await resumed.resumeSession(OWNER, id, true);
+  const record = await resumed.resumeSession(OWNER, id);
   assert.deepEqual([record.model, record.reasoningEffort], ["sol", "medium"], "the resumed thread's configuration wins");
   assert.equal("pending" in record, false);
 });

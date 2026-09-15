@@ -49,7 +49,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Codex record that backed the Session is this plugin's to release, so the
     // two are joined here rather than by asking the core for a teardown
     // primitive it has no authority to execute.
-    const onDisposed = ctx.on("session/disposed", session => { backend.releaseDisposed(backendSessionId(String(session.id))); });
+    // Returning the close lets a host that awaits this seam wait for the process
+    // to exit; the backend also awaits it during teardown.
+    const onDisposed = ctx.on("session/disposed", session => backend.releaseDisposed(backendSessionId(String(session.id))));
     yield async () => {
       onDisposed();
       provider?.close();

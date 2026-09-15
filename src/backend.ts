@@ -78,6 +78,7 @@ interface TurnResult {
 export class CodexSessionBackend implements CodexBackend {
   private readonly store: SessionStore;
   private readonly live = new Map<string, Runtime>();
+  private readonly releasing = new Set<Promise<void>>();
   private readonly listeners = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly interactive = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly workerListeners = new Map<string, Set<(event: WorkerManagementEvent) => void>>();
@@ -257,18 +258,21 @@ export class CodexSessionBackend implements CodexBackend {
     return record === undefined ? undefined : snapshot(record);
   }
 
-  async resumeSession(owner: string | Caller, sessionId: string, confirmedStopped = false): Promise<SessionSnapshot> {
+  async resumeSession(owner: string | Caller, sessionId: string): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "resume its thread");
-    if (record.worker !== undefined && confirmedStopped && typeof owner !== "string" && owner.source !== "ui") {
-      throw new Error("Only UI callers can confirm a stopped worker");
-    }
     const ownerId = ownerIdentity(owner);
     const prior = this.live.get(sessionId);
-    if (prior !== undefined && !prior.uncertain && record.state !== "unknown") return snapshot(record);
-    if ((record.state === "unknown" || record.state === "saved" && record.worker?.savedState !== "idle") && !confirmedStopped) {
-      throw new Error("Unknown execution ownership; confirm the prior process stopped before resume");
+    if (prior !== undefined) {
+      // A runtime this process still holds is authoritative: an uncertain one has
+      // to be resolved rather than replaced, and a healthy one is already resumed.
+      if (prior.uncertain) throw new UncertainError("Execution state unknown; resolve it before resuming");
+      if (record.state !== "unknown") return snapshot(record);
     }
+    // A record left behind by a process that no longer owns the state directory is
+    // resumed directly. What a previous process wrote about its own execution is
+    // not evidence that it still runs; the resumed thread's reported status is,
+    // and the resume refuses a thread that is still active.
     if (record.threadId === undefined) throw new Error("No thread identity to resume");
     this.guard({ ownerId, sessionId, action: "resume", cwd: record.cwd });
     if (prior !== undefined) {
@@ -432,18 +436,31 @@ export class CodexSessionBackend implements CodexBackend {
    * so leaving an `unknown` record behind would only strand the thread.
    * @param backendId - provider-side Session identity.
    */
-  releaseDisposed(backendId: string): void {
+  releaseDisposed(backendId: string): Promise<void> {
     const record = this.store.lookup(backendId);
-    if (record === undefined || record.released) return;
+    if (record === undefined || record.released) return Promise.resolve();
     const runtime = this.live.get(backendId);
-    if (runtime !== undefined) {
-      void runtime.rpc.close().catch(() => {});
-      this.live.delete(backendId);
-    }
+    const closing = runtime === undefined ? undefined : this.trackClose(runtime.rpc.close());
+    if (runtime !== undefined) this.live.delete(backendId);
     this.dropSubscribers(backendId);
     if (record.worker !== undefined) record.worker.detached = true;
     record.released = true;
     this.store.put(record);
+    return closing ?? Promise.resolve();
+  }
+
+  /**
+   * Track a close the caller may not await.
+   *
+   * Releasing removes the runtime from the live map, so teardown would otherwise
+   * stop waiting for a process that is still shutting down.
+   * @param closing - the close to await.
+   * @returns the same close, once it settles.
+   */
+  private trackClose(closing: Promise<void>): Promise<void> {
+    const tracked = closing.catch(() => undefined).then(() => { this.releasing.delete(tracked); });
+    this.releasing.add(tracked);
+    return tracked;
   }
 
   async searchThreads(_ownerId: string, search?: string, cursor?: string): Promise<ThreadPage> {
@@ -892,6 +909,9 @@ export class CodexSessionBackend implements CodexBackend {
     this.closed = true;
     await Promise.allSettled([...this.live.values()].map(runtime => runtime.rpc.close()));
     this.live.clear();
+    // A released Session left the live map, but its process still has to exit
+    // before teardown reports the backend closed.
+    await Promise.allSettled([...this.releasing]);
     this.store.close();
   }
 

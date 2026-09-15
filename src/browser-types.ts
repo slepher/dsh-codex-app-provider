@@ -378,7 +378,7 @@ export interface CodexBackend {
   pendingReports(caller: Caller): Promise<readonly Report[]>;
   listSessions(ownerId: string): Promise<readonly SessionSnapshot[]>;
   readSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
-  resumeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<SessionSnapshot>;
+  resumeSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot>;
   restartSession(owner: string | Caller, sessionId: SessionId, options?: TurnOptions): Promise<SessionSnapshot>;
   configureSession(owner: string | Caller, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
   closeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;

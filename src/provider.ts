@@ -545,9 +545,11 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
       record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective });
-    } else if (record.state === "unknown") {
-      throw new LlmError("Codex execution ownership unknown; confirm the prior process stopped before resume", "EXECUTION_UNKNOWN");
-    } else if (record.state === "saved") {
+    } else if (record.state === "unknown" || record.state === "saved") {
+      // What a previous process recorded about its own execution is not evidence
+      // that it still runs. Resuming reports the thread's status and refuses one
+      // that is still active; an uncertain runtime in this process still fails
+      // closed through `resumeSession`.
       record = await backend.resumeSession(owner, backendId).catch(error => { throw providerError(error); });
     }
     // A workflow-managed child authorizes its target through the live Agent's
