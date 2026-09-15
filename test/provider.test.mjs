@@ -1295,6 +1295,25 @@ test("a declaring execution holds the task to its directory while Codex owns per
     assert.equal(fixture.hub.servers.flatMap(server => server.calls).filter(call => call.method === "turn/start").length, 0);
     assert.equal((await fixture.backend.readSession(OWNER, "codex:child")).state, "unknown");
   }
+  // A read-only deployment is the case that used to break: Codex reports
+  // `sandbox.type: "readOnly"` with no writable roots and no tmp flags, which is
+  // not an unapplied declaration but a native decision the plugin must record.
+  {
+    const fixture = setup("dsh-provider-boundary-readonly-");
+    t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+    const execution = { boundary: { cwd: fixture.cwd, writableRoots: [], network: "disabled" } };
+    fixture.hub.threadResult = { cwd: fixture.cwd, sandbox: { type: "readOnly", networkAccess: false } };
+    const session = { id: "child", header: { cwd: fixture.cwd } };
+    const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
+    const adapter = adapterFor(fixture, { sessions: new Map([["child", session]]), agents: new Map([["child", agent]]) });
+    await liveTurn(adapter, fixture, "child", options("child", [user("u1", "read only task")], { execution }), async server => {
+      server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+      server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+    });
+    const record = await fixture.backend.readSession(OWNER, "codex:child");
+    assert.equal(record.applied.sandbox.type, "readOnly", "the native read-only sandbox is recorded as reported");
+    assert.equal(record.state, "idle", "a read-only native sandbox never blocks a read-only delegation");
+  }
   // The sandbox, its writable roots, the network policy and tmp handling are
   // Codex's own configuration: a difference from the declaration is recorded as
   // native fact rather than refused.

@@ -91,7 +91,11 @@ function threadResult(threadId, state) {
  * string.
  */
 function finalTextFor(threadId) {
-  const marker = /DSH_ROLE_[A-Z0-9]+/.exec(recall(threadId)?.developerInstructions ?? "");
+  // A real model reads the assignment it is sent, so a role marker may arrive in
+  // the thread's developer instructions or in the prompt of the turn.
+  const state = recall(threadId);
+  const source = `${state?.developerInstructions ?? ""}\n${state?.lastInput ?? ""}`;
+  const marker = /DSH_ROLE_[A-Z0-9]+/.exec(source);
   return marker?.[0] ?? finalText;
 }
 
@@ -154,6 +158,7 @@ lines.on("line", line => {
     case "turn/start": {
       const threadId = String(params.threadId);
       const id = `turn-${++turnCounter}`;
+      remember(threadId, { ...recall(threadId), lastInput: (params.input ?? []).map(block => block.text ?? "").join("\n") });
       reply({ turn: { id, status: "inProgress" } });
       setImmediate(() => completeTurn(threadId, id));
       return;

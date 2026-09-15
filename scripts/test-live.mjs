@@ -10,8 +10,9 @@ const browser = process.argv.includes("--browser");
 const externalEvents = process.argv.includes("--external-events");
 const workflowContract = process.argv.includes("--workflow-contract");
 const workflowHandoff = process.argv.includes("--workflow-handoff");
-const workflowChild = workflowContract || workflowHandoff || process.argv.includes("--workflow-child");
-const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : workflowHandoff ? process.env.DSH_HANDOFF_CROSS === "1" ? "workflow-handoff-cross-live" : "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
+const delegate = process.argv.includes("--delegate");
+const workflowChild = delegate || workflowContract || workflowHandoff || process.argv.includes("--workflow-child");
+const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : delegate ? "delegate-live" : workflowHandoff ? process.env.DSH_HANDOFF_CROSS === "1" ? "workflow-handoff-cross-live" : "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
 const nativeChild = externalEvents || workflowChild || process.argv.includes("--native-child");
 const installedOnly = browser || process.argv.includes("--install-only");
 // `--fake` swaps the real Codex CLI for the scripted App Server, so a run needs
@@ -107,7 +108,7 @@ if (workflowHandoff) {
 // own configurations (`gpt-workflow`/`ds-workflow`) and bundles every role
 // prompt, so the deployment selects one by name instead of writing role files.
 if (nativeChild) {
-  await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, workflowHandoff ? "test/workflow-handoff-driver.mjs" : workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
+  await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, delegate ? "test/delegate-driver.mjs" : workflowHandoff ? "test/workflow-handoff-driver.mjs" : workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch + `- insert:\n    - id: native-child-test\n      name: ${JSON.stringify(join(profile, "native-child-driver.mjs"))}\n`);
 }
@@ -131,6 +132,10 @@ try {
     if (!output.trim()) throw new Error("Live main output missing");
     const records = await Promise.all((await readdir(join(dir, "state", "sessions"))).filter(name => name.endsWith(".json")).map(async name => JSON.parse(await readFile(join(dir, "state", "sessions", name), "utf8"))));
     const nativeResult = nativeChild ? JSON.parse(await readFile(env.DSH_NATIVE_CHILD_RESULT, "utf8")) : undefined;
+    // Report what the driver actually observed before looking for the parent's
+    // execution record: a driver that failed cannot have produced one, and its
+    // own error is the useful diagnosis.
+    if (nativeResult !== undefined && nativeResult.status === "FAIL") throw new Error(`Native child driver failed: ${nativeResult.error ?? "no error reported"}`);
     const main = records.find(record => record.sessionId.startsWith("codex:")
       && (nativeResult === undefined || record.sessionId === `codex:${nativeResult.parentSessionId}`)
       && record.reports.some(item => item.status === "completed" && item.result === output.trim()));
@@ -143,10 +148,13 @@ try {
     report.terminal = main.reports.at(-1).status;
     report.status = "PASS_BASIC_MAIN_SESSION";
     if (nativeChild) {
-      if (nativeResult.status !== (workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_PROFILES_COLD_AGENT_RESUME" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_SPAWN_COLD_AGENT_RESUME")) throw new Error("Native child assertions failed");
+      if (nativeResult.status !== (delegate ? "PASS_DELEGATE_ROLE_TASK" : workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_PROFILES_COLD_AGENT_RESUME" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_SPAWN_COLD_AGENT_RESUME")) throw new Error("Native child assertions failed");
       report.nativeChild = nativeResult;
-      report.status = workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_NATIVE_CHILD_PROFILES" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_CHILD_PARAMETER_CHAIN";
-      report.childBackendRecords = records.filter(record => ((workflowContract || workflowHandoff) ? nativeResult.executions.map(value => value.nativeSessionId) : report.nativeChild.children.map(child => child.id)).some(id => record.sessionId === `codex:${id}`)).map(record => ({ sessionId: record.sessionId, threadId: record.threadId, turnId: record.turnId, model: record.model, reasoningEffort: record.reasoningEffort, options: record.options, reports: record.reports }));
+      report.status = delegate ? "PASS_DELEGATE_ROLE_TASK" : workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_NATIVE_CHILD_PROFILES" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_CHILD_PARAMETER_CHAIN";
+      const childIds = (workflowContract || workflowHandoff) ? nativeResult.executions.map(value => value.nativeSessionId)
+        : delegate ? [nativeResult.child.id]
+        : report.nativeChild.children.map(child => child.id);
+      report.childBackendRecords = records.filter(record => childIds.some(id => record.sessionId === `codex:${id}`)).map(record => ({ sessionId: record.sessionId, threadId: record.threadId, turnId: record.turnId, model: record.model, reasoningEffort: record.reasoningEffort, options: record.options, reports: record.reports }));
     }
   }
 } catch (error) {
