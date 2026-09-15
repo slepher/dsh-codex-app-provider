@@ -68,9 +68,12 @@ test("the provider registers codex_workers and its prompt section", async t => {
   assert.equal(tool.parameters.properties.action.enum.includes("roles"), false);
   assert.deepEqual(tool.parameters.properties.action.enum,
     ["create", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"]);
+  assert.match(tool.description, /no role concept/, "the ordinary surface states that roles live elsewhere");
+  assert.match(tool.description, /workflow tool/, "and names the owner of the role catalogue");
   assert.equal(tool.presentCall({ action: "list" }).kind, "read", "a query is presented as a read");
   assert.equal(tool.presentCall({ action: "append" }).kind, "execute");
   assert.equal(sections.filter(section => section.name === "tool:codex-workers").length, 1, "the prompt section is contributed once");
+  assert.match(sections.find(section => section.name === "tool:codex-workers").text, /Role names are not this tool's vocabulary/);
 
   // Create through the registered definition, so argument validation runs too.
   const created = JSON.parse(await tool.execute({ action: "create", name: "ordinary worker", cwd: fixture.cwd }, exec(parent)));

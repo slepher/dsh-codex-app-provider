@@ -115,7 +115,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const callerIdentity = (agent: Agent | undefined) => captureAgentIdentity(ctx, agent);
       untool = tools.tools.register(defineTool({
         name: "codex_workers",
-        description: "Create, query, and control persistent Codex workers owned by this parent Session. Reports are durable; acknowledgement and acceptance are separate.",
+        description: "Create, query, and control persistent Codex workers owned by this parent Session. Give a worker its instructions as the prompt. This tool has no role concept: a role-bound child (a reviewer, an evidence runner, a tester) is dispatched by the workflow tool, which owns the role catalogue. Reports are durable; acknowledgement and acceptance are separate.",
         parameters: {
           action: { type: "string", required: true, enum: [...WORKER_ACTIONS] },
           workerId: { type: "string" },
@@ -144,7 +144,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       tools.systemPrompt.section({
         name: "tool:codex-workers",
         order: tools.systemPrompt.getSectionOrder("TOOL_JOBS"),
-        text: "codex_workers manages persistent Codex workers. Process reports independently; acknowledge or accept after handling. Do not poll, repeat unknown work, or treat interrupt acceptance as completion.",
+        text: "codex_workers manages persistent Codex workers and starts them as plain workers: state the job in the prompt you send. Role names are not this tool's vocabulary; the workflow tool owns them. Process reports independently; acknowledge or accept after handling. Do not poll, repeat unknown work, or treat interrupt acceptance as completion.",
       });
     });
   }, "dsh-codex-app-provider: execution lifecycle");
