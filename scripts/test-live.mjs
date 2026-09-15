@@ -11,9 +11,10 @@ const externalEvents = process.argv.includes("--external-events");
 const workflowContract = process.argv.includes("--workflow-contract");
 const workflowHandoff = process.argv.includes("--workflow-handoff");
 const delegate = process.argv.includes("--delegate");
+const compact = process.argv.includes("--compact");
 const workflowChild = delegate || workflowContract || workflowHandoff || process.argv.includes("--workflow-child");
-const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : delegate ? "delegate-live" : workflowHandoff ? process.env.DSH_HANDOFF_CROSS === "1" ? "workflow-handoff-cross-live" : "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
-const nativeChild = externalEvents || workflowChild || process.argv.includes("--native-child");
+const prefix = process.env.DSH_LIVE_EVIDENCE_PREFIX ?? (browser ? workflowChild ? "browser-workflow-live" : "browser-live" : compact ? "compact-live" : delegate ? "delegate-live" : workflowHandoff ? process.env.DSH_HANDOFF_CROSS === "1" ? "workflow-handoff-cross-live" : "workflow-handoff-live" : workflowContract ? "workflow-contract-live" : workflowChild ? "workflow-live" : externalEvents ? "external-live" : "live");
+const nativeChild = externalEvents || workflowChild || compact || process.argv.includes("--native-child");
 const installedOnly = browser || process.argv.includes("--install-only");
 // `--fake` swaps the real Codex CLI for the scripted App Server, so a run needs
 // no network, no model and no approval. It replaces the native transport only;
@@ -108,7 +109,7 @@ if (workflowHandoff) {
 // own configurations (`gpt-workflow`/`ds-workflow`) and bundles every role
 // prompt, so the deployment selects one by name instead of writing role files.
 if (nativeChild) {
-  await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, delegate ? "test/delegate-driver.mjs" : workflowHandoff ? "test/workflow-handoff-driver.mjs" : workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
+  await writeFile(join(profile, "native-child-driver.mjs"), await readFile(join(root, compact ? "test/compact-driver.mjs" : delegate ? "test/delegate-driver.mjs" : workflowHandoff ? "test/workflow-handoff-driver.mjs" : workflowContract ? "test/workflow-contract-driver.mjs" : workflowChild ? "test/workflow-child-driver.mjs" : "test/native-child-driver.mjs")));
   const patch = await readFile(join(profile, "cordis.patch.yml"), "utf8");
   await writeFile(join(profile, "cordis.patch.yml"), patch + `- insert:\n    - id: native-child-test\n      name: ${JSON.stringify(join(profile, "native-child-driver.mjs"))}\n`);
 }
@@ -136,9 +137,13 @@ try {
     // execution record: a driver that failed cannot have produced one, and its
     // own error is the useful diagnosis.
     if (nativeResult !== undefined && nativeResult.status === "FAIL") throw new Error(`Native child driver failed: ${nativeResult.error ?? "no error reported"}`);
-    const main = records.find(record => record.sessionId.startsWith("codex:")
-      && (nativeResult === undefined || record.sessionId === `codex:${nativeResult.parentSessionId}`)
-      && record.reports.some(item => item.status === "completed" && item.result === output.trim()));
+    const main = compact
+      // The compaction driver owns its own Agent and Session, so the record to
+      // report is that Session rather than the one the launcher prompt ran in.
+      ? records.find(record => record.sessionId === `codex:${nativeResult.parentSessionId}`)
+      : records.find(record => record.sessionId.startsWith("codex:")
+        && (nativeResult === undefined || record.sessionId === `codex:${nativeResult.parentSessionId}`)
+        && record.reports.some(item => item.status === "completed" && item.result === output.trim()));
     if (!main) throw new Error("Completed native Session execution record missing");
     report.nativeSessionId = main.sessionId.slice("codex:".length);
     report.threadId = main.threadId;
@@ -147,7 +152,12 @@ try {
     report.actualReasoningEffort = main.reasoningEffort;
     report.terminal = main.reports.at(-1).status;
     report.status = "PASS_BASIC_MAIN_SESSION";
-    if (nativeChild) {
+    if (compact) {
+      if (nativeResult.status !== "PASS_NATIVE_COMPACTION") throw new Error("Native compaction assertions failed");
+      report.nativeChild = nativeResult;
+      report.compaction = nativeResult.compaction;
+      report.status = "PASS_NATIVE_COMPACTION";
+    } else if (nativeChild) {
       if (nativeResult.status !== (delegate ? "PASS_DELEGATE_ROLE_TASK" : workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_PROFILES_COLD_AGENT_RESUME" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_SPAWN_COLD_AGENT_RESUME")) throw new Error("Native child assertions failed");
       report.nativeChild = nativeResult;
       report.status = delegate ? "PASS_DELEGATE_ROLE_TASK" : workflowHandoff ? "PASS_WORKFLOW_SUCCESSOR_HANDOFF" : workflowContract ? "PASS_WORKFLOW_CONTRACT_DELIVERY" : workflowChild ? "PASS_WORKFLOW_NATIVE_CHILD_PROFILES" : externalEvents ? "PASS_EXTERNAL_EXECUTION_EVENTS" : "PASS_NATIVE_CHILD_PARAMETER_CHAIN";

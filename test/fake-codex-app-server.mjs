@@ -164,7 +164,19 @@ lines.on("line", line => {
       return;
     }
     case "turn/interrupt": return reply({});
-    case "thread/compact/start": return reply({});
+    case "thread/compact/start": {
+      const threadId = String(params.threadId);
+      const id = `compact-${++turnCounter}`;
+      remember(threadId, { ...recall(threadId), lastCompaction: id });
+      reply({});
+      // A real App Server reports the compaction as a turn of its own, and the
+      // provider waits for that terminal state before continuing the thread.
+      setImmediate(() => {
+        notify("turn/started", { threadId, turn: { id, status: "inProgress" } });
+        notify("turn/completed", { threadId, turn: { id, status: "completed" } });
+      });
+      return;
+    }
     default: return reply({});
   }
 });
