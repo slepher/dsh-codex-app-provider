@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -151,4 +152,22 @@ test("rejects partial or owner-mismatched worker blocks", () => {
     assert.throws(() => new SessionStore(stateDir), /Invalid Session worker/);
     rmSync(stateDir, { recursive: true });
   }
+});
+
+test("a lock left by a process that died is reclaimed, a live owner's is not", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-lock-stale-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  // A process that has already exited cannot own the directory any more.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  mkdirSync(join(stateDir, "owner.lock"), { recursive: true });
+  writeFileSync(join(stateDir, "owner.lock", "pid"), String(dead));
+  const reclaimed = new SessionStore(stateDir);
+  reclaimed.close();
+  assert.equal(existsSync(join(stateDir, "owner.lock")), false, "the reclaimed lock is released on close");
+
+  // A running owner is authoritative: two backends must never share a store.
+  mkdirSync(join(stateDir, "owner.lock"), { recursive: true });
+  writeFileSync(join(stateDir, "owner.lock", "pid"), String(process.pid));
+  assert.throws(() => new SessionStore(stateDir), /already owned by pid/);
+  rmSync(join(stateDir, "owner.lock"), { recursive: true, force: true });
 });

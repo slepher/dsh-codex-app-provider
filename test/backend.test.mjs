@@ -480,3 +480,25 @@ test("releasing a disposed Session is awaitable and teardown waits for that proc
   await Promise.all([released, teardown]);
   assert.equal(closed, 1, "the process was closed exactly once");
 });
+
+test("resume refuses a thread that reports active work instead of claiming it", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-resume-active-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const first = new CodexSessionBackend(stateDir, () => new FakeServer());
+  await first.createSession("owner", "codex:child", "/work");
+  await first.startTurn("owner", "codex:child", "in flight");
+  await first.close();
+
+  // A process that outlived its parent still holds the thread, so the native
+  // status is the only direct evidence that the recorded execution continues.
+  class ActiveThreadServer extends FakeServer {
+    async request(method, params) {
+      const result = await super.request(method, params);
+      if (method === "thread/resume") result.thread.status = { type: "active" };
+      return result;
+    }
+  }
+  const second = new CodexSessionBackend(stateDir, () => new ActiveThreadServer());
+  t.after(() => second.close());
+  await assert.rejects(second.resumeSession("owner", "codex:child"), /appears active/);
+});
