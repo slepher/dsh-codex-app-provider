@@ -42,7 +42,7 @@ const privateCaller = nativeSessionId => ({ nativeSessionId, source: "ui" });
 const agentCaller = nativeSessionId => ({ nativeSessionId, source: "agent", parentAgent: { id: "agent", nativeSessionId } });
 const agentUiCaller = nativeSessionId => ({ nativeSessionId, source: "ui", parentAgent: { id: "agent", nativeSessionId } });
 
-test("isolates private and agent-owned workers, links once, and emits only new report candidates", async t => {
+test("isolates private and agent-owned workers and decides an agent worker's approval", async t => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-worker-ownership-"));
   const cwd = mkdtempSync(join(tmpdir(), "dsh-worker-cwd-"));
   t.after(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true }); });
@@ -79,17 +79,28 @@ test("isolates private and agent-owned workers, links once, and emits only new r
     params: { threadId: agentWorker.threadId, turnId: agentTurn.turnId },
   });
   const [agentApproval] = await backend.pendingApprovals(agentA, agentWorker.id);
-  const rejectDecision = backend.installGuard(mutation => {
-    if (mutation.action === "decide-approval") throw new Error("guarded decision");
-  });
-  await assert.rejects(backend.decideApproval(agentUiA, agentWorker.id, agentApproval.requestId, "decline"), /guarded decision/);
-  assert.equal((await backend.pendingApprovals(agentA, agentWorker.id)).length, 1);
+  // A worker approval is decided by the caller that owns the worker: the parent
+  // Agent the plugin's bridge answers for, or the UI conversation it came from.
+  // Ownership is the check, so a different parent and an invalid verdict are
+  // both refused without touching the native request.
+  await assert.rejects(backend.decideApproval(agentCaller("parent-b"), agentWorker.id, agentApproval.requestId, "decline"), /Worker not found/);
+  await assert.rejects(backend.decideApproval(agentA, agentWorker.id, agentApproval.requestId, "cancel"), /Invalid approval decision/);
   assert.deepEqual(agentServer.responses, []);
-  rejectDecision();
-  await assert.rejects(backend.decideApproval(agentUiA, agentWorker.id, agentApproval.requestId, "cancel"), /Invalid approval decision/);
-  assert.deepEqual(agentServer.responses, []);
-  await backend.decideApproval(agentUiA, agentWorker.id, agentApproval.requestId, "decline");
+  await backend.decideApproval(agentA, agentWorker.id, agentApproval.requestId, "decline");
   assert.deepEqual(agentServer.responses, [{ id: "agent-approval", result: { decision: "decline" } }]);
+
+  // A completed agent-owned turn announces its report to the parent it belongs to.
+  const ready = [];
+  backend.subscribe(agentA, agentWorker.id, event => { if (event.type === "report.ready") ready.push(event); });
+  agentServer.emit("notification", {
+    method: "item/completed",
+    params: { threadId: agentWorker.threadId, turnId: agentTurn.turnId, item: { type: "agentMessage", phase: "final_answer", text: "agent result" } },
+  });
+  agentServer.emit("notification", {
+    method: "turn/completed",
+    params: { threadId: agentWorker.threadId, turn: { id: agentTurn.turnId, status: "completed" } },
+  });
+  assert.deepEqual(ready, [{ type: "report.ready", workerId: "agent-worker", turnId: agentTurn.turnId, parentSessionId: "parent-a" }]);
 
   const first = await backend.startTurn(uiA, privateWorker.id, "first");
   const privateServer = hub.servers.find(server => server.threadId === privateWorker.threadId);
@@ -101,62 +112,15 @@ test("isolates private and agent-owned workers, links once, and emits only new r
     method: "turn/completed",
     params: { threadId: privateWorker.threadId, turn: { id: first.turnId, status: "completed" } },
   });
-  let revokedDeliveries = 0;
-  backend.subscribe(uiA, privateWorker.id, () => { revokedDeliveries++; });
-  const duringLink = [];
-  backend.subscribe(agentUiA, privateWorker.id, event => { if (event.type === "report.ready") duringLink.push(event); });
-  const linked = await backend.linkWorker(agentUiA, privateWorker.id);
-  assert.equal(linked.owner, "agent");
-  assert.equal(linked.reports[0].acknowledgedAt > 0, true);
-  assert.deepEqual(duringLink, [], "linking claims the report the record already held without announcing a new one");
+  const projection = await backend.getWorker(uiA, privateWorker.id);
+  assert.equal(projection.group, "user");
+  projection.reports[0].result = "mutated";
+  assert.equal((await backend.getWorker(uiA, privateWorker.id)).reports[0].result, "first result");
 
-  const ready = [];
-  backend.subscribe(agentA, privateWorker.id, event => { if (event.type === "report.ready") ready.push(event); });
-  const second = await backend.startTurn(agentA, privateWorker.id, "second");
-  privateServer.emit("notification", {
-    method: "item/completed",
-    params: { threadId: privateWorker.threadId, turnId: second.turnId, item: { type: "agentMessage", phase: "final_answer", text: "second result" } },
-  });
-  privateServer.emit("notification", {
-    method: "turn/completed",
-    params: { threadId: privateWorker.threadId, turn: { id: second.turnId, status: "completed" } },
-  });
-  assert.equal(revokedDeliveries, 0);
-  assert.deepEqual(ready, [{ type: "report.ready", workerId: "private", turnId: second.turnId, parentSessionId: "parent-a" }]);
-  assert.deepEqual((await backend.pendingReports(agentA)).map(report => report.turnId), [second.turnId]);
+  // A user-owned worker reports to nobody: its completion is not a parent notice.
   assert.deepEqual(management.map(({ workerId, change, invalidated }) => [workerId, change, invalidated]), [
     ["private", "created", undefined],
     ["agent-worker", "created", undefined],
-    ["private", "binding", true],
-    ["private", "report", undefined],
+    ["agent-worker", "report", undefined],
   ]);
-  const projection = await backend.getWorker(agentA, privateWorker.id);
-  assert.equal(projection.group, "active");
-  projection.reports[1].result = "mutated";
-  assert.equal((await backend.getWorker(agentA, privateWorker.id)).reports[1].result, "second result");
-});
-
-test("guards new ownership mutations before record or RPC effects", async t => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-worker-guard-"));
-  const cwd = mkdtempSync(join(tmpdir(), "dsh-worker-guard-cwd-"));
-  t.after(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true }); });
-  const hub = { cwd, thread: 0, servers: [] };
-  const backend = new CodexSessionBackend(stateDir, () => new FakeServer(hub));
-  t.after(() => backend.close());
-  const ui = privateCaller("parent"), agentUi = agentUiCaller("parent");
-  const worker = await backend.createWorker(ui, { id: "worker", name: "Worker", cwd });
-  let guarded;
-  const remove = backend.installGuard(mutation => {
-    if (["create", "link", "detach"].includes(mutation.action)) {
-      guarded = mutation;
-      throw new Error("guarded");
-    }
-  });
-  await assert.rejects(backend.createWorker(ui, { id: "blocked", name: "Blocked", cwd }), /guarded/);
-  assert.deepEqual((await backend.listWorkers(ui)).map(item => item.id), ["worker"]);
-  await assert.rejects(backend.linkWorker(agentUi, worker.id), /guarded/);
-  assert.equal((await backend.getWorker(ui, worker.id)).owner, "user");
-  await assert.rejects(backend.detachWorker(ui, worker.id), /guarded/);
-  assert.equal((await backend.getWorker(ui, worker.id)).detached, false);
-  remove();
 });

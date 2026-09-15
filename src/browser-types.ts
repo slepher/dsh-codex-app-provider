@@ -160,20 +160,6 @@ export type TurnInput =
   | { type: "localImage"; path: string }
   | { type: "skill"; name: string; path: string };
 
-export interface ThreadSummary {
-  id: ThreadId;
-  cwd: string;
-  name?: string | null;
-  preview?: string;
-  updatedAt?: number;
-  status?: { type?: string };
-}
-
-export interface ThreadPage {
-  data: readonly ThreadSummary[];
-  nextCursor: string | null;
-}
-
 /** A Codex-native skill offered by the composer's `$` catalogue. */
 export interface Skill { name: string; path: string; description: string }
 
@@ -341,31 +327,8 @@ export interface WorkerManagementEvent {
   type: "worker.changed";
   parentSessionId: string;
   workerId: SessionId;
-  change: "created" | "binding" | "closed" | "report" | "uncertain";
+  change: "created" | "closed" | "report" | "uncertain";
   invalidated?: true;
-}
-
-export type BackendMutationAction =
-  | "create"
-  | "resume"
-  | "configure"
-  | "close"
-  | "start"
-  | "compact"
-  | "steer"
-  | "interrupt"
-  | "decide-approval"
-  | "ack-report"
-  | "accept-report"
-  | "link"
-  | "detach";
-
-export interface BackendMutation {
-  ownerId: string;
-  action: BackendMutationAction;
-  sessionId?: SessionId;
-  cwd?: string;
-  boundary?: ExecutionBoundary;
 }
 
 /**
@@ -382,8 +345,6 @@ export interface CodexBackend {
   createWorker(caller: Caller, input: CreateWorkerInput): Promise<WorkerProjection>;
   listWorkers(caller: Caller): Promise<readonly WorkerProjection[]>;
   getWorker(caller: Caller, workerId: SessionId): Promise<WorkerProjection>;
-  linkWorker(caller: Caller, workerId: SessionId): Promise<WorkerProjection>;
-  detachWorker(caller: Caller, workerId: SessionId): Promise<void>;
   pendingReports(caller: Caller): Promise<readonly Report[]>;
   listSessions(ownerId: string): Promise<readonly SessionSnapshot[]>;
   readSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
@@ -391,8 +352,6 @@ export interface CodexBackend {
   restartSession(owner: string | Caller, sessionId: SessionId, options?: TurnOptions): Promise<SessionSnapshot>;
   configureSession(owner: string | Caller, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
   closeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
-  searchThreads(ownerId: string, search?: string, cursor?: string): Promise<ThreadPage>;
-  importSession(ownerId: string, sessionId: SessionId, threadId: ThreadId): Promise<SessionSnapshot>;
   occupiedThreads(): Promise<readonly ThreadId[]>;
   /** Read-only thread ownership for trusted-Host reconciliation. */
   threadOwnership(ownerId: string, sessionId: SessionId): Promise<ThreadOwnership | undefined>;
@@ -416,7 +375,6 @@ export interface CodexBackend {
   acceptReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId, acceptance: ReportAcceptance): Promise<Report>;
   subscribe(owner: string | Caller, sessionId: SessionId, listener: (event: BackendEvent, sequence: number) => void, options?: SubscribeOptions): () => void;
   subscribeWorkers(caller: Caller, listener: (event: WorkerManagementEvent) => void): () => void;
-  installGuard(guard: (mutation: BackendMutation) => void): () => void;
   listModels(cwd: string): Promise<readonly unknown[]>;
   readConfig(cwd: string): Promise<unknown>;
   listSkills(cwd: string): Promise<readonly unknown[]>;

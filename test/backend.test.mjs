@@ -59,17 +59,6 @@ test("binds one thread and deduplicates native retries with approval identity", 
     return server;
   });
   try {
-    let guarded;
-    const removeGuard = backend.installGuard(mutation => {
-      guarded = mutation;
-      throw new Error("guarded");
-    });
-    await assert.rejects(backend.createSession("other", "reserved", "/work", {
-      boundary: { cwd: "/work", writableRoots: ["/work/../lane", "/lane"], network: "disabled" },
-    }), /guarded/);
-    assert.deepEqual(guarded.boundary.writableRoots, ["/lane"]);
-    removeGuard();
-
     const session = await backend.createSession("owner", "session", "/work");
     assert.equal(session.threadId, "thread-1");
     const events = [];
@@ -158,8 +147,11 @@ test("surfaces an approval request from a bounded execution instead of declining
   const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
   t.after(() => backend.close());
   await backend.createSession("owner", "boundary", "/work", {
-    boundary: { cwd: "/work", writableRoots: ["/lane"], network: "disabled" },
+    boundary: { cwd: "/work", writableRoots: ["/work/../lane", "/lane"], network: "disabled" },
   });
+  // The declared constraint is normalized before it is recorded, so every later
+  // verification compares against the roots the thread actually received.
+  assert.deepEqual((await backend.readSession("owner", "boundary")).options.boundary.writableRoots, ["/lane"]);
   const turn = await backend.startTurn("owner", "boundary", "work");
   const published = [];
   backend.subscribe("owner", "boundary", event => published.push(event.type));
@@ -300,28 +292,24 @@ test("reloads a rebuilt provider Session whose reports came from an earlier thre
   assert.equal(reports[0].threadId, firstThread, "the earlier thread's report is retained, not rewritten");
 });
 
-test("imports an original thread once, preserves typed skills, and marks compact as maintenance", async t => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-import-"));
+test("preserves typed skills, reads rollout usage, and marks compact as maintenance", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-rollout-"));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const servers = [], rollout = join(stateDir, "rollout.jsonl");
   writeFileSync(rollout, `${JSON.stringify({ type: "session_meta", payload: { id: "history-thread" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 12, input_tokens: 8, output_tokens: 4 }, last_token_usage: { total_tokens: 5 }, model_context_window: 100 } } })}\n`);
-  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); server.threadPath = rollout; servers.push(server); return server; });
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); server.threadPath = rollout; server.threadId = "history-thread"; servers.push(server); return server; });
   t.after(() => backend.close());
 
-  const page = await backend.searchThreads("owner", "history");
-  assert.equal(page.data[0].id, "history-thread");
-  const imported = await backend.importSession("owner", "imported", "history-thread");
-  assert.equal(imported.threadId, "history-thread");
-  assert.equal(imported.model, "stored-model");
-  assert.equal(servers.flatMap(server => server.calls).some(call => call.method === "thread/start"), false, "import performs no model/thread creation request");
-  await assert.rejects(backend.importSession("other", "duplicate", "history-thread"), /occupied/);
+  const opened = await backend.createSession("owner", "opened", "/work");
+  assert.equal(opened.threadId, "history-thread");
+  assert.equal((await backend.readSession("owner", "opened")).usage.total.totalTokens, 12,
+    "the claimed thread's rollout usage is read from its record");
 
-  const turn = await backend.startTurn("owner", "imported", [
+  const turn = await backend.startTurn("owner", "opened", [
     { type: "text", text: "use it" },
     { type: "localImage", path: "/attachments/a1.png" },
     { type: "skill", name: "demo", path: "/skills/demo/SKILL.md" },
   ]);
-  assert.equal((await backend.readSession("owner", "imported")).usage.total.totalTokens, 12);
   const runtime = servers.at(-1);
   assert.deepEqual(runtime.calls.find(call => call.method === "turn/start").params.input, [
     { type: "text", text: "use it", text_elements: [] },
@@ -329,12 +317,12 @@ test("imports an original thread once, preserves typed skills, and marks compact
     { type: "skill", name: "demo", path: "/skills/demo/SKILL.md" },
   ]);
   runtime.emit("notification", { method: "turn/completed", params: { threadId: "history-thread", turn: { id: turn.turnId, status: "completed" } } });
-  await backend.compactSession("owner", "imported");
+  await backend.compactSession("owner", "opened");
   runtime.emit("notification", { method: "turn/started", params: { threadId: "history-thread", turn: { id: "compact-1" } } });
   runtime.emit("notification", { method: "turn/completed", params: { threadId: "history-thread", turn: { id: "compact-1", status: "completed" } } });
-  assert.equal((await backend.readReports("owner", "imported")).length, 1, "a compact turn is maintenance: it records no report");
-  await backend.closeSession("owner", "imported");
-  assert.equal((await backend.readSession("owner", "imported")).threadId, "history-thread", "close preserves durable history identity");
+  assert.equal((await backend.readReports("owner", "opened")).length, 1, "a compact turn is maintenance: it records no report");
+  await backend.closeSession("owner", "opened");
+  assert.equal((await backend.readSession("owner", "opened")).threadId, "history-thread", "close preserves durable history identity");
   assert.equal((await backend.occupiedThreads()).includes("history-thread"), false, "idle close releases occupancy");
 });
 
@@ -345,7 +333,7 @@ test("maps base64 and host-path images and rejects invalid image payloads before
   writeFileSync(rollout, `${JSON.stringify({ type: "session_meta", payload: { id: "history-thread" } })}\n`);
   const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); server.threadPath = rollout; servers.push(server); return server; });
   t.after(() => backend.close());
-  await backend.importSession("owner", "imported", "history-thread");
+  await backend.createSession("owner", "imported", "/work");
 
   await assert.rejects(backend.startTurn("owner", "imported", [{ type: "image", url: " " }]), /Image URL must not be empty/);
   await assert.rejects(backend.startTurn("owner", "imported", [{ type: "localImage", path: "relative.png" }]), /absolute/);

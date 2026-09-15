@@ -182,14 +182,6 @@ test("every thread path on the source is refused after the handover, including c
     "cold recovery resumes instead of starting a thread");
 });
 
-test("a third record cannot claim the handed-over thread", async t => {
-  const fixture = setup("dsh-provider-third-");
-  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
-  const { source } = await handedOver(fixture);
-  await assert.rejects(fixture.backend.importSession(OWNER, "codex:third", source.threadId), /already occupied/);
-  assert.equal((await fixture.backend.listSessions(OWNER)).some(record => record.sessionId === "codex:third"), false);
-});
-
 test("the successor's first request resumes the original thread on the target configuration", async t => {
   const fixture = setup("dsh-provider-first-request-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
