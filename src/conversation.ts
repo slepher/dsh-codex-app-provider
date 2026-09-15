@@ -1,4 +1,4 @@
-import type { BackendEvent, Conversation, ConversationItem, ConversationStreamEvent } from "./browser-types.js";
+import type { Conversation, ConversationItem } from "./browser-types.js";
 
 function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -58,46 +58,4 @@ function projectItem(turnId: string, itemValue: unknown): ConversationItem[] {
   if (kind === "webSearch") return [{ ...base, role: "tool", title: "网页搜索", text: typeof item.query === "string" ? item.query : "", output: JSON.stringify(item.action ?? "", null, 2) }];
   if (kind === "contextCompaction") return [{ ...base, role: "tool", title: "上下文已压缩", text: "" }];
   return [];
-}
-
-/** Per-stream projection state. It consumes only raw thread notifications, avoiding duplicate turn.output deltas. */
-export function createConversationProjector(initial: readonly ConversationItem[] = []): (event: BackendEvent) => ConversationStreamEvent | undefined {
-  const items = new Map<string, ConversationItem>(initial.map(item => [item.id, item]));
-  return event => {
-    if (event.type !== "thread.notification") return undefined;
-    const params = object(event.params);
-    if (event.method === "item/started" || event.method === "item/completed") {
-      const item = projectItem(String(params.turnId ?? ""), { ...object(params.item), status: object(params.item).status ?? (event.method === "item/started" ? "inProgress" : "completed") })[0];
-      if (item === undefined) return undefined;
-      items.set(item.id, item);
-      return { type: "item", item };
-    }
-    if (event.method === "item/status" && typeof params.itemId === "string" && typeof params.status === "string") {
-      const prior = items.get(params.itemId);
-      if (prior === undefined || prior.turnId !== params.turnId) return undefined;
-      const item = { ...prior, status: params.status };
-      items.set(item.id, item);
-      return { type: "item", item };
-    }
-    if (event.method === "item/reasoning/summaryTextDelta" && typeof params.itemId === "string" && typeof params.delta === "string"
-      && Number.isSafeInteger(params.summaryIndex) && params.summaryIndex >= 0) {
-      const prior = items.get(params.itemId) ?? { id: params.itemId, turnId: String(params.turnId ?? ""), kind: "reasoning", role: "assistant" as const, status: "inProgress", text: "" };
-      const summary = [...prior.summary ?? []];
-      summary[params.summaryIndex] = (summary[params.summaryIndex] ?? "") + params.delta;
-      const item = { ...prior, summary, text: summary.join("\n\n") };
-      items.set(item.id, item);
-      return { type: "item", item };
-    }
-    if ((event.method === "item/agentMessage/delta" || event.method === "item/commandExecution/outputDelta") && typeof params.itemId === "string" && typeof params.delta === "string") {
-      const prior = items.get(params.itemId) ?? { id: params.itemId, turnId: String(params.turnId ?? ""), kind: event.method === "item/agentMessage/delta" ? "agentMessage" : "commandExecution", role: event.method === "item/agentMessage/delta" ? "assistant" : "tool", text: "" };
-      const item = { ...prior, text: prior.text + params.delta, ...(prior.role === "tool" ? { output: (prior.output ?? "") + params.delta } : {}) };
-      items.set(item.id, item);
-      return { type: "item", item };
-    }
-    if (event.method === "turn/started" || event.method === "turn/completed") {
-      const turn = conversation({ turns: [params.turn] }).turns?.[0];
-      return turn === undefined ? undefined : { type: "turn", turn };
-    }
-    return undefined;
-  };
 }

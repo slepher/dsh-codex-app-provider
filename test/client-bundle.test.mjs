@@ -35,7 +35,7 @@ function loadBundle() {
 
 /** A minimal client context that records registrations. */
 function harness() {
-  const effects = [], rows = [], definitions = [], opened = [], navigated = [], handlers = new Map();
+  const effects = [], rows = [], opened = [], navigated = [], handlers = new Map();
   const components = new Map();
   const runEffect = fn => {
     const result = fn();
@@ -43,7 +43,6 @@ function harness() {
     else if (result?.next) for (const dispose of result) effects.push(dispose);
   };
   const subsystems = {
-    uiConversation: { events: { register(value) { definitions.push(value); } } },
     sessions: {
       list: { getSnapshot: () => ({ current: "parent" }) },
       // The client service exposes exactly this accessor to feature plugins; the
@@ -72,20 +71,17 @@ function harness() {
       fn(view);
     },
   };
-  return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components } };
+  return { ctx, state: { effects, rows, opened, navigated, handlers, components } };
 }
 
-test("shipped client registers the child pane, the additive child entry and the execution node", async () => {
+test("shipped client registers the child pane and the additive child entry", async () => {
   const module = loadBundle();
   const { ctx, state } = harness();
   module.apply(ctx);
   assert.equal(state.rows.some(row => row.name === "settings.general.item"), false, "no opening-position setting is registered");
   assert.equal(module.inject.includes("settingsScope"), false);
-  assert.equal(state.definitions.length, 2, "both Codex conversation node definitions are registered");
-
-  // The execution node still renders through the shared JSX runtime.
-  const rendered = state.components.get("codex-execution")({ node: { data: { kind: "commandExecution", status: "completed", text: "ok" } }, useTurnData: () => undefined, t: key => key });
-  assert.equal(rendered.type, "details");
+  assert.equal(state.rows.some(row => row.name === "conversation.chat.node"), false,
+    "the retired codex/execution card is not registered: no session event produces it");
 
   // The entry is additive: the single lineage seat keeps its official catalog
   // occupant, and this plugin contributes a header action instead.

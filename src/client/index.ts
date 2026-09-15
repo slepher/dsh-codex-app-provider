@@ -2,6 +2,8 @@ import type { Context } from "@deepseek-ai/cordis";
 import type {} from "@deepseek-ai/dsh-client-locale/client";
 import type {} from "@deepseek-ai/dsh-client-ui-slots";
 import type {} from "@deepseek-ai/dsh-client-ui-renderer/client";
+// These two carry the slot-name and standard-props merges the header action and
+// the main-conversation pane register against; they are not renderer-specific.
 import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
 import type {} from "@deepseek-ai/dsh-client-ui-chat/client";
 import type {} from "@deepseek-ai/dsh-client-ui-subagent/client";
@@ -10,7 +12,6 @@ import type {} from "@deepseek-ai/dsh-api-session-controller/client";
 import type { SubagentAddress, SubagentPromptRequestId } from "@deepseek-ai/dsh-subagent/client";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
 import { SessionEventStream } from "@deepseek-ai/dsh-api-session-controller/client";
-import { executionDefinition, executionEndDefinition, ExecutionNode } from "./ExecutionNode.js";
 import { LOCALE_NAMESPACE, en, zh } from "./locales.js";
 import { ChildConversation, type ChildConversationInjected } from "./ChildConversation.js";
 import { ChildAction, type ChildActionInjected } from "./ChildAction.js";
@@ -57,13 +58,6 @@ function remoteValue<T>(result: unknown): T {
 export const inject = ["slots", "locale"];
 export function apply(ctx: Context): void {
   installClientStyles();
-  ctx.inject(["uiConversation"], scope => {
-    scope.uiConversation.events.register(executionDefinition);
-    scope.uiConversation.events.register(executionEndDefinition);
-    scope.slots.inject("conversation.chat.node", () => scope.slots.register({
-      name: "conversation.chat.node", key: "codex-execution", locale: LOCALE_NAMESPACE,
-    }, ExecutionNode));
-  });
   ctx.effect(() => ctx.locale.register(LOCALE_NAMESPACE, { zh, en }), "Codex locales");
   // `remote.session` is the stream carrier the pane's own event stream reads, and
   // it is a service of its own: declaring the `remote` head does not grant it.

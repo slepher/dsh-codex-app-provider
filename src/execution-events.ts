@@ -10,13 +10,6 @@ export interface CodexExecutionEvent {
   params: Record<string, unknown>;
 }
 
-declare module "@deepseek-ai/dsh-session/types" {
-  interface SessionEventMap {
-    /** Codex-owned execution facts, never an instruction for the DSH tool dispatcher. */
-    "codex/execution": CodexExecutionEvent;
-  }
-}
-
 /** Long native output is shortened in the fact block; the durable item stays addressable. */
 const FACT_OUTPUT_LIMIT = 600;
 
