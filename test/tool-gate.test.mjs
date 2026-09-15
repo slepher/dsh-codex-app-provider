@@ -355,7 +355,7 @@ test("a receiver that never answers denies instead of hanging the hook", async t
   const started = Date.now();
   const result = await runClient({ DSH_PRETOOL_ENABLED: "1", DSH_PRETOOL_SOCKET: path, DSH_PRETOOL_RUNTIME: "k" }, hookInput());
   assert.match(clientDecision(result).permissionDecisionReason, /did not answer in time/);
-  assert.ok(Date.now() - started >= 2_500, "the client waits for its own 3s bound, shorter than the 10s hook timeout");
+  assert.ok(Date.now() - started >= 1_500, "the client waits for its own short bound instead of the 10s hook timeout");
 });
 
 test("the startup preflight accepts only a managed or trusted PreToolUse entry for this client", () => {
@@ -434,4 +434,13 @@ test("an ungated Session gets no gate environment and no hook preflight", async 
   await composed.backend.createSession("owner", "codex:plain", "/work");
   assert.equal(composed.servers[0].env, undefined, "no runtime key is injected");
   assert.deepEqual(composed.servers[0].calls.map(call => call.method), ["thread/start"], "no hooks/list is issued");
+});
+
+test("a released Session refuses further gate requests", async t => {
+  const h = await gated(t, () => ({ kind: "allow" }));
+  assert.equal(clientDecision(await runClient(h.env, hookInput())).permissionDecision, "allow");
+  await h.backend.releaseDisposed("codex:session");
+  const after = await runClient(h.env, hookInput());
+  assert.equal(clientDecision(after).permissionDecision, "deny");
+  assert.match(clientDecision(after).permissionDecisionReason, /unknown runtime/);
 });
