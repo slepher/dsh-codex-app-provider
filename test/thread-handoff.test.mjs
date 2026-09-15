@@ -161,7 +161,6 @@ test("every thread path on the source is refused after the handover, including c
     ["rebuild its thread", () => fixture.backend.restartSession(OWNER, OPENING)],
     ["configure its thread", () => fixture.backend.configureSession(OWNER, OPENING, { model: "third-model" })],
     ["compact its thread", () => fixture.backend.compactSession(OWNER, OPENING)],
-    ["start a review on its thread", () => fixture.backend.reviewSession(OWNER, OPENING)],
   ];
   for (const [action, run] of refusals) {
     await assert.rejects(run(), new RegExp(`handed its Codex thread to ${SUCCESSOR}; it can no longer ${action}`));

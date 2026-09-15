@@ -22,7 +22,6 @@ import type {
 
 export interface StoredWorker {
   parentSessionId: string;
-  main?: true;
   owner: WorkerOwner;
   name: string;
   detached: boolean;
@@ -63,7 +62,7 @@ export interface StoredSession extends SessionSnapshot {
   lastTurnState?: RunState;
   lastOutput?: string;
   lastUnphasedOutput?: string;
-  operation?: "turn" | "review" | "compact";
+  operation?: "turn" | "compact";
   released?: boolean;
   approvals: ApprovalRequest[];
   options?: CreateSessionOptions;
@@ -96,10 +95,6 @@ export class SessionStore {
       this.close();
       throw error;
     }
-  }
-
-  mainConversations(cwd: string): StoredSession[] {
-    return [...this.records.values()].filter(record => record.worker?.main && record.cwd === cwd);
   }
 
   list(ownerId: string): StoredSession[] {
@@ -147,25 +142,6 @@ export class SessionStore {
     const record = this.records.get(sessionId);
     if (record?.worker !== undefined) throw new Error("Contextual caller required for bound worker");
     if (record !== undefined && record.ownerId !== ownerId) throw new Error("Session owner mismatch");
-    return record;
-  }
-
-  adopt(sessionId: string, parentSessionId: string, expectedThreadId: string): StoredSession {
-    const record = this.records.get(sessionId);
-    if (record?.handedOff !== undefined) throw new Error("This Codex Session handed its thread to a successor");
-    const matches = [...this.records.values()].filter(item => item.threadId === expectedThreadId);
-    if (record?.worker === undefined || record.threadId !== expectedThreadId
-      || matches.length !== 1 || matches[0] !== record || occupied(record)) {
-      throw new Error("Worker adoption target changed");
-    }
-    const adopted: StoredSession = {
-      ...record,
-      ownerId: parentSessionId,
-      worker: { ...record.worker, parentSessionId, owner: "user", detached: false },
-    };
-    this.persist(adopted);
-    Object.assign(record, adopted);
-    this.records.set(sessionId, record);
     return record;
   }
 
@@ -303,7 +279,6 @@ function validWorker(value: unknown, state: unknown): value is StoredWorker {
   if (typeof value !== "object" || value === null) return false;
   const worker = value as Partial<StoredWorker>;
   return typeof worker.parentSessionId === "string" && worker.parentSessionId.length > 0
-    && (worker.main === undefined || worker.main === true && worker.owner === "user" && !worker.detached)
     && (worker.owner === "user" || worker.owner === "agent")
     && typeof worker.name === "string"
     && typeof worker.detached === "boolean"

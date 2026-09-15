@@ -152,34 +152,3 @@ test("rejects partial or owner-mismatched worker blocks", () => {
     rmSync(stateDir, { recursive: true });
   }
 });
-
-test("adopts through a disk-first commit while retaining the authoritative object", () => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-adopt-commit-"));
-  const store = new SessionStore(stateDir);
-  store.put({
-    ownerId: "old-parent", sessionId: "worker", threadId: "thread", cwd: "/work", state: "idle",
-    approvals: [], events: [], nextEventSequence: 1, reports: [],
-    worker: { parentSessionId: "old-parent", owner: "agent", name: "Worker", detached: true },
-  });
-  const record = store.bound("worker");
-  const path = join(stateDir, "sessions", "worker.json");
-  const before = readFileSync(path, "utf8");
-  const blockedTemp = `${path}.${process.pid}.tmp`;
-  mkdirSync(blockedTemp);
-  assert.throws(() => store.adopt("worker", "new-parent", "thread"));
-  assert.equal(record.ownerId, "old-parent");
-  assert.equal(record.worker.parentSessionId, "old-parent");
-  assert.equal(record.worker.owner, "agent");
-  assert.equal(record.worker.detached, true);
-  assert.equal(readFileSync(path, "utf8"), before);
-  rmSync(blockedTemp, { recursive: true, force: true });
-
-  const adopted = store.adopt("worker", "new-parent", "thread");
-  assert.equal(adopted, record);
-  assert.equal(record.ownerId, "new-parent");
-  assert.equal(record.worker.parentSessionId, "new-parent");
-  assert.equal(record.worker.owner, "user");
-  assert.equal(record.worker.detached, false);
-  store.close();
-  rmSync(stateDir, { recursive: true });
-});

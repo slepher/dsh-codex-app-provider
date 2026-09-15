@@ -8,9 +8,7 @@ import type {
   ApprovalRequest,
   BackendMutation,
   BackendEvent,
-  AccessCaller as Caller,
-  MainCaller,
-  Caller as NativeCaller,
+  Caller,
   CodexBackend,
   Conversation,
   CreateSessionOptions,
@@ -80,7 +78,6 @@ interface TurnResult {
 export class CodexSessionBackend implements CodexBackend {
   private readonly store: SessionStore;
   private readonly live = new Map<string, Runtime>();
-  private readonly mainFlights = new Map<string, Promise<WorkerProjection>>();
   private readonly listeners = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly interactive = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly workerListeners = new Map<string, Set<(event: WorkerManagementEvent) => void>>();
@@ -144,37 +141,10 @@ export class CodexSessionBackend implements CodexBackend {
   }
 
   async createWorker(caller: Caller, input: CreateWorkerInput): Promise<WorkerProjection> {
-    if (caller.conversationId !== undefined) throw new Error("Main callers cannot create legacy workers");
-    if (input.id?.startsWith("main:")) throw new Error("Reserved main conversation identity");
     return this.createBoundWorker(caller, input);
   }
 
-  async getMainWorker(caller: MainCaller): Promise<WorkerProjection | undefined> {
-    privateCaller(caller);
-    if (!caller.conversationId) throw new Error("Codex conversation identity is required");
-    const record = this.store.bound(`main:${caller.conversationId}`);
-    if (record === undefined) return undefined;
-    if (!record.worker?.main) throw new Error("Main conversation identity is occupied");
-    return this.getWorker(caller, record.sessionId);
-  }
-
-  async createMainWorker(caller: MainCaller, input: Omit<CreateWorkerInput, "id">): Promise<WorkerProjection> {
-    privateCaller(caller);
-    const key = caller.conversationId;
-    let flight = this.mainFlights.get(key);
-    if (flight === undefined) {
-      flight = (async () => {
-        const existing = await this.getMainWorker(caller);
-        return existing ?? this.createBoundWorker(caller, { ...input, id: `main:${key}` }, true);
-      })().finally(() => this.mainFlights.delete(key));
-      this.mainFlights.set(key, flight);
-    }
-    const worker = await flight;
-    if (worker.cwd !== input.cwd) throw new Error("Main conversation belongs to another workspace");
-    return worker;
-  }
-
-  private async createBoundWorker(caller: Caller, input: CreateWorkerInput, main?: true): Promise<WorkerProjection> {
+  private async createBoundWorker(caller: Caller, input: CreateWorkerInput): Promise<WorkerProjection> {
     validateCaller(caller);
     if (caller.source === "agent") agentCaller(caller);
     else privateCaller(caller);
@@ -202,7 +172,6 @@ export class CodexSessionBackend implements CodexBackend {
       reports: [],
       worker: {
         parentSessionId: ownerIdentity(caller),
-        ...(main ? { main } : {}),
         owner: caller.source === "agent" ? "agent" : "user",
         name: input.name,
         detached: false,
@@ -232,10 +201,6 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async listMainConversations(cwd: string): Promise<readonly WorkerProjection[]> {
-    return this.store.mainConversations(cwd).map(workerProjection);
-  }
-
   async listWorkers(caller: Caller): Promise<readonly WorkerProjection[]> {
     validateCaller(caller);
     if (caller.source === "agent" || caller.parentAgent !== undefined) agentContextCaller(caller);
@@ -256,7 +221,6 @@ export class CodexSessionBackend implements CodexBackend {
     }
     this.guard({ ownerId: ownerIdentity(caller), sessionId: workerId, action: "link", cwd: record.cwd });
     if (record.worker.owner !== "user") throw new Error("Only a user conversation can be linked");
-    if (record.worker.main) throw new Error("Main conversation binding is fixed");
     const now = Date.now();
     for (const report of record.reports) report.acknowledgedAt ??= now;
     record.worker.owner = "agent";
@@ -270,72 +234,11 @@ export class CodexSessionBackend implements CodexBackend {
     privateCaller(caller);
     const record = this.boundRequired(caller, workerId);
     this.guard({ ownerId: ownerIdentity(caller), sessionId: workerId, action: "detach", cwd: record.cwd });
-    if (record.worker!.main) throw new Error("Main conversation binding is fixed");
     if (record.worker!.owner !== "user") throw new Error("Only user conversations can be removed from this group");
     record.worker!.detached = true;
     this.store.put(record);
     this.notifyWorker(record, "closed", record.worker!.parentSessionId, true);
     this.dropSubscribers(workerId);
-  }
-
-  async adoptWorker(caller: Caller, threadId: string): Promise<WorkerProjection> {
-    privateCaller(caller);
-    if (caller.conversationId !== undefined) throw new Error("Main callers cannot adopt legacy workers");
-    if (!threadId) throw new Error("Thread ID is required");
-    const matches = this.store.findByThread(threadId);
-    if (matches.length > 1) throw new Error("Ambiguous Codex session identity");
-    if (matches.length === 1 && matches[0].worker === undefined) {
-      throw new Error("Legacy Session requires explicit identity migration before adoption");
-    }
-    if (matches[0]?.worker?.main) throw new Error("Main conversation binding is fixed");
-    if (this.store.occupiedThreads().includes(threadId)) throw new Error("This Codex session is already occupied");
-    const result = await this.readWithTemporaryServer(rpc => rpc.request<ThreadResult>("thread/read", { threadId, includeTurns: false }));
-    const thread = result.thread;
-    if (thread?.id !== threadId || !availableDirectory(thread.cwd)) throw new Error("Session working directory is unavailable");
-    const currentMatches = this.store.findByThread(threadId);
-    if (currentMatches.length > 1) throw new Error("Ambiguous Codex session identity");
-    if (currentMatches.length !== matches.length || currentMatches[0]?.sessionId !== matches[0]?.sessionId) {
-      throw new Error("Worker adoption target changed");
-    }
-    if (thread.status?.type === "active" || this.store.occupiedThreads().includes(threadId)) {
-      throw new Error("This Codex session is already occupied");
-    }
-    let record = currentMatches[0];
-    const previousParent = record?.worker?.parentSessionId;
-    const sessionId = record?.sessionId ?? randomUUID();
-    const cwd = record?.cwd ?? thread.cwd;
-    this.guard({ ownerId: ownerIdentity(caller), sessionId, action: "adopt", cwd });
-    if (record?.worker !== undefined) {
-      record = this.store.adopt(record.sessionId, ownerIdentity(caller), threadId);
-    } else {
-      record = {
-        ownerId: ownerIdentity(caller),
-        sessionId,
-        threadId,
-        cwd,
-        state: "saved",
-        model: result.model,
-        reasoningEffort: result.reasoningEffort,
-        approvals: [],
-        options: { model: result.model, reasoningEffort: result.reasoningEffort },
-        events: [],
-        nextEventSequence: 1,
-        reports: [],
-        worker: {
-          parentSessionId: ownerIdentity(caller),
-          owner: "user",
-          name: thread.name || thread.preview?.slice(0, 40) || threadId,
-          detached: false,
-          savedState: "idle",
-        },
-      };
-      this.store.put(record);
-    }
-    if (previousParent !== undefined && previousParent !== ownerIdentity(caller)) this.notifyWorker(record, "binding", previousParent, true);
-    this.notifyWorker(record, "binding");
-    this.dropSubscribers(record.sessionId);
-    await this.resumeSession(caller, record.sessionId);
-    return workerProjection(record);
   }
 
   async pendingReports(caller: Caller): Promise<readonly Report[]> {
@@ -412,7 +315,6 @@ export class CodexSessionBackend implements CodexBackend {
   async restartSession(owner: string | Caller, sessionId: string, options: TurnOptions = {}): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "rebuild its thread");
-    if (record.worker?.main) throw new Error("Main conversation binding is fixed");
     if (record.state !== "idle" && record.state !== "saved") throw new Error(`Cannot rebuild a Session while it is ${record.state}`);
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId, action: "resume", cwd: record.cwd });
@@ -467,7 +369,6 @@ export class CodexSessionBackend implements CodexBackend {
 
   async closeSession(owner: string | Caller, sessionId: string, confirmedStopped = false): Promise<void> {
     const record = this.required(owner, sessionId);
-    if (record.worker?.main) throw new Error("Main conversation binding is fixed");
     if (record.worker?.owner === "agent" && confirmedStopped && typeof owner !== "string" && owner.source !== "ui") {
       throw new Error("Only UI callers can confirm a stopped worker");
     }
@@ -605,7 +506,7 @@ export class CodexSessionBackend implements CodexBackend {
    * Hand one Codex thread from a stopped source record to a reserved successor.
    *
    * The source keeps its history, reports and usage but is de-authorized for
-   * start, resume, configure, compact, review, steer, interrupt and restart, so
+   * start, resume, configure, compact, steer, interrupt and restart, so
    * no path can take the thread back; its live App Server runtime is closed by
    * the handover. The successor record carries the original thread identity, the
    * target model/effort and the full execution inputs its first request will
@@ -780,44 +681,6 @@ export class CodexSessionBackend implements CodexBackend {
     this.store.put(record);
     try {
       await runtime.rpc.request("thread/compact/start", { threadId: record.threadId });
-    } catch (error) {
-      record.state = error instanceof RpcError ? "idle" : "unknown";
-      this.store.put(record);
-      throw error;
-    }
-  }
-
-  async reviewSession(owner: string | Caller, sessionId: string): Promise<TurnSnapshot> {
-    const record = this.required(owner, sessionId);
-    this.assertThreadOwnership(record, "start a review on its thread");
-    if (record.state !== "idle") throw new Error(`Cannot review while Session is ${record.state}`);
-    if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can review a worker");
-    const ownerId = ownerIdentity(owner);
-    this.guard({ ownerId, sessionId, action: "review", cwd: record.cwd });
-    const runtime = await this.runtime(record, owner);
-    record.state = "running";
-    record.turnId = undefined;
-    record.operation = "review";
-    record.lastOutput = undefined;
-    record.lastUnphasedOutput = undefined;
-    this.store.put(record);
-    try {
-      const result = await runtime.rpc.request<TurnResult>("review/start", {
-        threadId: record.threadId,
-        target: { type: "uncommittedChanges" },
-        delivery: "inline",
-      });
-      if (typeof result.turn?.id !== "string") throw new Error("Missing turn identity");
-      if (record.turnId !== undefined && record.turnId !== result.turn.id) throw new Error("Turn identity mismatch");
-      record.turnId = result.turn.id;
-      const responseState = statusState(result.turn.status);
-      if (responseState !== undefined && responseState !== "running") {
-        this.finish(record, result.turn);
-        return turnSnapshot(record, record.lastTurnState ?? responseState);
-      }
-      if (!this.finished(record, result.turn.id)) record.lastTurnState = responseState ?? "running";
-      this.store.put(record);
-      return turnSnapshot(record, record.lastTurnState ?? "running");
     } catch (error) {
       record.state = error instanceof RpcError ? "idle" : "unknown";
       this.store.put(record);
@@ -1056,7 +919,7 @@ export class CodexSessionBackend implements CodexBackend {
    * to a successor.
    *
    * The source keeps its history, reports and usage, but it is no longer the
-   * thread's owner: start, resume, configure, compact, review, steer, interrupt
+   * thread's owner: start, resume, configure, compact, steer, interrupt
    * and restart all fail here, including cold recovery, so nothing can take the
    * thread back from the successor.
    * @param record - the record about to operate its thread.
@@ -1590,10 +1453,6 @@ function normalizeUsage(value: unknown): Usage | null {
 }
 
 function validateCaller(caller: Caller): void {
-  if (caller?.conversationId !== undefined) {
-    if (typeof caller.conversationId !== "string" || !caller.conversationId || caller.source !== "ui" || caller.nativeSessionId !== undefined || caller.parentAgent !== undefined) throw new Error("Invalid contextual caller");
-    return;
-  }
   if (typeof caller?.nativeSessionId !== "string" || ownerIdentity(caller).length === 0 || !["ui", "agent"].includes(caller.source)
     || caller.parentAgent !== undefined && !validAgentContext(caller)) {
     throw new Error("Invalid contextual caller");
@@ -1602,7 +1461,7 @@ function validateCaller(caller: Caller): void {
 
 function validAgentContext(caller: Caller): boolean {
   const parent = caller.parentAgent as unknown;
-  return caller.conversationId === undefined && typeof parent === "object" && parent !== null
+  return typeof parent === "object" && parent !== null
     && typeof (parent as { id?: unknown }).id === "string"
     && (parent as { id: string }).id.length > 0
     && (parent as { nativeSessionId?: unknown }).nativeSessionId === ownerIdentity(caller);
@@ -1638,13 +1497,12 @@ function privateCaller(caller: Caller): void {
 function canAccess(caller: Caller, record: StoredSession): boolean {
   const worker = record.worker;
   if (worker === undefined || worker.detached || worker.parentSessionId !== ownerIdentity(caller)) return false;
-  if (worker.main || caller.conversationId !== undefined) return worker.main === true && caller.conversationId !== undefined && record.sessionId === `main:${caller.conversationId}`;
   if (worker.owner === "user") return caller.source === "ui";
   return validAgentContext(caller);
 }
 
 function ownerIdentity(owner: string | Caller): string {
-  return typeof owner === "string" ? owner : owner.conversationId === undefined ? owner.nativeSessionId : `codex:${owner.conversationId}`;
+  return typeof owner === "string" ? owner : owner.nativeSessionId;
 }
 
 function availableDirectory(path: unknown): path is string {
@@ -1659,7 +1517,6 @@ function workerProjection(record: StoredSession): WorkerProjection {
     || record.reports.some(report => report.acceptance === "pending" && report.acknowledgedAt === undefined);
   return structuredClone({
     id: record.sessionId,
-    ...(worker.main ? { main: worker.main, conversationId: record.sessionId.slice(5), updatedAt: record.updatedAt } : {}),
     parentSessionId: worker.parentSessionId,
     owner: worker.owner,
     name: worker.name,

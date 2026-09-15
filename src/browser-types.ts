@@ -19,20 +19,10 @@ export type WorkerState = RunState;
 export type WorkerOwner = "user" | "agent";
 
 export interface Caller {
-  conversationId?: never;
   nativeSessionId: string;
   source: "ui" | "agent";
   parentAgent?: { id: string; nativeSessionId: string };
 }
-
-/** Authenticated access to a standalone Codex main; never an Agent identity. */
-export interface MainCaller {
-  source: "ui";
-  conversationId: string;
-  nativeSessionId?: never;
-  parentAgent?: never;
-}
-export type AccessCaller = Caller | MainCaller;
 
 export interface SessionSnapshot {
   sessionId: SessionId;
@@ -267,8 +257,6 @@ export interface Report {
 
 export interface WorkerProjection {
   id: SessionId;
-  main?: true;
-  conversationId?: string;
   updatedAt?: number;
   parentSessionId: string;
   owner: WorkerOwner;
@@ -328,7 +316,7 @@ export type BackendEvent =
   | { type: "session.uncertain"; error: string }
   | { type: "turn.started"; turn: TurnSnapshot }
   | { type: "turn.output"; turnId: TurnId; item: unknown }
-  | { type: "turn.state"; turn: TurnSnapshot; operation?: "turn" | "review" | "compact"; finalOutput?: string; error?: string }
+  | { type: "turn.state"; turn: TurnSnapshot; operation?: "turn" | "compact"; finalOutput?: string; error?: string }
   | { type: "approval.requested"; request: ApprovalRequest }
   | { type: "userInput.requested"; request: UserInputRequest }
   | { type: "usage.updated"; sessionId: SessionId; usage: unknown }
@@ -355,15 +343,13 @@ export type BackendMutationAction =
   | "close"
   | "start"
   | "compact"
-  | "review"
   | "steer"
   | "interrupt"
   | "decide-approval"
   | "ack-report"
   | "accept-report"
   | "link"
-  | "detach"
-  | "adopt";
+  | "detach";
 
 export interface BackendMutation {
   ownerId: string;
@@ -384,22 +370,18 @@ export interface SubscribeOptions {
 
 export interface CodexBackend {
   createSession(ownerId: string, sessionId: SessionId, cwd: string, options?: CreateSessionOptions): Promise<SessionSnapshot>;
-  createWorker(caller: AccessCaller, input: CreateWorkerInput): Promise<WorkerProjection>;
-  createMainWorker(caller: MainCaller, input: Omit<CreateWorkerInput, "id">): Promise<WorkerProjection>;
-  getMainWorker(caller: MainCaller): Promise<WorkerProjection | undefined>;
-  listMainConversations(cwd: string): Promise<readonly WorkerProjection[]>;
-  listWorkers(caller: AccessCaller): Promise<readonly WorkerProjection[]>;
-  getWorker(caller: AccessCaller, workerId: SessionId): Promise<WorkerProjection>;
-  linkWorker(caller: AccessCaller, workerId: SessionId): Promise<WorkerProjection>;
-  detachWorker(caller: AccessCaller, workerId: SessionId): Promise<void>;
-  adoptWorker(caller: AccessCaller, threadId: ThreadId): Promise<WorkerProjection>;
-  pendingReports(caller: AccessCaller): Promise<readonly Report[]>;
+  createWorker(caller: Caller, input: CreateWorkerInput): Promise<WorkerProjection>;
+  listWorkers(caller: Caller): Promise<readonly WorkerProjection[]>;
+  getWorker(caller: Caller, workerId: SessionId): Promise<WorkerProjection>;
+  linkWorker(caller: Caller, workerId: SessionId): Promise<WorkerProjection>;
+  detachWorker(caller: Caller, workerId: SessionId): Promise<void>;
+  pendingReports(caller: Caller): Promise<readonly Report[]>;
   listSessions(ownerId: string): Promise<readonly SessionSnapshot[]>;
-  readSession(owner: string | AccessCaller, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
-  resumeSession(owner: string | AccessCaller, sessionId: SessionId, confirmedStopped?: boolean): Promise<SessionSnapshot>;
-  restartSession(owner: string | AccessCaller, sessionId: SessionId, options?: TurnOptions): Promise<SessionSnapshot>;
-  configureSession(owner: string | AccessCaller, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
-  closeSession(owner: string | AccessCaller, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
+  readSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
+  resumeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<SessionSnapshot>;
+  restartSession(owner: string | Caller, sessionId: SessionId, options?: TurnOptions): Promise<SessionSnapshot>;
+  configureSession(owner: string | Caller, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
+  closeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
   searchThreads(ownerId: string, search?: string, cursor?: string): Promise<ThreadPage>;
   importSession(ownerId: string, sessionId: SessionId, threadId: ThreadId): Promise<SessionSnapshot>;
   occupiedThreads(): Promise<readonly ThreadId[]>;
@@ -407,25 +389,24 @@ export interface CodexBackend {
   threadOwnership(ownerId: string, sessionId: SessionId): Promise<ThreadOwnership | undefined>;
   /** Transfer one stopped record's thread to a reserved successor. */
   handoffThread(ownerId: string, request: ThreadHandoffRequest): Promise<ThreadHandoffResult>;
-  startTurn(owner: string | AccessCaller, sessionId: SessionId, input: string | readonly TurnInput[], options?: StartTurnOptions): Promise<TurnSnapshot>;
+  startTurn(owner: string | Caller, sessionId: SessionId, input: string | readonly TurnInput[], options?: StartTurnOptions): Promise<TurnSnapshot>;
   steerTurn(ownerId: string, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
-  steerTurn(caller: AccessCaller, workerId: SessionId, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
-  compactSession(owner: string | AccessCaller, sessionId: SessionId): Promise<void>;
-  reviewSession(owner: string | AccessCaller, sessionId: SessionId): Promise<TurnSnapshot>;
+  steerTurn(caller: Caller, workerId: SessionId, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
+  compactSession(owner: string | Caller, sessionId: SessionId): Promise<void>;
   interruptTurn(ownerId: string, turnId: TurnId): Promise<void>;
-  interruptTurn(caller: AccessCaller, workerId: SessionId, turnId: TurnId): Promise<void>;
-  pendingApprovals(owner: string | AccessCaller, sessionId: SessionId): Promise<readonly ApprovalRequest[]>;
+  interruptTurn(caller: Caller, workerId: SessionId, turnId: TurnId): Promise<void>;
+  pendingApprovals(owner: string | Caller, sessionId: SessionId): Promise<readonly ApprovalRequest[]>;
   decideApproval(ownerId: string, requestId: string, decision: ApprovalDecision): Promise<void>;
-  decideApproval(caller: AccessCaller, workerId: SessionId, requestId: string, decision: ApprovalDecision): Promise<void>;
-  pendingUserInputs(owner: string | AccessCaller, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
+  decideApproval(caller: Caller, workerId: SessionId, requestId: string, decision: ApprovalDecision): Promise<void>;
+  pendingUserInputs(owner: string | Caller, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
   answerUserInput(ownerId: string, requestId: string, answers: UserInputAnswer): Promise<void>;
-  history(owner: string | AccessCaller, sessionId: SessionId): Promise<Conversation>;
-  readEvents(owner: string | AccessCaller, sessionId: SessionId, afterSequence?: number): Promise<readonly SequencedBackendEvent[]>;
-  readReports(owner: string | AccessCaller, sessionId: SessionId): Promise<readonly Report[]>;
-  acknowledgeReport(owner: string | AccessCaller, sessionId: SessionId, turnId: TurnId): Promise<Report>;
-  acceptReport(owner: string | AccessCaller, sessionId: SessionId, turnId: TurnId, acceptance: ReportAcceptance): Promise<Report>;
-  subscribe(owner: string | AccessCaller, sessionId: SessionId, listener: (event: BackendEvent, sequence: number) => void, options?: SubscribeOptions): () => void;
-  subscribeWorkers(caller: AccessCaller, listener: (event: WorkerManagementEvent) => void): () => void;
+  history(owner: string | Caller, sessionId: SessionId): Promise<Conversation>;
+  readEvents(owner: string | Caller, sessionId: SessionId, afterSequence?: number): Promise<readonly SequencedBackendEvent[]>;
+  readReports(owner: string | Caller, sessionId: SessionId): Promise<readonly Report[]>;
+  acknowledgeReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId): Promise<Report>;
+  acceptReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId, acceptance: ReportAcceptance): Promise<Report>;
+  subscribe(owner: string | Caller, sessionId: SessionId, listener: (event: BackendEvent, sequence: number) => void, options?: SubscribeOptions): () => void;
+  subscribeWorkers(caller: Caller, listener: (event: WorkerManagementEvent) => void): () => void;
   installGuard(guard: (mutation: BackendMutation) => void): () => void;
   listModels(cwd: string): Promise<readonly unknown[]>;
   readConfig(cwd: string): Promise<unknown>;

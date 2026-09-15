@@ -143,12 +143,9 @@ test("guards new ownership mutations before record or RPC effects", async t => {
   t.after(() => backend.close());
   const ui = privateCaller("parent"), agentUi = agentUiCaller("parent");
   const worker = await backend.createWorker(ui, { id: "worker", name: "Worker", cwd });
-  const adoptable = await backend.createWorker(ui, { id: "adoptable", name: "Adoptable", cwd });
-  await backend.detachWorker(ui, adoptable.id);
-  const calls = hub.servers.flatMap(server => server.calls).length;
   let guarded;
   const remove = backend.installGuard(mutation => {
-    if (["create", "link", "detach", "adopt"].includes(mutation.action)) {
+    if (["create", "link", "detach"].includes(mutation.action)) {
       guarded = mutation;
       throw new Error("guarded");
     }
@@ -159,9 +156,5 @@ test("guards new ownership mutations before record or RPC effects", async t => {
   assert.equal((await backend.getWorker(ui, worker.id)).owner, "user");
   await assert.rejects(backend.detachWorker(ui, worker.id), /guarded/);
   assert.equal((await backend.getWorker(ui, worker.id)).detached, false);
-  await assert.rejects(backend.adoptWorker(ui, adoptable.threadId), /guarded/);
-  assert.deepEqual(guarded, { ownerId: "parent", sessionId: "adoptable", action: "adopt", cwd });
-  assert.equal((await backend.getWorker(ui, worker.id)).detached, false);
-  assert.equal(hub.servers.flatMap(server => server.calls).length, calls + 1, "adopt resolves the remote target before its final guard");
   remove();
 });
