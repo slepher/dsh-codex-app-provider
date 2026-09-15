@@ -44,23 +44,36 @@ function harness() {
     if (typeof result === "function") effects.push(result);
     else if (result?.next) for (const dispose of result) effects.push(dispose);
   };
-  const ctx = {
-    inject(names, fn) { fn(ctx); },
+  const subsystems = {
     uiConversation: { events: { register(value) { definitions.push(value); } } },
-    effect(fn) { runEffect(fn); },
-    on(name, handler) { handlers.set(name, handler); return () => handlers.delete(name); },
-    locale: { register(ns) { assert.equal(ns, "dsh-codex-app-provider"); return () => {}; } },
-    settingsScope: { bind(spec) { assert.equal(spec.namespace, "dsh-codex-app-provider"); return scope; } },
     sessions: {
       list: { getSnapshot: () => ({ current: "parent" }) },
-      subagentAddress(id) { return id.startsWith("child") ? { parentSessionId: "parent", childSessionId: id, mode: "continuable" } : undefined; },
+      // The client service exposes exactly this accessor to feature plugins; the
+      // controller's catalog-navigation helper is not part of that surface.
+      subagentAddress(id) { return id === "child-1" ? { parentSessionId: "parent", childSessionId: id, mode: "continuable" } : undefined; },
       openSubagent(address) { navigated.push(address); },
     },
     remote: { $stream() {}, session: {}, subagents: { prompt: async () => ({ ok: true, value: {} }), interruptByParent: async () => ({ ok: true, value: {} }) } },
     connection: { rpc: { call: async () => ({ ok: true, value: { approvals: [] } }) } },
     sidebarRight: { openResource(address, options) { opened.push({ address, options }); } },
     sidebarRightTabs: { register(definition) { assert.equal(definition.kind, "codex-child"); return () => {}; } },
+  };
+  // A scope sees the plugin's own injected services plus the ones it asks for;
+  // reading a Session service from a conversation-scoped face must not work.
+  const own = {
+    effect(fn) { runEffect(fn); },
+    on(name, handler) { handlers.set(name, handler); return () => handlers.delete(name); },
+    locale: { register(ns) { assert.equal(ns, "dsh-codex-app-provider"); return () => {}; } },
+    settingsScope: { bind(spec) { assert.equal(spec.namespace, "dsh-codex-app-provider"); return scope; } },
     slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
+  };
+  const ctx = {
+    ...own,
+    inject(names, fn) {
+      const view = { ...own };
+      for (const name of names) view[name.split(".")[0]] = subsystems[name.split(".")[0]];
+      fn(view);
+    },
   };
   return { ctx, state: { effects, rows, definitions, opened, navigated, handlers, components, setPosition: value => { position = value; } } };
 }
@@ -85,6 +98,8 @@ test("shipped client registers the child pane, the additive child entry and the 
   const address = openFace.addressOf("child-1");
   assert.deepEqual(address, { parentSessionId: "parent", childSessionId: "child-1", mode: "continuable" });
   assert.equal(openFace.addressOf("unrelated"), undefined, "an ordinary Session gets no child entry");
+  assert.equal(openFace.addressOf("child-2"), undefined,
+    "a child the shell did not retain is left to the official catalog rather than guessed at");
 
   const action = state.components.get("codex-child-open");
   assert.equal(action({ sessionId: "unrelated", addressOf: openFace.addressOf, position: openFace.position,

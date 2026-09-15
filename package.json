@@ -30,7 +30,8 @@
     "publish": "node scripts/publish.mjs",
     "publish:watch": "node scripts/publish.mjs --watch",
     "test:browser": "node scripts/browser-check.mjs",
-    "test:browser:pane": "node scripts/browser-pane-check.mjs"
+    "test:browser:pane": "node scripts/browser-pane-check.mjs",
+    "test:browser:shell": "node scripts/browser-shell-check.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

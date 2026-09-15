@@ -19,7 +19,12 @@ const PLATFORM = ["react", "react/jsx-runtime", "react-dom"];
 const EXTERNAL = "@deepseek-ai/dsh-api-session-controller/client";
 
 class FakeSessionEventStream {
-  constructor(remote, address, options) { this.remote = remote; this.address = address; this.options = options; }
+  constructor(remote, address, options) {
+    // The real stream reads `remote.session`; a scope that does not declare it
+    // must fail here instead of only in a live shell.
+    assert.notEqual(remote.session, undefined, "the child stream needs the injected remote.session service");
+    this.remote = remote; this.address = address; this.options = options;
+  }
   async open() {}
   async prepend() {}
   restart() {}
@@ -39,23 +44,46 @@ function load() {
       });
     } } },
   });
-  const components = new Map(), routes = [], rows = [];
+  const components = new Map(), routes = [], rows = [], calls = [];
   const runEffect = fn => { const result = fn(); if (typeof result === "function") routes.push(result); else if (result?.next) for (const d of result) routes.push(d); };
-  const ctx = {
-    inject(_names, fn) { fn(ctx); },
+  const subsystems = {
     uiConversation: { events: { register() {} } },
-    effect(fn) { runEffect(fn); },
+    sessions: {
+      get: () => undefined,
+      subagentAddress: id => (id === "child-1" ? { parentSessionId: "parent", childSessionId: id, mode: "continuable" } : undefined),
+      openSubagent: address => calls.push({ kind: "openSubagent", address }),
+    },
+    remote: { own: { $stream() {} }, subs: { session: {}, subagents: {} } },
+    connection: { rpc: { call: async () => ({ ok: true, value: { approvals: [] } }) } },
+    sidebarRight: { openResource: resource => calls.push({ kind: "openResource", resource }) },
+    sidebarRightTabs: { register() { return () => {}; } },
+  };
+  // The plugin's own `inject` list is what every scope inherits; a scope only
+  // also sees the services it asks for. Passing the whole context to every
+  // scope would hide exactly the mistake this models: reading a Session service
+  // from a conversation-scoped inject face.
+  const own = {
+    slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
     locale: { register() { return () => {}; } },
     settingsScope: { bind() { return { getSnapshot: () => ({ status: "ready", value: { subagentOpenPosition: "sidebar" } }) }; } },
-    sessions: { get: () => undefined, subagentAddress: id => ({ parentSessionId: "parent", childSessionId: id, mode: "continuable" }), openSubagent() {} },
-    remote: { $stream() {}, session: {}, subagents: {} },
-    connection: { rpc: { call: async () => ({ ok: true, value: { approvals: [] } }) } },
-    sidebarRight: { openResource() {} },
-    sidebarRightTabs: { register() { return () => {}; } },
-    slots: { inject(_name, fn) { runEffect(fn); return () => {}; }, register(row, component) { rows.push(row); components.set(row.key ?? row.id ?? row.name, component); return () => {}; } },
+  };
+  const ctx = {
+    ...own,
+    effect(fn) { runEffect(fn); },
+    inject(names, fn) {
+      const scope = { ...own };
+      for (const name of names) {
+        const [head, sub] = name.split(".");
+        if (sub === undefined) scope[head] = { ...(subsystems[head].own ?? subsystems[head]) };
+        // A nested service must be asked for by its own name: the shell refuses
+        // `remote.session` to a scope that only declared `remote`.
+        else scope[head] = { ...(scope[head] ?? {}), [sub]: subsystems[head].subs[sub] };
+      }
+      fn(scope);
+    },
   };
   module.apply(ctx);
-  return { components, rows, routes };
+  return { components, rows, routes, calls };
 }
 
 test("the pane renders its transcript, composer and stop control", async () => {
@@ -85,6 +113,30 @@ test("the pane renders its transcript, composer and stop control", async () => {
   }));
   assert.match(unavailable, /childUnavailable/);
   assert.doesNotMatch(unavailable, /codex-child-log/);
+});
+
+test("the header child entry resolves a child through the shell's Session services", () => {
+  const { components, rows } = load();
+  const row = rows.find(candidate => candidate.name === "conversation.session.header.actions");
+  assert.ok(row !== undefined, "the plugin registers an additive header action");
+  const ChildAction = components.get("codex-child-open");
+  assert.ok(ChildAction !== undefined, "the header action component is registered under its id");
+  const face = row.inject();
+  const action = renderToStaticMarkup(React.createElement(ChildAction, { sessionId: "child-1", t: key => key, ...face }));
+  assert.match(action, /codex-child-open/, "a direct child gets the plugin's entry");
+  assert.match(action, /childOpen/, "the entry states what it opens");
+  // A Session that is not a direct child contributes nothing instead of throwing.
+  assert.equal(renderToStaticMarkup(React.createElement(ChildAction, { sessionId: "parent", t: key => key, ...face })), "");
+});
+
+test("the pane's own stream gets the services it needs from the shell", () => {
+  const { rows } = load();
+  const row = rows.find(candidate => candidate.name === "sidebar.right.pane.tab");
+  assert.ok(row !== undefined, "the plugin registers a child pane tab");
+  const face = row.inject();
+  const handle = face.attach({ parentSessionId: "parent", childSessionId: "child-1", mode: "continuable" }, () => {});
+  assert.equal(typeof handle.getSnapshot, "function", "attaching one pane yields a readable view");
+  handle.release();
 });
 
 test("the client approval calls use the plugin's own channel", async () => {

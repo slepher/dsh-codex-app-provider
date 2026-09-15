@@ -69,21 +69,31 @@ export function apply(ctx: Context): void {
     scope.slots.inject("conversation.chat.node", () => scope.slots.register({
       name: "conversation.chat.node", key: "codex-execution", locale: SETTINGS_NAMESPACE,
     }, ExecutionNode));
-    // The plugin's own entry is additive. The lineage slot is a single seat
-    // whose official occupant is the whole subagent catalog, so taking it would
-    // delete official parent/child navigation rather than extend it.
-    scope.slots.inject("conversation.session.header.actions", () => scope.slots.register({
-      name: "conversation.session.header.actions", id: "codex-child-open", order: 20, locale: SETTINGS_NAMESPACE,
-      inject: (): ChildActionInjected => ({
-        addressOf: sessionId => (scope.sessions as unknown as ChildSessionFace).subagentAddress(asSessionId(sessionId)),
-        position: () => openPosition(settings.getSnapshot()),
-        openSidebar: address => openPosition(settings.getSnapshot()) === "sidebar" && openChildTab(scope.sidebarRight, address),
-        openMain: address => (scope.sessions as unknown as ChildSessionFace).openSubagent(address),
-      }),
-    }, ChildAction));
   });
   ctx.effect(() => ctx.locale.register(SETTINGS_NAMESPACE, { zh, en }), "Codex settings locales");
-  ctx.inject(["sessions", "sidebarRight", "sidebarRightTabs", "remote", "remote.subagents", "connection"], sidebar => {
+  // `remote.session` is the stream carrier the pane's own event stream reads, and
+  // it is a service of its own: declaring the `remote` head does not grant it.
+  ctx.inject(["sessions", "sidebarRight", "sidebarRightTabs", "remote", "remote.session", "remote.subagents", "connection"], sidebar => {
+    // The plugin's own entry is additive. The lineage slot is a single seat
+    // whose official occupant is the whole subagent catalog, so taking it would
+    // delete official parent/child navigation rather than extend it. It is
+    // registered from this scope because resolving a child address and opening
+    // it need the Session services, which a conversation-scoped inject face
+    // does not carry.
+    sidebar.slots.inject("conversation.session.header.actions", () => sidebar.slots.register({
+      name: "conversation.session.header.actions", id: "codex-child-open", order: 20, locale: SETTINGS_NAMESPACE,
+      inject: (): ChildActionInjected => ({
+        // `subagentAddress` is the shell's documented feature-plugin accessor: it
+        // returns the durable direct-parent address the Session controller
+        // retained, including one restored from a persisted child selection. The
+        // controller's catalog-navigation helper is not part of the client
+        // service, so asking for it here would throw inside the header slot.
+        addressOf: sessionId => (sidebar.sessions as unknown as ChildSessionFace).subagentAddress(asSessionId(sessionId)),
+        position: () => openPosition(settings.getSnapshot()),
+        openSidebar: address => openPosition(settings.getSnapshot()) === "sidebar" && openChildTab(sidebar.sidebarRight, address),
+        openMain: address => (sidebar.sessions as unknown as ChildSessionFace).openSubagent(address),
+      }),
+    }, ChildAction));
     // Codex approvals are answered on the plugin's own authenticated channel,
     // never through DSH's approval policy.
     const approvals = createCodexApprovalRpc(sidebar.connection as unknown as ConnectionHandle);
