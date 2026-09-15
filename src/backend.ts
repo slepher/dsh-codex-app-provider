@@ -77,13 +77,6 @@ interface TurnResult {
   turn?: { id?: string; status?: string; error?: unknown };
 }
 
-interface WorkflowPermission {
-  registration: object;
-  caller: NativeCaller;
-  workerId: string;
-  action: BackendMutation["action"];
-}
-
 export class CodexSessionBackend implements CodexBackend {
   private readonly store: SessionStore;
   private readonly live = new Map<string, Runtime>();
@@ -264,7 +257,6 @@ export class CodexSessionBackend implements CodexBackend {
     this.guard({ ownerId: ownerIdentity(caller), sessionId: workerId, action: "link", cwd: record.cwd });
     if (record.worker.owner !== "user") throw new Error("Only a user conversation can be linked");
     if (record.worker.main) throw new Error("Main conversation binding is fixed");
-    this.store.assertWritable(record);
     const now = Date.now();
     for (const report of record.reports) report.acknowledgedAt ??= now;
     record.worker.owner = "agent";
@@ -280,7 +272,6 @@ export class CodexSessionBackend implements CodexBackend {
     this.guard({ ownerId: ownerIdentity(caller), sessionId: workerId, action: "detach", cwd: record.cwd });
     if (record.worker!.main) throw new Error("Main conversation binding is fixed");
     if (record.worker!.owner !== "user") throw new Error("Only user conversations can be removed from this group");
-    this.store.assertWritable(record);
     record.worker!.detached = true;
     this.store.put(record);
     this.notifyWorker(record, "closed", record.worker!.parentSessionId, true);
@@ -297,7 +288,6 @@ export class CodexSessionBackend implements CodexBackend {
       throw new Error("Legacy Session requires explicit identity migration before adoption");
     }
     if (matches[0]?.worker?.main) throw new Error("Main conversation binding is fixed");
-    if (matches[0]?.worker !== undefined) this.store.assertWritable(matches[0]);
     if (this.store.occupiedThreads().includes(threadId)) throw new Error("This Codex session is already occupied");
     const result = await this.readWithTemporaryServer(rpc => rpc.request<ThreadResult>("thread/read", { threadId, includeTurns: false }));
     const thread = result.thread;
@@ -310,7 +300,6 @@ export class CodexSessionBackend implements CodexBackend {
     if (thread.status?.type === "active" || this.store.occupiedThreads().includes(threadId)) {
       throw new Error("This Codex session is already occupied");
     }
-    if (currentMatches[0]?.worker !== undefined) this.store.assertWritable(currentMatches[0]);
     let record = currentMatches[0];
     const previousParent = record?.worker?.parentSessionId;
     const sessionId = record?.sessionId ?? randomUUID();
@@ -368,7 +357,6 @@ export class CodexSessionBackend implements CodexBackend {
   async resumeSession(owner: string | Caller, sessionId: string, confirmedStopped = false): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "resume its thread");
-    this.store.assertWritable(record);
     if (record.worker !== undefined && confirmedStopped && typeof owner !== "string" && owner.source !== "ui") {
       throw new Error("Only UI callers can confirm a stopped worker");
     }
@@ -424,7 +412,6 @@ export class CodexSessionBackend implements CodexBackend {
   async restartSession(owner: string | Caller, sessionId: string, options: TurnOptions = {}): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "rebuild its thread");
-    this.store.assertWritable(record);
     if (record.worker?.main) throw new Error("Main conversation binding is fixed");
     if (record.state !== "idle" && record.state !== "saved") throw new Error(`Cannot rebuild a Session while it is ${record.state}`);
     const ownerId = ownerIdentity(owner);
@@ -468,7 +455,6 @@ export class CodexSessionBackend implements CodexBackend {
   async configureSession(owner: string | Caller, sessionId: string, options: TurnOptions): Promise<SessionSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "configure its thread");
-    this.store.assertWritable(record);
     if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can configure a worker");
     const ownerId = ownerIdentity(owner);
     this.guard({ ownerId, sessionId, action: "configure", cwd: record.cwd });
@@ -482,7 +468,6 @@ export class CodexSessionBackend implements CodexBackend {
   async closeSession(owner: string | Caller, sessionId: string, confirmedStopped = false): Promise<void> {
     const record = this.required(owner, sessionId);
     if (record.worker?.main) throw new Error("Main conversation binding is fixed");
-    this.store.assertWritable(record);
     if (record.worker?.owner === "agent" && confirmedStopped && typeof owner !== "string" && owner.source !== "ui") {
       throw new Error("Only UI callers can confirm a stopped worker");
     }
@@ -724,7 +709,6 @@ export class CodexSessionBackend implements CodexBackend {
   async startTurn(owner: string | Caller, sessionId: string, input: string | readonly TurnInput[], options: StartTurnOptions = {}): Promise<TurnSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "start a turn on its thread");
-    this.store.assertWritable(record);
     const ownerId = ownerIdentity(owner);
     const items = turnInput(input);
     if (options.idempotencyKey !== undefined && record.lastStartKey === options.idempotencyKey && record.turnId !== undefined) {
@@ -783,7 +767,6 @@ export class CodexSessionBackend implements CodexBackend {
   async compactSession(owner: string | Caller, sessionId: string): Promise<void> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "compact its thread");
-    this.store.assertWritable(record);
     if (record.state !== "idle") throw new Error("Wait for the current turn before compacting");
     if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can compact a worker");
     const ownerId = ownerIdentity(owner);
@@ -807,7 +790,6 @@ export class CodexSessionBackend implements CodexBackend {
   async reviewSession(owner: string | Caller, sessionId: string): Promise<TurnSnapshot> {
     const record = this.required(owner, sessionId);
     this.assertThreadOwnership(record, "start a review on its thread");
-    this.store.assertWritable(record);
     if (record.state !== "idle") throw new Error(`Cannot review while Session is ${record.state}`);
     if (typeof owner !== "string" && owner.source !== "ui") throw new Error("Only UI callers can review a worker");
     const ownerId = ownerIdentity(owner);
@@ -853,7 +835,6 @@ export class CodexSessionBackend implements CodexBackend {
     const input = typeof owner === "string" ? turnOrInput as string | readonly TurnInput[] : contextualInput!;
     const record = typeof owner === "string" ? this.byTurn(owner, turnId) : this.required(owner, workerOrTurnId);
     this.assertThreadOwnership(record, "steer its thread");
-    this.store.assertWritable(record);
     if (record.turnId !== turnId) throw new Error("Turn not found");
     const ownerId = ownerIdentity(owner);
     const items = turnInput(input);
@@ -872,7 +853,6 @@ export class CodexSessionBackend implements CodexBackend {
     const turnId = typeof owner === "string" ? workerOrTurnId : contextualTurnId!;
     const record = typeof owner === "string" ? this.byTurn(owner, turnId) : this.required(owner, workerOrTurnId);
     this.assertThreadOwnership(record, "interrupt its thread");
-    this.store.assertWritable(record);
     if (record.turnId !== turnId) throw new Error("Turn not found");
     const ownerId = ownerIdentity(owner);
     if (record.state !== "running" && record.state !== "interrupt-requested") throw new Error("Interrupt precondition failed");
@@ -897,7 +877,6 @@ export class CodexSessionBackend implements CodexBackend {
     for (const runtime of this.live.values()) {
       const pending = runtime.inputs.get(requestId);
       if (pending === undefined || pending.record.ownerId !== ownerId) continue;
-      this.store.assertWritable(pending.record);
       runtime.inputs.delete(requestId);
       runtime.rpc.respond(pending.rpcId, { answers: answers ?? {} });
       return;
@@ -918,7 +897,6 @@ export class CodexSessionBackend implements CodexBackend {
       : this.required(owner, workerOrRequestId);
     if (record !== undefined && !record.approvals.some(request => request.requestId === requestId)) throw new Error("Approval no longer pending");
     if (record === undefined) throw new Error("Approval no longer pending");
-    this.store.assertWritable(record);
     const request = record.approvals.find(item => item.requestId === requestId)!;
     const runtime = this.live.get(record.sessionId);
     const rpcId = runtime?.requests.get(requestId);
@@ -958,7 +936,6 @@ export class CodexSessionBackend implements CodexBackend {
 
   async acknowledgeReport(owner: string | Caller, sessionId: string, turnId: string): Promise<Report> {
     const record = this.required(owner, sessionId);
-    this.store.assertWritable(record);
     const ownerId = ownerIdentity(owner);
     const report = record.reports.find(item => item.turnId === turnId);
     if (report === undefined) throw new Error("Unknown report");
@@ -972,7 +949,6 @@ export class CodexSessionBackend implements CodexBackend {
 
   async acceptReport(owner: string | Caller, sessionId: string, turnId: string, acceptance: ReportAcceptance): Promise<Report> {
     const record = this.required(owner, sessionId);
-    this.store.assertWritable(record);
     const ownerId = ownerIdentity(owner);
     const report = record.reports.find(item => item.turnId === turnId);
     if (report === undefined || !["pending", "accepted", "changes-requested"].includes(acceptance)) {

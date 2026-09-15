@@ -158,7 +158,6 @@ export class SessionStore {
       || matches.length !== 1 || matches[0] !== record || occupied(record)) {
       throw new Error("Worker adoption target changed");
     }
-    this.assertWritable(record);
     const adopted: StoredSession = {
       ...record,
       ownerId: parentSessionId,
@@ -174,11 +173,8 @@ export class SessionStore {
     record.updatedAt = Date.now();
     const existing = this.records.get(record.sessionId);
     if (existing !== undefined && existing.ownerId !== record.ownerId) throw new Error("Session owner mismatch");
-    this.assertWritable(record);
     this.write(record);
   }
-
-  assertWritable(_record: StoredSession): void {}
 
   private write(record: StoredSession): void {
     this.persist(record);

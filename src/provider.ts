@@ -34,8 +34,6 @@ import type {
   TurnInput,
   TurnSnapshot,
   Usage,
-  UserInputAnswer,
-  UserInputQuestion,
   UserInputRequest,
 } from "./browser-types.js";
 import { isCodexVisible, isInjectedContext } from "./context.js";
@@ -1108,38 +1106,6 @@ function turnOptions(options: GenerateOptions): { model: string; reasoningEffort
     model: options.model,
     ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
   };
-}
-
-function providerQuestion(question: UserInputQuestion): ProviderQuestion {
-  return {
-    id: question.id,
-    question: question.question,
-    ...(question.header === "" ? {} : { header: question.header }),
-    ...(question.options === undefined ? {} : {
-      options: question.options.map(option => ({
-        label: option.label,
-        ...(option.description === "" ? {} : { description: option.description }),
-      })),
-    }),
-  };
-}
-
-function userInputAnswers(answers: readonly ProviderQuestionAnswer[]): UserInputAnswer {
-  const mapped: Record<string, { answers: string[] }> = {};
-  for (const answer of answers) {
-    const values = [...answer.selected];
-    if (answer.custom !== undefined && answer.custom !== "") values.push(answer.custom);
-    mapped[answer.id] = { answers: values };
-  }
-  return mapped;
-}
-
-function approvalReason(request: ApprovalRequest): string | undefined {
-  const params = typeof request.params === "object" && request.params !== null ? request.params as Record<string, unknown> : {};
-  if (typeof params.reason === "string" && params.reason.trim() !== "") return params.reason;
-  if (typeof params.command === "string" && params.command.trim() !== "") return params.command;
-  if (typeof params.grantRoot === "string" && params.grantRoot.trim() !== "") return `write access under ${params.grantRoot}`;
-  return undefined;
 }
 
 export function backendSessionId(sessionId: string): string {
