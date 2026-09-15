@@ -109,6 +109,8 @@ test("shipped client registers the child pane, the additive child entry and the 
   const button = action({ sessionId: "child-1", addressOf: openFace.addressOf, position: openFace.position,
     openSidebar: openFace.openSidebar, openMain: openFace.openMain, t: key => key });
   assert.equal(button.type, "button");
+  assert.match(button.props.title, /childOpen → childPositionSidebar/,
+    "the entry states where it will open, which the official catalog beside it does not");
   button.props.onClick();
   assert.equal(state.opened.length, 1);
   assert.equal(state.opened[0].address, "dsh-resource://codex-child/parent/child-1/continuable");

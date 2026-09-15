@@ -29,7 +29,10 @@ type Props = PropsRuntime<"conversation.session.header.actions"> & PropsLocale<"
 export function ChildAction({ sessionId, addressOf, position, openSidebar, openMain, t }: Props) {
   const address = addressOf(String(sessionId));
   if (address === undefined) return null;
-  return <button type="button" className="codex-child-open" title={t("childOpen")}
+  // The entry's destination is otherwise invisible: the official catalog sits
+  // right beside it and opens the child as the selected Session instead.
+  const where = position() === "sidebar" ? t("childPositionSidebar") : t("openMain");
+  return <button type="button" className="codex-child-open" title={`${t("childOpen")} → ${where}`}
     onClick={() => {
       if (position() === "sidebar" && openSidebar(address)) return;
       openMain(address);
