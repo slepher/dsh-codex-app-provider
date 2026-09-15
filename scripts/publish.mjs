@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 export const NAME = "dsh-codex-app-provider";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const stageRoot = join(root, ".watch");
-const required = ["lib/index.js", "lib/backend.js", "lib/provider.js", "lib/client.js", "lib/client/index.d.ts"];
+const required = ["lib/index.js", "lib/backend.js", "lib/provider.js"];
 const watchMode = process.argv.includes("--watch");
 let child, pending = false, stopping = false;
 
@@ -44,8 +44,7 @@ export async function publish() {
   const stage = join(stageRoot, "publish-build");
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(join(stage, "scripts"), { recursive: true });
-  for (const path of ["src", "package.json", "tsconfig.json", "tsconfig.client.json"]) cpSync(join(root, path), join(stage, path), { recursive: true });
-  cpSync(join(root, "scripts/build-client.mjs"), join(stage, "scripts/build-client.mjs"));
+  for (const path of ["src", "package.json", "tsconfig.json"]) cpSync(join(root, path), join(stage, path), { recursive: true });
   symlinkSync(join(root, "node_modules"), join(stage, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   const staged = await new Promise((resolveExit, rejectExit) => {
     const build = spawn("npm", ["run", "build"], { cwd: stage, stdio: "inherit", shell: process.platform === "win32" });

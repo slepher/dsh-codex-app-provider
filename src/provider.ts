@@ -33,9 +33,12 @@ import type {
   TurnInput,
   TurnSnapshot,
   Usage,
+  UserInputQuestion,
   UserInputRequest,
 } from "./browser-types.js";
 import { isCodexVisible, isInjectedContext } from "./context.js";
+import type { ApprovalOutcome } from "@deepseek-ai/dsh-user-approval/types";
+import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
 import { factMessage, factMessages, importedFactIds } from "./facts.js";
 import {
   executionCwd,
@@ -112,16 +115,33 @@ export interface ProviderQuestionSeam {
   }): Promise<{ answers: readonly ProviderQuestionAnswer[] }>;
 }
 
+/**
+ * Optional DSH approval seam (`ctx.approval`).
+ *
+ * Codex owns its own permission judgment: the plugin never asks DSH's per-Session
+ * policy what Codex may do. It does have to carry a request Codex raised to the
+ * user, and that question is put where every other DSH approval is put, so the
+ * user answers in one approval surface instead of a provider-specific one.
+ */
+export interface ProviderApprovalSeam {
+  request(request: {
+    agent: Agent;
+    toolName: string;
+    callId?: ToolCallId;
+    reason?: string;
+    signal?: AbortSignal;
+  }): Promise<ApprovalOutcome>;
+}
+
 export interface CodexProviderDeps {
   backend: CodexBackend;
   sessions: { get(id: string): ProviderSessionFace | undefined };
   agents: { get(id: string): Agent | undefined };
   /**
-   * Whether this composition can reach an interactive client for a native
-   * approval decision. Absent or inactive means the plugin fails closed rather
-   * than asking DSH's approval policy to decide for Codex.
+   * Optional DSH approval seam. Absent means a native request cannot reach a
+   * composed answerer and is declined fail-closed, never fabricated.
    */
-  approvals?: { readonly interactive: boolean } | undefined;
+  approval?: ProviderApprovalSeam | undefined;
   /** Optional DSH structured-question seam (`ctx.userQuestions`); absent means empty answers. */
   questions?: ProviderQuestionSeam | undefined;
   /** Optional durable-attachment seam (`ctx.attachments`); absent keeps the provider text-only. */
@@ -588,9 +608,9 @@ export class CodexProviderAdapter extends LlmAdapter {
           if (signal?.aborted) break;
           if (event.type === "session.uncertain") throw new LlmError(event.error, "EXECUTION_UNKNOWN");
           if (event.type === "approval.requested") {
-            void this.bridgeApproval(owner, event.request);
+            void this.bridgeApproval(owner, sessionId, event.request, signal);
           } else if (event.type === "userInput.requested") {
-            void this.bridgeUserInput(owner, sessionId, event.request);
+            void this.bridgeUserInput(owner, sessionId, event.request, signal);
           } else if (event.type === "turn.output" && event.turnId === turn.turnId) {
             if (typeof event.item === "string") {
               text += event.item;
@@ -651,7 +671,10 @@ export class CodexProviderAdapter extends LlmAdapter {
     const channel = new EventChannel(signal);
     let off: (() => void) | undefined;
     try {
-      await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), approvalPolicy: "never", sandbox: "read-only" });
+      // Permissions belong to Codex, exactly as on the main path: the auxiliary
+      // session carries no approval policy and no sandbox of this plugin's
+      // choosing. A request Codex does raise is carried to the user below.
+      await backend.createSession(owner, backendId, cwd, { ...turnOptions(options) });
       off = backend.subscribe(owner, backendId, event => channel.push(event));
       let turn: TurnSnapshot;
       try {
@@ -669,7 +692,13 @@ export class CodexProviderAdapter extends LlmAdapter {
         for await (const { event, sequence } of channel) {
           if (signal?.aborted) break;
           if (event.type === "session.uncertain") throw new LlmError(event.error, "EXECUTION_UNKNOWN");
-          if (event.type === "turn.output" && event.turnId === turn.turnId) {
+          // An auxiliary call runs on the user's behalf like any other turn, so a
+          // request Codex addresses to the user is carried to DSH here too.
+          if (event.type === "approval.requested") {
+            void this.bridgeApproval(owner, sessionId, event.request, signal);
+          } else if (event.type === "userInput.requested") {
+            void this.bridgeUserInput(owner, sessionId, event.request, signal);
+          } else if (event.type === "turn.output" && event.turnId === turn.turnId) {
             if (typeof event.item === "string") output += event.item;
             else if (isAgentMessage(event.item)) completedText = event.item.text;
           } else if (event.type === "turn.state" && event.turn.turnId === turn.turnId && TERMINAL_STATES.has(event.turn.state)) {
@@ -703,22 +732,51 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   /**
-   * Hand one native approval to the plugin's own pane, or fail closed.
+   * Carry one native approval request to the user through DSH's approval
+   * mechanism.
    *
-   * Codex owns its approval configuration: the plugin never asks DSH's approval
-   * service, whose per-Session policy would decide for Codex. A request that
-   * reaches this client is one Codex could not settle itself, so with an
-   * interactive channel mounted it simply stays pending until the pane answers
-   * on the plugin's own approval channel. A composition with no client cannot
-   * obtain a real decision, so it fails closed instead of fabricating consent —
-   * the request and its recorded decline stay visible in the provider store.
+   * Codex owns its own permission judgment, so the plugin never asks DSH what
+   * Codex may do. It does own the request Codex addresses to the user, and that
+   * question is put where every other DSH approval is put: one approval surface,
+   * no provider-specific channel. A composition whose answerer chain cannot
+   * decide returns `'unavailable'`, which is declined to Codex exactly as an
+   * explicit rejection would be — the recorded outcome stays truthful instead of
+   * fabricating consent.
    * @param owner - the provider's own owner identity.
+   * @param sessionId - the DSH Session whose turn raised the request.
    * @param request - the native request the App Server addressed to this client.
+   * @param signal - the turn's cancellation lifetime.
    */
-  private async bridgeApproval(owner: string, request: ApprovalRequest): Promise<void> {
-    if (this.deps.approvals?.interactive === true) return;
-    this.deps.logger.warn("No Codex approval channel is mounted in this composition; the native approval was declined fail-closed");
-    await this.decide(owner, request.requestId, "decline").catch(() => {});
+  private async bridgeApproval(owner: string, sessionId: string, request: ApprovalRequest, signal?: AbortSignal): Promise<void> {
+    const decision = await this.askUserForApproval(sessionId, request, signal);
+    await this.decide(owner, request.requestId, decision).catch(() => {});
+  }
+
+  /** Resolve one native approval through the DSH answerer chain, failing closed. */
+  private async askUserForApproval(sessionId: string, request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
+    const seam = this.deps.approval;
+    const agent = this.deps.agents.get(sessionId);
+    if (seam === undefined || agent === undefined) {
+      this.deps.logger.warn(`No DSH approval answerer is composed for ${sessionId}; the native approval was declined fail-closed`);
+      return "decline";
+    }
+    const params = record(request.params);
+    const reason = approvalReason(params);
+    let outcome: ApprovalOutcome;
+    try {
+      outcome = await seam.request({
+        agent,
+        toolName: typeof params.toolName === "string" ? params.toolName : request.method,
+        ...(typeof params.callId === "string" ? { callId: ToolCallId(params.callId) } : {}),
+        ...(reason === undefined ? {} : { reason }),
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      this.deps.logger.warn(`The DSH approval request failed; the native approval was declined fail-closed: ${String(error)}`);
+      return "decline";
+    }
+    if (outcome === "allowed-once") return "accept";
+    return outcome === "cancelled" ? "cancel" : "decline";
   }
 
   private async decide(owner: string, requestId: string, decision: ApprovalDecision): Promise<void> {
@@ -726,20 +784,45 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   /**
-   * Leave one native question for the plugin's own pane, or fail closed.
+   * Carry one native question to the user through DSH's own structured-question
+   * mechanism.
    *
-   * Like an approval, a question that reaches this client is one Codex decided it
-   * cannot settle itself. With an interactive channel the request stays pending
-   * and the child pane answers it with the real values. Otherwise the turn
+   * Same ownership split as an approval: Codex decided it cannot settle the
+   * question itself, so DSH asks the user. When no seam is composed the turn
    * receives an empty answer set — the upstream mapping of "the client could not
    * answer" — rather than blocking the native turn forever or inventing input.
    * @param owner - the provider's own owner identity.
    * @param sessionId - the DSH Session the question belongs to.
    * @param request - the native question request.
+   * @param signal - the turn's cancellation lifetime.
    */
-  private async bridgeUserInput(owner: string, sessionId: string, request: UserInputRequest): Promise<void> {
-    if (this.deps.approvals?.interactive === true) return;
-    this.deps.logger.warn(`No Codex interaction channel is mounted in this composition; the native question for ${sessionId} was answered empty fail-closed`);
+  private async bridgeUserInput(owner: string, sessionId: string, request: UserInputRequest, signal?: AbortSignal): Promise<void> {
+    const seam = this.deps.questions;
+    const agent = this.deps.agents.get(sessionId);
+    if (seam === undefined || agent === undefined) {
+      this.deps.logger.warn(`No DSH question answerer is composed for ${sessionId}; the native question was answered empty fail-closed`);
+      await this.answerEmpty(owner, request);
+      return;
+    }
+    try {
+      const { answers } = await seam.ask({
+        agent,
+        questions: request.questions.map(toProviderQuestion),
+        ...(signal === undefined ? {} : { signal }),
+      });
+      const collected: Record<string, { answers: readonly string[] }> = {};
+      for (const answer of answers) {
+        const selected = [...answer.selected, ...(answer.custom === undefined || answer.custom === "" ? [] : [answer.custom])];
+        if (selected.length > 0) collected[answer.id] = { answers: selected };
+      }
+      await this.deps.backend.answerUserInput(owner, request.requestId, Object.keys(collected).length === 0 ? null : collected);
+    } catch (error) {
+      this.deps.logger.warn(`The DSH question request failed; the native question was answered empty fail-closed: ${String(error)}`);
+      await this.answerEmpty(owner, request);
+    }
+  }
+
+  private async answerEmpty(owner: string, request: UserInputRequest): Promise<void> {
     try {
       await this.deps.backend.answerUserInput(owner, request.requestId, null);
     } catch (error) {
@@ -1112,6 +1195,42 @@ function turnOptions(options: GenerateOptions): { model: string; reasoningEffort
   return {
     model: options.model,
     ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
+  };
+}
+
+/** Read one wire value as a plain record; anything else reads as no fields. */
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/**
+ * The human-readable half of a native approval request.
+ *
+ * The App Server sends method-specific `params`; the command being approved and
+ * an explicit reason are the two fields an approval surface shows, and either
+ * may be absent.
+ * @param params - the request's method-specific parameters.
+ * @returns the reason to show, or undefined when the request carries none.
+ */
+function approvalReason(params: Record<string, unknown>): string | undefined {
+  if (typeof params.reason === "string" && params.reason !== "") return params.reason;
+  if (typeof params.command === "string" && params.command !== "") return params.command;
+  return undefined;
+}
+
+/**
+ * Project one native question onto the DSH structured-question vocabulary.
+ * @param question - the native question.
+ * @returns the same question as DSH asks it.
+ */
+function toProviderQuestion(question: UserInputQuestion): ProviderQuestion {
+  return {
+    id: question.id,
+    question: question.question,
+    ...(question.header === "" ? {} : { header: question.header }),
+    ...(question.options === undefined
+      ? {}
+      : { options: question.options.map(option => ({ label: option.label, description: option.description })) }),
   };
 }
 

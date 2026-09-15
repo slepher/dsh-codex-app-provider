@@ -2,7 +2,15 @@
 
 > 当前用户需求：[plugin-requirements.md](../plugin-requirements.md)。
 
-> 2026-09-15：已移除子会话打开位置配置。插件现有标题栏按钮固定打开右侧栏；下文涉及位置设置的内容为历史设计。
+> 2026-09-15（拆分）：本插件现在是**纯 Host 插件**。子会话的打开位置设定、`subagent/open` 拦截、标题栏入口和侧栏面板已迁到 `dsh-subagent-ui-sidepanel`；本仓库不再有 client 半边（无 `./client` 导出、无 `dsh.client`）。
+>
+> 2026-09-15（权限与审批）：**权限判断归 Codex，审批请求转发给 DSH。**
+> - 插件不再替 Codex 决定权限。`streamAuxiliary`（标题、压缩等辅助调用）原本硬编码 `approvalPolicy: "never"` + `sandbox: "read-only"`——那是 `21ac0fd` 之后遗漏的一处，现已移除，辅助调用与主路径一样不注入任何权限档。
+> - Codex 主动发出的审批请求转发到 `ctx.approval.request({ agent, toolName, callId, reason, signal })`，用户就在 DSH 自己的审批面（`ui-approval` 注册在 `conversation.composer` 的 chain，绑定当前 Session）上决定；决定再回到 `backend.decideApproval`。`allowed-once` → accept，`cancelled` → cancel，其余（含 `unavailable`）→ decline，不伪造同意。
+> - 结构化提问同理转发到 `ctx.userQuestions.ask(...)`（此前 `deps.questions` 声明了却从未使用）。
+> - 私有的 `/codex-approval` 浏览器通道及其自绘审批卡已删除；`bridgeApproval`/`bridgeUserInput` 在缺少 answerer 时 fail-closed。
+> - 辅助调用的事件循环现在与主路径一样处理 `approval.requested` / `userInput.requested`，否则去掉权限注入后那条路径会在审批上空转。
+>
 > 下文是阶段设计与项目参考；旧 core 补丁、协调包、角色权限和恢复方案按统一基线修订。
 
 状态：实施中。日期：2026-09-13。单包 provider、workflow 消费者和原生侧栏已实现；隔离安装、真实 child 参数链、合同交付、Host 冷恢复、浏览器设置/草稿隔离/工具呈现、workflow profile 选择/刷新已通过限定场景验收。审批、中断及其余交互仍在验证，详见 EXECUTION.md。
@@ -173,7 +181,7 @@ DSH 原生子代理侧栏按下述系统设置选择打开位置：本插件客�
 
 ### 6.1 系统设置：子代理默认打开位置
 
-此项取代原方案“第一版固定侧栏、暂不配置”的安排。系统设置 → 通用，注册一行“子代理默认打开位置”，可选择“右侧栏”或“主区域”，默认“右侧栏”。无需为单个选项增加独立设置页面。
+此项取代原方案“第一版固定侧栏、暂不配置”的安排。系统设置 → 通用，注册一行“子代理默认打开位置”，可选择“右侧栏”或“主区域”，默认“主区域”。默认值是官方行为：该字段同时约束原生目录项，未显式选择时不得接管官方点击。无需为单个选项增加独立设置页面。
 
 第一版作用于本插件启用的 DSH 原生子代理目录打开动作，不按 child provider 区分；不改变普通 Session 导航、父模型或 workflow profile。作用域沿用当前部署的 DSH settings provider，同一设置文档的客户端共享该值，不另建浏览器或 Session 偏好。
 
@@ -181,13 +189,13 @@ DSH 原生子代理侧栏按下述系统设置选择打开位置：本插件客�
 
 ### 6.2 原生设置注册、持久化与同步
 
-按用户决定，取消独立的 `DSH_HOME/dsh-codex-app-provider/settings.json` 方案。Host 向 `ctx.settings` 注册 `dsh-codex-app-provider` namespace，schema 声明 `subagentOpenPosition` 为 `sidebar` / `main`，默认 `sidebar`，标记 `applies: 'live'`。
+按用户决定，取消独立的 `DSH_HOME/dsh-codex-app-provider/settings.json` 方案。Host 向 `ctx.settings` 注册 `dsh-codex-app-provider` namespace，schema 声明 `subagentOpenPosition` 为 `sidebar` / `main`，默认 `main`，标记 `applies: 'live'`。
 
 默认文件由 DSH `dsh-settings-file` 管理，位置为 `<DSH_HOME>/settings.yaml`，本项示例：
 
 ```yaml
 dsh-codex-app-provider:
-  subagentOpenPosition: sidebar
+  subagentOpenPosition: main
 ```
 
 如果部署已自定义 settings provider 或文件路径，则完全沿用其配置；本插件不拼接路径、不直接打开文件，也不修改全局 provider.path。这里保存 UI 偏好，执行 stateDir、workflow role/profile 和 Codex 登录配置继续使用各自归属。
@@ -217,13 +225,32 @@ dsh-codex-app-provider:
     → sidebar：打开/切换注册的子代理 tab，主区域 Session 不变
 ```
 
-右侧通过 `sidebarRightTabs` 注册类型，通过 `sidebar.right.pane.tab` 注册内容，复用 DSH 原生 Conversation/输入/审批组件。Session scope 必须绑定 child，不能沿用全局 selected Session；若现有组件不能显式绑定，在 DSH 补必要公开接缝，不复制组件源码。
+右侧通过 `sidebarRightTabs` 注册类型，通过 `sidebar.right.pane.tab` 注册内容。面板**复刻**主区对话的观感而不是挂载主区组件（理由见 6.5）；Session scope 必须绑定 child，不能沿用全局 selected Session。
 
 配置只影响下一次默认打开动作。切换为 main 不关闭已有侧栏、不丢草稿、不停止 child；保留“在主区域打开”显式操作。one-shot 只读、parent 不可用时的输入/Stop 限制继续沿用原生语义。
 
 异步加载 child 面板期间，如果用户已经导航离开父 Session 或又点击另一个 child，旧打开请求应取消/失效，不把旧 child 面板强行打开。插件卸载解除设置行、打开动作和 tab 注册，释放展示订阅；单独关闭面板不取消任务。
 
-### 6.4 本项验收
+### 6.4 侧栏面板为什么是复刻而不是挂载主区组件
+
+挂载主区 UI 这条通道在运行的（打补丁的）core 里**是通的**，已核实：
+
+- `dsh-client-ui-conversation` 的 `main.conversation` 注册为 `{ kind: 'single', scope: 'session-maybe', reusable: true }`；
+- `dsh-client-ui-slots` 具备 `reusable` / `mount` 运行时；
+- `SessionProvider` 接受显式 `sessionId`（省略时继承外层 scope，无法解析则渲染 `empty`）；
+- `dsh-api-session-controller` 提供 `retainSubagent(address): () => void`。
+
+也就是说本可以这样写：tab body 声明 `children: { 'codex.child.conversation': { kind: 'single', scope: 'session', mount: 'main.conversation' } }`，再用 `<SessionProvider sessionId={childSessionId}>` 包住 `renderSlot`，并用 `retainSubagent` 保活非当前 child 的 Session（这正是早前 `.watch/publish-build` 那一版的写法）。没有采用，是因为三个具体代价：
+
+1. **拿到的是整块主区。** 安装核心里**只有一处** `reusable: true`，就是 `main.conversation`；它的注册同时声明 `conversation.session`、`conversation.session.header`、`conversation.composer` 等子槽，所以侧栏 tab 里会塞进“会话头部 + 会话视图 + 输入框”整套外壳，与 tab 自身标题重复。`conversation.session` / `conversation.view` 都没有标 reusable，没有更细粒度的可复用槽。
+2. **审批与提问会失去入口。** Codex 审批走本插件自己的 `/codex-approval` 浏览器通道（`installApprovalRpc`），并**刻意不接 DSH 审批策略**：`provider.ts` 明确“the plugin never asks DSH's approval policy to decide for Codex”，没有交互通道时 fail-closed 直接拒绝。原生对话的审批卡片接的是 DSH approval 交互，本插件从未注册那条路，挂载后审批 UI 失效。
+3. **草稿与流的所有权改变，且再欠一笔补丁债。** 现在每个 tab 一条独立 `SessionEventStream`、草稿按地址存、关 tab 只释放展示；换成原生后草稿与流由 session controller 按会话持有（同一 child 开两个 tab 会共享草稿），且 `retainSubagent` 与 `subagent/open` 同属本地补丁 API。
+
+因此当前实现选择复刻观感：保住审批通道、每 tab 独立草稿与紧凑布局，代价是样式是抄的、会随主区演进漂移。
+
+**若要“用主区 UI 又保住插件能力”**，正解不是在插件里绕，而是在 core 上**新增一个 reusable 的会话视图槽**（例如把 `conversation.view` 标为 `reusable`）：侧栏只挂消息视图，头部、输入框和审批仍归插件。这条需要 core 侧改动与补丁集更新。
+
+### 6.5 本项验收
 
 - 设置界面可选择两种位置；刷新页面/重启后选择保留；值由当前 DSH settings provider 持久化，默认位于 settings.yaml 的本插件 namespace，不创建独立配置文件。
 - 验证 schema 默认值、非法枚举拒绝、只读 provider、写入失败和 revision 冲突；复用 DSH 原生错误语义，不重复测试其文件存储实现；查看设置和打开面板不会触发模型请求。

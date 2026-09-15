@@ -100,12 +100,12 @@ function cleanup(fixture) {
   rmSync(fixture.cwd, { recursive: true, force: true });
 }
 
-function adapterFor(fixture, { approvals, questions, attachments, agents = new Map(), sessions = new Map() } = {}) {
+function adapterFor(fixture, { approval, questions, attachments, agents = new Map(), sessions = new Map() } = {}) {
   return new CodexProviderAdapter({
     backend: fixture.backend,
     sessions: { get: id => sessions.get(id) },
     agents: { get: id => agents.get(id) },
-    approvals,
+    approval,
     questions,
     attachments,
     logger: { warn() {} },
@@ -527,8 +527,10 @@ test("isolates title and compaction requests from the user thread and cleans the
   await waitFor(() => fixture.hub.servers.some(server => server !== main && server.calls?.some(call => call.method === "thread/start")), "auxiliary thread");
   const aux = fixture.hub.servers.find(server => server !== main && server.calls?.some(call => call.method === "thread/start"));
   const threadStart = aux.calls.find(call => call.method === "thread/start");
-  assert.equal(threadStart.params.approvalPolicy, "never");
-  assert.equal(threadStart.params.sandbox, "read-only");
+  // Permissions belong to Codex on every path: the auxiliary request carries no
+  // approval policy and no sandbox of this plugin's choosing.
+  assert.equal("approvalPolicy" in threadStart.params, false, "the plugin does not author Codex's approval policy");
+  assert.equal("sandbox" in threadStart.params, false, "the plugin does not author Codex's sandbox");
   await waitFor(() => aux.calls.some(call => call.method === "turn/start"), "auxiliary turn/start");
   await waitFor(async () => (await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId && record.turnId === aux.turnId), "auxiliary turn identity");
   aux.notify("item/completed", { threadId: aux.threadId, turnId: aux.turnId, item: { type: "agentMessage", phase: "final_answer", text: "A title" } });
@@ -541,26 +543,25 @@ test("isolates title and compaction requests from the user thread and cleans the
   assert.equal((await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId), false);
 });
 
-test("leaves a native approval pending for the plugin's own pane instead of asking DSH", async t => {
+test("carries a native approval to the DSH answerer and applies its decision", async t => {
   const fixture = setup("dsh-provider-approval-");
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
   const agents = new Map([["s1", { id: "s1", session: sessions.get("s1") }]]);
-  const adapter = adapterFor(fixture, { sessions, agents, approvals: { interactive: true } });
+  const asked = [];
+  // The user answers in DSH's own approval surface; this seam is that surface.
+  const approval = { request: async request => { asked.push(request); return "allowed-once"; } };
+  const adapter = adapterFor(fixture, { sessions, agents, approval });
   const chunks = await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "run a command")]), async server => {
     server.ask(11, "item/commandExecution/requestApproval", { threadId: server.threadId, turnId: server.turnId, command: "ls -la", reason: null });
-    await waitFor(async () => (await fixture.backend.pendingApprovals(OWNER, "codex:s1")).length > 0, "pending native approval");
-    // Codex owns the approval decision: the plugin neither consults DSH's policy
-    // nor answers on Codex's behalf while a client can still decide.
-    assert.deepEqual(server.responded ?? [], []);
-    const [pending] = await fixture.backend.pendingApprovals(OWNER, "codex:s1");
-    assert.equal(pending.method, "item/commandExecution/requestApproval");
-    assert.equal(pending.params.command, "ls -la");
-    await fixture.backend.decideApproval(OWNER, pending.requestId, "accept");
     await waitFor(() => server.responded?.length > 0, "approval response");
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
+  assert.equal(asked.length, 1, "the DSH answerer is asked exactly once");
+  assert.equal(asked[0].agent.id, "s1", "the question is scoped to the Session whose turn asked");
+  assert.equal(asked[0].toolName, "item/commandExecution/requestApproval");
+  assert.equal(asked[0].reason, "ls -la", "the command is what the user decides on");
   assert.deepEqual(sessionServer(fixture.hub).responded, [{ id: 11, result: { decision: "accept" } }]);
   assert.equal(chunks.at(-1).reason.kind, "stop");
   assert.equal((await fixture.backend.pendingApprovals(OWNER, "codex:s1")).length, 0);
@@ -590,7 +591,8 @@ test("answers permissions requests with the pane's decision, turn-scoped", async
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
   const agents = new Map([["s1", { id: "s1", session: sessions.get("s1") }]]);
-  const adapter = adapterFor(fixture, { sessions, agents, approvals: { interactive: true } });
+  const outcomes = ["allowed-once", "rejected"];
+  const adapter = adapterFor(fixture, { sessions, agents, approval: { request: async () => outcomes.shift() } });
   await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "need network")]), async server => {
     server.ask(31, "item/permissions/requestApproval", {
       threadId: server.threadId, turnId: server.turnId, itemId: "p1", environmentId: null, startedAtMs: 1,
@@ -601,11 +603,6 @@ test("answers permissions requests with the pane's decision, turn-scoped", async
       threadId: server.threadId, turnId: server.turnId, itemId: "p2", environmentId: null, startedAtMs: 2,
       cwd: fixture.cwd, reason: "write access", permissions: { network: null, fileSystem: { read: [fixture.cwd], write: [fixture.cwd] } },
     });
-    await waitFor(async () => (await fixture.backend.pendingApprovals(OWNER, "codex:s1")).length === 2, "second permissions request");
-    assert.deepEqual(server.responded ?? [], [], "both requests wait for the pane");
-    const pending = await fixture.backend.pendingApprovals(OWNER, "codex:s1");
-    await fixture.backend.decideApproval(OWNER, pending[0].requestId, "accept");
-    await fixture.backend.decideApproval(OWNER, pending[1].requestId, "decline");
     await waitFor(() => server.responded?.length > 1, "both permissions answers");
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "checked" } });
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
@@ -621,25 +618,21 @@ test("leaves a native question for the pane and answers it with the real values"
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
   const agents = new Map([["s1", { id: "s1", session: sessions.get("s1") }]]);
-  const adapter = adapterFor(fixture, { sessions, agents, approvals: { interactive: true } });
+  const asked = [];
+  const questions = { ask: async request => { asked.push(request); return { answers: [{ id: "q1", selected: ["Yes"], custom: "note" }] }; } };
+  const adapter = adapterFor(fixture, { sessions, agents, questions });
   await liveTurn(adapter, fixture, "s1", options("s1", [user("u1", "ask me")]), async server => {
     server.ask(41, "item/tool/requestUserInput", {
       threadId: server.threadId, turnId: server.turnId, itemId: "i1", isBlocking: true, autoResolutionMs: null,
       questions: [{ id: "q1", header: "Pick", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }, { label: "No", description: "stop" }] }],
     });
-    await waitFor(async () => (await fixture.backend.pendingUserInputs(OWNER, "codex:s1")).length > 0, "pending question");
-    // Codex owns the interaction: nothing is invented or dropped while a client
-    // can still answer.
-    assert.deepEqual(server.responded ?? [], []);
-    const [pending] = await fixture.backend.pendingUserInputs(OWNER, "codex:s1");
-    assert.equal(pending.turnId, server.turnId);
-    assert.deepEqual(pending.questions.map(question => question.id), ["q1"]);
-    assert.deepEqual(pending.questions[0].options.map(option => option.label), ["Yes", "No"]);
-    await fixture.backend.answerUserInput(OWNER, pending.requestId, { q1: { answers: ["Yes", "note"] } });
     await waitFor(() => server.responded?.length > 0, "user-input answer");
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "answered" } });
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
+  assert.equal(asked.length, 1, "the DSH question seam is asked exactly once");
+  assert.deepEqual(asked[0].questions.map(question => question.id), ["q1"]);
+  assert.deepEqual(asked[0].questions[0].options.map(option => option.label), ["Yes", "No"]);
   assert.deepEqual(sessionServer(fixture.hub).responded, [
     { id: 41, result: { answers: { q1: { answers: ["Yes", "note"] } } } },
   ]);
@@ -678,7 +671,8 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   t.after(() => { cleanup(fixture); rmSync(childCwd, { recursive: true, force: true }); return fixture.backend.close(); });
   const sessions = new Map([["child-a", { header: { cwd: childCwd } }]]);
   const agents = new Map([["child-a", { id: "child-a", session: sessions.get("child-a") }]]);
-  const adapter = adapterFor(fixture, { sessions, agents, approvals: { interactive: true } });
+  let asked = 0;
+  const adapter = adapterFor(fixture, { sessions, agents, approval: { request: async () => { asked += 1; return "allowed-once"; } } });
 
   const child = collect(adapter.stream(options("child-a", [user("u1", "child work")])));
   await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "turn/start")), "child turn/start");
@@ -689,6 +683,7 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   childServer.notify("item/completed", { threadId: "native-child-thread", turnId: "native-child-turn",
     item: { id: "foreign-cmd", type: "commandExecution", command: "printf foreign", status: "completed", exitCode: 0, aggregatedOutput: "foreign" } });
   assert.deepEqual(childServer.rejected, [{ id: 99, message: "Unknown Session thread" }], "native child approvals are rejected fail-closed");
+  assert.equal(asked, 0, "another thread's request never reaches the user's approval surface");
   assert.deepEqual(await fixture.backend.readFacts(OWNER, "codex:child-a"), [],
     "another thread's executed item never becomes this Session's execution fact");
 
@@ -710,10 +705,9 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   assert.equal((await fixture.backend.pendingApprovals(caller, worker.id)).length, 0, "the legacy worker's approval was decided on its own record");
 
   childServer.ask(11, "item/commandExecution/requestApproval", { threadId: childServer.threadId, turnId: childServer.turnId, command: "ls" });
-  await waitFor(async () => (await fixture.backend.pendingApprovals(OWNER, "codex:child-a")).length > 0, "child approval");
-  const [childApproval] = await fixture.backend.pendingApprovals(OWNER, "codex:child-a");
-  await fixture.backend.decideApproval(OWNER, childApproval.requestId, "accept");
   await waitFor(() => childServer.responded?.length > 0, "child approval response");
+  assert.equal(asked, 1, "the Session's own request reaches the user's approval surface");
+  assert.deepEqual(childServer.responded, [{ id: 11, result: { decision: "accept" } }]);
   const childStream = [];
   fixture.backend.subscribe(OWNER, "codex:child-a", event => childStream.push(event.type));
   childServer.notify("item/completed", { threadId: childServer.threadId, turnId: childServer.turnId, item: { type: "agentMessage", phase: "final_answer", text: "child done" } });
@@ -1085,7 +1079,12 @@ test("abort cancels pending approvals, interrupts the turn, and settles interrup
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
   const agents = new Map([["s1", { id: "s1", session: sessions.get("s1") }]]);
-  const adapter = adapterFor(fixture, { sessions, agents, approvals: { interactive: true } });
+  // The user has not answered yet: the request stays open until the turn is
+  // cancelled, which is exactly the window the abort has to close.
+  const approval = { request: request => new Promise(resolve => {
+    request.signal?.addEventListener("abort", () => resolve("cancelled"), { once: true });
+  }) };
+  const adapter = adapterFor(fixture, { sessions, agents, approval });
   const controller = new AbortController();
   const done = collect(adapter.stream(options("s1", [user("u1", "run")], { signal: controller.signal })));
   await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "turn/start")), "turn/start");

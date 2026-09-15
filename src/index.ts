@@ -5,13 +5,12 @@ import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
-import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
+import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { agentCaller, assertAgentIdentity, captureAgentIdentity } from "./identity.js";
 import { executeWorkerAction, type WorkerAction } from "./worker-actions.js";
 import { installWorkerDelivery, type WorkerDelivery } from "./worker-delivery.js";
-import { installApprovalRpc, type ApprovalChannelState } from "./approval-rpc.js";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
   CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
@@ -61,12 +60,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       delivery?.close();
       await backend.close();
     };
-    const approvals: ApprovalChannelState = { interactive: false };
     provider = new CodexProviderAdapter({
       backend,
       sessions: ctx.sessions,
       agents: ctx.agents,
-      approvals,
+      // The user-facing halves of a native request are DSH's to ask. Codex keeps
+      // its own permission judgment; the plugin only carries the question.
+      approval: ctx.get("approval") as ProviderApprovalSeam | undefined,
       questions: ctx.get("userQuestions") as ProviderQuestionSeam | undefined,
       attachments: ctx.get("attachments") as ProviderAttachmentSeam | undefined,
       logger: ctx.logger,
@@ -109,9 +109,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     });
     unfilter = installCodexContextFilter(ctx);
-    // Codex approvals are answered on the plugin's own authenticated channel,
-    // never by DSH's approval policy.
-    ctx.inject(["connection", "webServer"], scope => installApprovalRpc(scope, backend, approvals));
     // Ordinary delegation is a tool surface, so it is registered only where a
     // tool registry exists; the provider itself stays usable without one.
     ctx.inject(["tools", "systemPrompt"], tools => {
