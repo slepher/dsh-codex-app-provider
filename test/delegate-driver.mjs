@@ -36,7 +36,7 @@ export function apply(ctx) {
     const result = { status: "FAIL", requests, failures };
     try {
       const marker = "DSH_ROLE_DELEGATE";
-      const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
+      const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna";
       const effort = "medium";
       // The synthetic layer keeps the shipped role name while pinning one model
       // configuration, so the assertions are about the delegation mechanism and

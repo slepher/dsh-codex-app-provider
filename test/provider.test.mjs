@@ -54,14 +54,14 @@ class FakeServer extends EventEmitter {
 
 const user = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
 const image = (id, text) => ({ id, role: "user", content: [{ type: "text", text }, { type: "image", attachment: { attachmentId: "a1", mediaType: "image/png", name: "x.png", bytes: 3, width: 1, height: 1 } }], source: { kind: "user" } });
-const system = text => ({ id: "sys", role: "system", content: [{ type: "text", text }], source: { kind: "plugin", plugin: "test" } });
+const system = text => ({ id: "sys", role: "system", content: [{ type: "text", text }], source: { kind: "system-prompt" } });
 const assistant = (id, text, provider = "other", replayState) => ({ id, role: "assistant", content: [{ type: "text", text }], source: { kind: "model", provider, model: "x", ...(replayState === undefined ? {} : { replayState }) } });
 const toolCall = (id, callId, name, args) => ({ id, role: "assistant", content: [{ type: "tool-call", id: callId, name, arguments: args }], source: { kind: "model", provider: "other", model: "x" } });
-const toolResult = (id, callId, text) => ({ id, role: "user", content: [{ type: "tool-result", toolCallId: callId, content: [{ type: "text", text }] }], source: { kind: "tool", callId } });
+const toolResult = (id, callId, text) => ({ id, role: "tool", content: [{ type: "text", text }], source: { kind: "tool", callId }, toolCallId: callId });
 /** A DSH compaction checkpoint: real history that replaced the range it shadows. */
-const checkpoint = (id, text, compactionId) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "plugin", plugin: "compact", compactionId } });
+const checkpoint = (id, text, compactionId) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "compact-checkpoint", compactionId } });
 /** A plugin notice DSH appended after the last native turn: never sent to Codex yet. */
-const notice = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: text } });
+const notice = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "dsh-codex-app-provider", form: "notice", summary: text } });
 
 /**
  * A DSH Session stand-in whose `append` is a real instance method.
@@ -177,6 +177,30 @@ test("advertises the Codex catalogue and exact model metadata without starting a
   await assert.rejects(collect(adapter.stream({ ...options("s1", [user("u1", "hi")]), provider: "other" })), /Unsupported provider route/);
 });
 
+test("advertises a new model generation and its extra effort tier unchanged", async t => {
+  const fixture = setup("dsh-provider-generation-");
+  t.after(() => { cleanup(fixture); return fixture.backend.close(); });
+  const adapter = adapterFor(fixture);
+  // A generation bump is catalogue data: the adapter maps whatever the App
+  // Server advertises, including an effort tier it has never seen before, and
+  // keeps an older tier's own smaller set intact.
+  fixture.hub.models = [
+    { model: "gpt-6-astra", displayName: "GPT-6-Astra", defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"].map(reasoningEffort => ({ reasoningEffort, description: "" })) },
+    { model: "gpt-6-luna", displayName: "GPT-6-Luna", defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"].map(reasoningEffort => ({ reasoningEffort, description: "" })) },
+  ];
+  const models = await adapter.listModels("codex");
+  assert.deepEqual(models.map(model => [model.id, model.name]),
+    [["gpt-6-astra", "GPT-6-Astra"], ["gpt-6-luna", "GPT-6-Luna"]], "the whole generation is listed as advertised");
+  const astra = await adapter.resolveModel("codex", "gpt-6-astra");
+  assert.deepEqual(astra.reasoning.efforts.map(effort => effort.id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.equal(astra.reasoning.defaultEffort, "medium");
+  const luna = await adapter.resolveModel("codex", "gpt-6-luna");
+  assert.deepEqual(luna.reasoning.efforts.map(effort => effort.id), ["low", "medium", "high", "xhigh", "max"],
+    "the cheaper tier of the same generation keeps its own effort set");
+});
+
 test("streams one native turn into text, usage, and replay state, then resumes the same thread", async t => {
   const fixture = setup("dsh-provider-stream-");
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
@@ -283,8 +307,8 @@ test("imports cross-provider and tool history once and fails closed on images wi
   assert.deepEqual((await imageAdapter.listModels("codex"))[0].inputModalities, ["text"], "no seam means no image advertisement");
   await assert.rejects(collect(imageAdapter.stream(options("s2", [image("u1", "look at this")]))), /cannot represent this image/);
   const toolImage = {
-    id: "u2", role: "user",
-    content: [{ type: "tool-result", toolCallId: "call_2", content: [{ type: "image", attachment: { attachmentId: "a2", mediaType: "image/png", name: "y.png", bytes: 3, width: 1, height: 1 } }] }],
+    id: "u2", role: "tool", toolCallId: "call_2",
+    content: [{ type: "image", attachment: { attachmentId: "a2", mediaType: "image/png", name: "y.png", bytes: 3, width: 1, height: 1 } }],
     source: { kind: "tool", callId: "call_2" },
   };
   await assert.rejects(collect(imageAdapter.stream(options("s2", [user("u1", "look"), toolImage]))), /cannot represent this image/);
@@ -323,8 +347,8 @@ test("imports durable history and tool-result images next to their text", async 
   const attachments = { imageHostPath: ref => `/attachments/${ref.attachmentId}.png` };
   const adapter = adapterFor(fixture, { sessions, attachments });
   const toolImage = {
-    id: "t1", role: "user",
-    content: [{ type: "tool-result", toolCallId: "call_1", content: [{ type: "text", text: "screenshot" }, { type: "image", attachment: { attachmentId: "a2", mediaType: "image/png", name: "y.png", bytes: 3, width: 1, height: 1 } }] }],
+    id: "t1", role: "tool", toolCallId: "call_1",
+    content: [{ type: "text", text: "screenshot" }, { type: "image", attachment: { attachmentId: "a2", mediaType: "image/png", name: "y.png", bytes: 3, width: 1, height: 1 } }],
     source: { kind: "tool", callId: "call_1" },
   };
   const history = [
@@ -405,18 +429,18 @@ test("drops DSH-injected context from imports while keeping checkpoints and reca
   const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
   const adapter = adapterFor(fixture, { sessions });
   const injected = [
-    { id: "sys", role: "system", content: [{ type: "text", text: "DSH_SYSTEM_PROMPT_MARK" }], source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt" } },
+    { id: "sys", role: "system", content: [{ type: "text", text: "DSH_SYSTEM_PROMPT_MARK" }], source: { kind: "system-prompt" } },
     { id: "ins", role: "user", content: [{ type: "text", text: "AGENTS_MARK" }], source: { kind: "agent-instructions", form: "instructions", changes: [] } },
     { id: "cat", role: "user", content: [{ type: "text", text: "CATALOG_MARK" }], source: { kind: "skill-catalog", form: "catalog", entries: [] } },
-    { id: "snap", role: "user", content: [{ type: "text", text: "SNAPSHOT_MARK" }], source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot", sections: [] } },
+    { id: "snap", role: "user", content: [{ type: "text", text: "SNAPSHOT_MARK" }], source: { kind: "runtime-context", form: "snapshot", sections: [] } },
     // Already executed natively, so the thread must never be handed it back.
     { id: "codex-executed:t0:turn0:i0", role: "user", content: [{ type: "text", text: "EXECUTED_FACT_MARK" }],
-      source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },
+      source: { kind: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },
   ];
   const history = [
     ...injected,
-    { id: "cp", role: "user", content: [{ type: "text", text: "CHECKPOINT_MARK" }], source: { kind: "plugin", plugin: "compact", compactionId: "c1" } },
-    { id: "recall", role: "user", content: [{ type: "text", text: "RECALL_MARK" }], source: { kind: "plugin", plugin: "dsh-session-reference", form: "recall" } },
+    { id: "cp", role: "user", content: [{ type: "text", text: "CHECKPOINT_MARK" }], source: { kind: "compact-checkpoint", compactionId: "c1" } },
+    { id: "recall", role: "user", content: [{ type: "text", text: "RECALL_MARK" }], source: { kind: "session-reference", form: "recall" } },
     { id: "skill", role: "user", content: [{ type: "text", text: "INVOKED_SKILL_MARK" }], source: { kind: "skill-invocation", name: "demo", form: "instructions" } },
     user("u0", "old question"), assistant("a0", "old answer", "deepseek"), user("u1", "continue"),
   ];
@@ -541,6 +565,27 @@ test("isolates title and compaction requests from the user thread and cleans the
   assert.equal(main.calls.filter(call => call.method === "turn/start").length, 1, "the auxiliary request must not start a main-thread turn");
   assert.ok((aux.closed ?? 0) >= 1, "the auxiliary Session is closed");
   assert.equal((await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId), false);
+});
+
+test("an identity-free one-shot input reaches Codex on an auxiliary request", async t => {
+  const fixture = setup("dsh-provider-aux-oneshot-");
+  t.after(() => { cleanup(fixture); return fixture.backend.close(); });
+  const sessions = new Map([["s1", { header: { cwd: fixture.cwd } }]]);
+  const adapter = adapterFor(fixture, { sessions });
+  // DSH sends the compaction summarizer's final instruction and Auto Review's
+  // outer prompt as user inputs carrying content but no identity and no source.
+  const oneShot = { role: "user", content: [{ type: "text", text: "ONE_SHOT_MARK" }] };
+  const done = collect(adapter.stream(options("s1", [user("u1", "first"), oneShot], { purpose: "session-title" })));
+  await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "turn/start")), "auxiliary turn/start");
+  const aux = fixture.hub.servers.find(server => server.calls?.some(call => call.method === "turn/start"));
+  const input = aux.calls.find(call => call.method === "turn/start").params.input;
+  const text = typeof input === "string" ? input : input.map(part => part.text ?? "").join("\n");
+  assert.match(text, /ONE_SHOT_MARK/, "the one-shot input is the auxiliary prompt, never dropped");
+  assert.match(text, /user: first/, "durable history beside it is still imported");
+  await waitFor(async () => (await fixture.backend.listSessions(OWNER)).some(record => record.threadId === aux.threadId && record.turnId === aux.turnId), "auxiliary turn identity");
+  aux.notify("item/completed", { threadId: aux.threadId, turnId: aux.turnId, item: { type: "agentMessage", phase: "final_answer", text: "A title" } });
+  aux.notify("turn/completed", { threadId: aux.threadId, turn: { id: aux.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
 });
 
 test("carries a native approval to the DSH answerer and applies its decision", async t => {
@@ -775,7 +820,7 @@ function appendImportedFact(session, threadId, itemId) {
   const message = {
     id: `codex-executed:${threadId}:turn-1:${itemId}`, role: "user",
     content: [{ type: "text", text: `[source: codex thread=${threadId} turn=turn-1 item=${itemId}] command: run-fake-command (exit 0)` }],
-    source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: run-fake-command" },
+    source: { kind: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: run-fake-command" },
   };
   session.append("user/message", message, { surfaceOp: "append" });
   return message;
@@ -1392,8 +1437,7 @@ test("executed native facts are persisted as plugin-sourced DSH messages with st
   assert.equal(fact.type, "user/message");
   assert.deepEqual(fact.intent, { surfaceOp: "append" }, "the append is a real surface placement, not an inbox injection");
   assert.equal(fact.data.role, "user");
-  assert.equal(fact.data.source.kind, "plugin");
-  assert.equal(fact.data.source.plugin, "dsh-codex-app-provider");
+  assert.equal(fact.data.source.kind, "dsh-codex-app-provider");
   assert.equal(fact.data.source.form, "notice");
   assert.ok(fact.data.source.summary.length <= 120);
   const threadId = fact.data.id.split(":")[1], turnId = fact.data.id.split(":")[2], itemId = fact.data.id.split(":")[3];
@@ -1590,7 +1634,7 @@ test("projects recorded native items from the provider store and appends them as
   assert.equal(type, "user/message");
   assert.deepEqual(intent, { surfaceOp: "append" });
   assert.deepEqual(message.content, [{ type: "text", text: expected.join("\n") }]);
-  assert.deepEqual(message.source, { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice",
+  assert.deepEqual(message.source, { kind: "dsh-codex-app-provider", form: "notice",
     summary: "Codex executed: " + expected[0] });
   await assert.rejects(adapter.facts("unknown-session"), /Session not found/, "an unknown Session is an error, never empty success");
   await assert.rejects(adapter.facts(""), /identity is required/);

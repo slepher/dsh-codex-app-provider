@@ -13,18 +13,21 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
   const dispose = installCodexContextFilter(ctx);
   const preStep = hooks.get("agent/pre-step");
   const injected = [
-    { id: "sys", role: "system", content: [{ type: "text", text: "DSH system prompt" }], source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt" } },
+    { id: "sys", role: "system", content: [{ type: "text", text: "DSH system prompt" }], source: { kind: "system-prompt" } },
     { id: "agents", role: "user", content: [{ type: "text", text: "AGENTS" }], source: { kind: "agent-instructions", form: "instructions", changes: [] } },
     { id: "catalog", role: "user", content: [{ type: "text", text: "catalog" }], source: { kind: "skill-catalog", form: "catalog", entries: [] } },
-    { id: "snapshot", role: "user", content: [{ type: "text", text: "snapshot" }], source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot", sections: [] } },
+    { id: "snapshot", role: "user", content: [{ type: "text", text: "snapshot" }], source: { kind: "runtime-context", form: "snapshot", sections: [] } },
+    // Tool declarations reach a route as developer messages; Codex owns its tools.
+    { id: "tools", role: "developer", content: [{ type: "tool-addition", tool: { name: "codex_workers" } }], source: { kind: "tool-registry" } },
     // An imported executed fact is shaped exactly like a worker notice, so only
     // its identity distinguishes native work the thread already performed.
-    { id: "codex-executed:t1:turn1:i1", role: "user", content: [{ type: "text", text: "executed" }], source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },
+    { id: "codex-executed:t1:turn1:i1", role: "user", content: [{ type: "text", text: "executed" }], source: { kind: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },
   ];
   const kept = [
     { id: "user", role: "user", content: [{ type: "text", text: "hello" }], source: { kind: "user" } },
-    { id: "notice", role: "user", content: [{ type: "text", text: "report" }], source: { kind: "plugin", plugin: "dsh-codex-kit-backend", form: "notice", summary: "1 report" } },
-    { id: "checkpoint", role: "user", content: [{ type: "text", text: "summary" }], source: { kind: "plugin", plugin: "compact", compactionId: "c1" } },
+    // A producer that declared no kind of its own keeps the migrated spelling.
+    { id: "notice", role: "user", content: [{ type: "text", text: "report" }], source: { kind: "plugin:dsh-codex-kit-backend", form: "notice", summary: "1 report" } },
+    { id: "checkpoint", role: "user", content: [{ type: "text", text: "summary" }], source: { kind: "compact-checkpoint", compactionId: "c1" } },
     { id: "invoked-skill", role: "user", content: [{ type: "text", text: "skill body" }], source: { kind: "skill-invocation", name: "demo", form: "instructions" } },
   ];
   const codex = { id: "codex", options: { provider: "codex" }, session: { id: "s1" } };
@@ -33,7 +36,7 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
 
   const other = { id: "other", options: { provider: "deepseek" }, session: { id: "s2" } };
   const untouched = await preStep({ agent: other, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [...injected, ...kept] }));
-  assert.equal(untouched.messages.length, 9, "other providers keep their injected context");
+  assert.equal(untouched.messages.length, 10, "other providers keep their injected context");
   const sameArray = untouched.messages;
 
   projections.stateOf = () => ({ lastUsed: null, pending: { provider: "codex", model: "x" } });

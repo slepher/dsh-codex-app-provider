@@ -59,7 +59,7 @@ await writeFile(join(profile, "package.json"), JSON.stringify({
   overrides: pins,
   dsh: { profile: { bundles: ["@deepseek-ai/dsh-base", browser ? "@deepseek-ai/dsh-web-app" : "@deepseek-ai/dsh-headless", "dsh-codex-app-provider", ...(workflowChild ? ["dsh-workflow-kit"] : [])], patchReload: "startup" } },
 }, null, 2));
-const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
+const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna";
 const fakeServer = join(root, "test/fake-codex-app-server.mjs");
 await writeFile(join(profile, "cordis.patch.yml"), `- id: agent-default-model\n  config:\n    provider: codex\n    model: ${JSON.stringify(model)}\n- id: dsh-codex-app-provider\n  config:\n    stateDir: ${JSON.stringify(join(dir, "state"))}\n    providerCwd: ${JSON.stringify(workspace)}\n${fake ? `    command: ${JSON.stringify(fakeServer)}\n` : ""}`);
 // The managed role protocols are plain files in the installed `codex-workflow`
@@ -91,7 +91,7 @@ if (workflowHandoff) {
     }
   }
   const roles = cross
-    ? `        planner: { provider: codex, model: gpt-6-astra, reasoningEffort: high }\n        reviewer: { provider: codex, model: gpt-5.6-sol, reasoningEffort: high }\n        context_collector: { provider: codex, model: gpt-5.6-luna, reasoningEffort: high }\n        def_coding_worker: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: high }\n        sup_coding_worker: { provider: codex, model: gpt-5.6-sol, reasoningEffort: medium }\n        evidence_runner: { provider: codex, model: gpt-5.6-luna, reasoningEffort: medium }\n        full_tester: { provider: codex, model: gpt-5.6-luna, reasoningEffort: medium }\n`
+    ? `        planner: { provider: codex, model: gpt-6-astra, reasoningEffort: high }\n        reviewer: { provider: codex, model: gpt-6-sol, reasoningEffort: high }\n        context_collector: { provider: codex, model: gpt-6-luna, reasoningEffort: high }\n        def_coding_worker: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: high }\n        sup_coding_worker: { provider: codex, model: gpt-6-sol, reasoningEffort: medium }\n        evidence_runner: { provider: codex, model: gpt-6-luna, reasoningEffort: medium }\n        full_tester: { provider: codex, model: gpt-6-luna, reasoningEffort: medium }\n`
     : "";
   await writeFile(join(home, "settings.yaml"), cross
     ? `dsh-workflow-kit:\n  defaultConfig: handoff\n  codingStrategy: bootstrap\n  integrateStrategy: economy\n  configs:\n    handoff:\n      roles:\n${roles}`

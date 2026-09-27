@@ -25,8 +25,7 @@ test("a fact message is plugin-sourced, bounded, and carries no tool-call identi
   assert.equal(message.id, "codex-executed:t1:turn1:i1");
   assert.equal(message.role, "user");
   assert.deepEqual(message.content.map(block => block.type), ["text"]);
-  assert.equal(message.source.kind, "plugin");
-  assert.equal(message.source.plugin, "dsh-codex-app-provider");
+  assert.equal(message.source.kind, "dsh-codex-app-provider");
   assert.equal(message.source.form, "notice");
   assert.ok(message.source.summary.length <= 120, "the collapsed account respects the core bound");
   assert.doesNotMatch(message.source.summary, /\n/, "the account is one line");

@@ -51,7 +51,7 @@ export function apply(ctx) {
       const created = await ctx.subagents.startContinuable({
         provider: "spawn", label: `native role ${role}`,
         request: { parent, prompt: [{ type: "text", text: "Reply with your role marker." }], agentOptions: {
-          provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna", reasoningEffort: ReasoningEffortId("medium"), execution: dispatched,
+          provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna", reasoningEffort: ReasoningEffortId("medium"), execution: dispatched,
         } }, signal,
       });
       children.push({ role, id: created.childId, execution: structuredClone(dispatched) });

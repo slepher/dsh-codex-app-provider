@@ -52,7 +52,7 @@ export function apply(ctx) {
       boundary: { cwd: lane, writableRoots: [lane], network: "disabled" } };
     const created = await ctx.subagents.startContinuable({ provider: "spawn", label: "clean rc1 child",
       request: { parent, prompt: [{ type: "text", text: "Reply with your role marker." }], agentOptions: {
-        provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna", reasoningEffort: ReasoningEffortId("medium"), execution } }, signal });
+        provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna", reasoningEffort: ReasoningEffortId("medium"), execution } }, signal });
     const childId = created.childId;
     const deadline = Date.now() + 240_000;
     while (ctx.agents.get(childId) !== undefined) {

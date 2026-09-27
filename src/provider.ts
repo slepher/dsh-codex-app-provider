@@ -16,6 +16,7 @@ import {
   type LlmResolvedModelInfo,
   type Message,
   type ReplayEnvelope,
+  type RequestMessage,
   type StreamChunk,
   type TokenUsage,
 } from "@deepseek-ai/dsh-llm";
@@ -560,7 +561,7 @@ export class CodexProviderAdapter extends LlmAdapter {
     // an imported one. Its first request must resume that exact thread.
     const prepared = record !== undefined && record.turnId === undefined && record.threadId !== undefined && record.state === "idle";
     const successor = prepared ? await this.bindPreparedThread(record!, options) : false;
-    const plan = await planInput(options.messages, record?.threadId, this.cursors.get(sessionId), this.imageResolver,
+    const plan = await planInput(durableMessages(options.messages), record?.threadId, this.cursors.get(sessionId), this.imageResolver,
       this.deps.sessions.get(sessionId)?.snapshotEvents?.());
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
@@ -668,7 +669,11 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (signal.aborted) throw new LlmError("Codex auxiliary call aborted before start", "ABORTED");
     const cwd = this.sessionCwd(sessionId) ?? this.deps.providerCwd;
     const owner = OWNER_ID, backendId = `${AUXILIARY_PREFIX}${randomUUID()}`, backend = this.deps.backend;
-    const input = await importedInput(options.messages.filter(message => message.role !== "system"), toolCallNames(options.messages), ref => this.imageResolver(ref, "content"));
+    // Tool-call names are read from durable messages only: an identity-free
+    // one-shot input carries no tool history, and the auxiliary path is exactly
+    // where DSH sends those.
+    const input = await importedInput(options.messages.filter(message => message.role !== "system"),
+      toolCallNames(options.messages.filter(isDurableMessage)), ref => this.imageResolver(ref, "content"));
     const channel = new EventChannel(signal);
     let off: (() => void) | undefined;
     try {
@@ -1000,7 +1005,7 @@ async function planInput(
   const isUserInput = current.role === "user" && current.source.kind !== "tool";
   if (!isUserInput) return { input: await importedInput(segment, names, ref => image(ref, "history")), key };
   const history = segment.slice(0, -1);
-  const currentParts = await renderBlocks(current.content, names, ref => image(ref, "content"));
+  const currentParts = await renderBlocks(current.content, ref => image(ref, "content"));
   if (history.length === 0) return { input: represent(currentParts), key };
   const imported = await importedInput(history, names, ref => image(ref, "history"));
   if (imported === "") return { input: represent(currentParts), key };
@@ -1044,9 +1049,10 @@ function nativeHistoryCursor(
     }
     const message = eventMessage(event);
     if (message === undefined) continue;
-    const source = message.source as { kind: string; plugin?: string; compactionId?: string };
-    const shadowed = source.kind === "plugin" && source.plugin === "compact" && source.compactionId !== undefined
-      ? summaries.get(source.compactionId) : undefined;
+    const source = message.source as { compactionId?: unknown };
+    // A checkpoint source carries the compaction it belongs to; the kind that
+    // used to spell this as `plugin: 'compact'` is now `compact-checkpoint`.
+    const shadowed = typeof source.compactionId === "string" ? summaries.get(source.compactionId) : undefined;
     if (index <= last || shadowed !== undefined && shadowed.length > 0 && shadowed.every(seq => covered.has(seq))) {
       known.add(String(message.id));
       if (event.seq !== undefined) covered.add(event.seq);
@@ -1066,18 +1072,44 @@ function eventMessage(event: { type: string; data: unknown }): Message | undefin
 }
 
 /**
+ * One durable Session message.
+ *
+ * A request either carries persisted messages — every one of which has an
+ * identity and a producer source — or identity-free one-shot user inputs, which
+ * Session never writes and this provider serves only through the auxiliary path.
+ */
+function isDurableMessage(message: RequestMessage): message is Message {
+  return (message as { id?: unknown }).id !== undefined;
+}
+
+/**
+ * The durable Session messages of one ordinary request.
+ *
+ * Boundary detection, the retry cursor and the Codex idempotency key are all
+ * message identities, so an ordinary request cannot be served from identity-free
+ * one-shot inputs; DSH sends those only for the auxiliary purposes this provider
+ * routes through `streamAuxiliary`.
+ */
+function durableMessages(messages: readonly RequestMessage[]): readonly Message[] {
+  if (messages.some(message => !isDurableMessage(message))) {
+    throw new LlmError("Codex provider requires durable Session messages for an ordinary request", "INVALID_REQUEST");
+  }
+  return messages.filter(isDurableMessage);
+}
+
+/**
  * Render one DSH history segment as a single deterministic text import, or as
  * interleaved text/image inputs when the segment carries durable images.
  */
 async function importedInput(
-  messages: readonly Message[],
+  messages: readonly RequestMessage[],
   names: Map<string, string>,
   image: (ref: ProviderImageRef) => Promise<TurnInput>,
 ): Promise<string | TurnInput[]> {
   const entries: { label: string; parts: TurnInput[] }[] = [];
   for (const message of messages) {
-    if (isInjectedContext(message)) continue;
-    const parts = await renderBlocks(message.content, names, image);
+    if (isDurableMessage(message) && isInjectedContext(message)) continue;
+    const parts = toolResultAccount(message, await renderBlocks(message.content, image));
     const hasImage = parts.some(part => part.type !== "text");
     if (parts.length === 0 || (!hasImage && textOf(parts).trim() === "")) continue;
     entries.push({ label: messageLabel(message, names), parts });
@@ -1135,15 +1167,34 @@ function textOf(parts: readonly TurnInput[]): string {
   return values.join("\n");
 }
 
-function messageLabel(message: Message, names: Map<string, string>): string {
-  if (message.source.kind !== "tool") return message.source.kind === "plugin" ? "context" : message.role;
-  const name = names.get(String(message.source.callId));
-  return `tool${name === undefined ? "" : `(${name})`}`;
+function messageLabel(message: RequestMessage, names: Map<string, string>): string {
+  if (!isDurableMessage(message)) return message.role;
+  if (message.source.kind === "tool") {
+    const name = names.get(String(message.source.callId));
+    return `tool${name === undefined ? "" : `(${name})`}`;
+  }
+  // A user-role message from any producer other than the human is context DSH
+  // injected; the human's own input is the only `user`-sourced user message.
+  return message.role === "user" && message.source.kind !== "user" ? "context" : message.role;
+}
+
+/**
+ * Prefix a tool-role message with the account its result block used to render.
+ *
+ * DSH moved tool results out of content into first-class tool-role messages, so
+ * the account that used to come from the block now comes from the message.
+ * @param message - the message whose content was just rendered.
+ * @param parts - the rendered content parts, text and images in order.
+ * @returns the parts with the result account ahead of its images.
+ */
+function toolResultAccount(message: RequestMessage, parts: readonly TurnInput[]): TurnInput[] {
+  if (!isDurableMessage(message) || message.role !== "tool") return [...parts];
+  const account = `[tool result${message.isError === true ? " error" : ""}]`;
+  return [{ type: "text", text: `${account} ${textOf(parts)}` }, ...parts.filter(part => part.type !== "text")];
 }
 
 async function renderBlocks(
   blocks: readonly ContentBlock[],
-  names: Map<string, string>,
   image: (ref: ProviderImageRef) => Promise<TurnInput>,
 ): Promise<TurnInput[]> {
   const parts: TurnInput[] = [];
@@ -1154,12 +1205,6 @@ async function renderBlocks(
       case "image": parts.push(await image(block.attachment)); break;
       case "file": parts.push({ type: "text", text: `[file: ${block.attachment.name} (${block.attachment.bytes} bytes)]` }); break;
       case "tool-call": parts.push({ type: "text", text: `[tool call ${block.name} ${block.arguments}]` }); break;
-      case "tool-result": {
-        const nested = await renderBlocks(block.content, names, image);
-        parts.push({ type: "text", text: `[tool result${block.isError ? " error" : ""}] ${textOf(nested)}` });
-        parts.push(...nested.filter(part => part.type !== "text"));
-        break;
-      }
       default: parts.push({ type: "text", text: `[unsupported block: ${(block as { type: string }).type}]` });
     }
   }

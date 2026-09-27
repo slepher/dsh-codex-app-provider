@@ -149,7 +149,7 @@ test("append runs a worker turn and its report arrives as pending, then accept a
 
   // The idle parent is woken with the same notice the step path would deliver.
   const notice = await waitFor(() => followed.find(message => JSON.stringify(message).includes(created.id)), "the parent notice");
-  assert.equal(notice.source.plugin, "dsh-codex-app-provider", "the notice is plugin-sourced, never a human prompt");
+  assert.equal(notice.source.kind, "dsh-codex-app-provider", "the notice is plugin-sourced, never a human prompt");
   assert.equal(notice.source.form, "notice");
   assert.match(notice.content[0].text, /accept, request changes, or acknowledge/);
 
@@ -249,7 +249,7 @@ test("report notices are claimed once per parent and never fabricated as a decis
   const decision = await handler({ agent, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [] }));
   assert.equal(decision.messages.length, 1, "the pending report is offered at the step boundary");
   const notice = decision.messages[0];
-  assert.equal(notice.source.kind, "plugin");
+  assert.equal(notice.source.kind, "dsh-codex-app-provider");
   assert.equal(notice.source.form, "notice");
   assert.match(notice.content[0].text, /accept, request changes, or acknowledge/);
   assert.match(notice.content[0].text, /Do not repeat work/);

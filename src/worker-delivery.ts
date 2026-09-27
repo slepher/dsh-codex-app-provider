@@ -15,6 +15,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 import type { CodexBackend, Report, WorkerProjection } from "./browser-types.js";
+import { FACT_PLUGIN } from "./facts.js";
 import { agentCaller, assertAgentIdentity, captureAgentIdentity, type HostAgentIdentity } from "./identity.js";
 
 /** A placement whose ownership is unknown, reported as a notice rather than a result. */
@@ -106,7 +107,9 @@ export function installWorkerDelivery(ctx: Context, backend: CodexBackend): Work
     consumers.delete(backend);
   };
   try {
-    hooks.push(ctx.on("agent/created", ({ agent }) => start(agent)));
+    // `agent/created` declares an undefined result, so the handler reports the
+    // start as a statement and returns nothing rather than forwarding `void`.
+    hooks.push(ctx.on("agent/created", ({ agent }) => { start(agent); return undefined; }));
     hooks.push(ctx.on("agent/disposed", ({ agent }) => release(agent)));
     hooks.push(ctx.on("session/disposed", session => { for (const agent of parents.keys()) if (agent.session === session) release(agent); }));
     hooks.push(ctx.on("agent/status", ({ agent, status }) => { if (status === "idle") start(agent); }));
@@ -176,6 +179,6 @@ function notice(reports: readonly (Report | UnknownReport)[]) {
         + "Do not repeat work merely because a notice is repeated.\n"
         + reports.map(report => JSON.stringify(report)).join("\n"),
     }],
-    source: { kind: "plugin", plugin: "dsh-codex-app-provider", form: "notice", summary: `${reports.length} Codex report(s) ready` },
+    source: { kind: FACT_PLUGIN, form: "notice", summary: `${reports.length} Codex report(s) ready` },
   });
 }

@@ -14,11 +14,34 @@
  * @module dsh-codex-app-provider/facts
  */
 
-import { MessageId, boundContextSummary, freezeMessage, type UserMessage } from "@deepseek-ai/dsh-llm";
+import {
+  MessageId,
+  boundContextSummary,
+  freezeMessage,
+  type ContextFormed,
+  type UserMessage,
+} from "@deepseek-ai/dsh-llm";
 
 import type { CodexExecutionFactLine } from "./execution-events.js";
 
-/** Plugin identity recorded as the source of every imported execution fact. */
+declare module "@deepseek-ai/dsh-llm" {
+  interface MessageSourceMap {
+    /** Executed-fact records and worker-report notices this plugin commits. */
+    "dsh-codex-app-provider": {
+      kind: "dsh-codex-app-provider";
+    } & ContextFormed;
+  }
+}
+
+/**
+ * Plugin identity, recorded as the source kind of every message this plugin
+ * commits.
+ *
+ * The literal is also the declared key of the {@link MessageSourceMap} entry
+ * above; both must change together. DSH no longer admits the released
+ * `{ kind: 'plugin', plugin }` wrapper, which the V3-to-V4 migration rewrites
+ * to `plugin:dsh-codex-app-provider` for rows this plugin already wrote.
+ */
 export const FACT_PLUGIN = "dsh-codex-app-provider";
 /** Prefix that makes an imported fact message recognizable in the session log. */
 const FACT_ID_PREFIX = "codex-executed:";
@@ -85,8 +108,7 @@ export function factMessage(fact: CodexFactMessage): UserMessage {
     role: "user",
     content: [{ type: "text", text: fact.text }],
     source: {
-      kind: "plugin",
-      plugin: FACT_PLUGIN,
+      kind: FACT_PLUGIN,
       form: "notice",
       summary: boundContextSummary(`Codex executed: ${firstLine(fact.text)}`),
     },

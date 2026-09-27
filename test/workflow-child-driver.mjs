@@ -35,7 +35,7 @@ export function apply(ctx) {
         await setTimeout(20, undefined, { signal });
       }
     };
-    const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna";
+    const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna";
     const efforts = { A: "medium", B: "high" };
     let marker = "DSH_ROLE_A";
     // The shipped layer is synthetic: one reviewer role per profile, and a

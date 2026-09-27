@@ -56,7 +56,7 @@ export function apply(ctx) {
     const { agent } = await ctx.agents.create({
       sessionId: `session-compact-${Date.now()}`,
       meta: { cwd: process.cwd() },
-      agentOptions: { provider: "codex", model: selection?.model ?? process.env.DSH_CODEX_TEST_MODEL ?? "gpt-5.6-luna" },
+      agentOptions: { provider: "codex", model: selection?.model ?? process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna" },
     });
     const sessionId = String(agent.session.id);
     const ask = async text => {
