@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { SessionStore } from "../lib/store.js";
+import { SessionStore, processStartTime } from "../lib/store.js";
 
 test("persists ownership and recovers an uncertain run as unknown", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-store-"));
@@ -150,6 +150,30 @@ test("rejects partial or owner-mismatched worker blocks", () => {
     assert.throws(() => new SessionStore(stateDir), /Invalid Session worker/);
     rmSync(stateDir, { recursive: true });
   }
+});
+
+test("a lock is read by process identity, not by a recycled pid number", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-lock-identity-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const lock = join(stateDir, "owner.lock");
+  const claim = owner => {
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, "owner.json"), JSON.stringify(owner));
+  };
+  const start = processStartTime(process.pid);
+  const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  assert.notEqual(start, undefined, "this process has a start time to identify it by");
+
+  // The process named by the lock is running and is still the process that wrote it.
+  claim({ pid: process.pid, start, boot });
+  assert.throws(() => new SessionStore(stateDir), /already owned by pid/);
+  rmSync(lock, { recursive: true, force: true });
+
+  // A later process under the same pid number is not the owner, so the lock is reclaimed.
+  claim({ pid: process.pid, start: start - 1, boot });
+  const reclaimed = new SessionStore(stateDir);
+  reclaimed.close();
+  assert.equal(existsSync(lock), false, "the recycled-pid lock is reclaimed and released on close");
 });
 
 test("a lock left by a process that died is reclaimed, a live owner's is not", async t => {

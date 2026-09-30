@@ -4,6 +4,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -176,7 +177,8 @@ export class SessionStore {
 
   close(): void {
     try {
-      if (readFileSync(resolve(this.lock, "pid"), "utf8") === String(process.pid)) rmSync(this.lock, { recursive: true });
+      const read = readLockOwner(this.lock);
+      if (read.state === "live" && read.owner.pid === process.pid) rmSync(this.lock, { recursive: true });
     } catch {}
   }
 
@@ -184,10 +186,17 @@ export class SessionStore {
     try {
       mkdirSync(this.lock);
     } catch {
-      const pid = Number(readFileSync(resolve(this.lock, "pid"), "utf8"));
-      if (!Number.isSafeInteger(pid) || pid <= 0 || processIsAlive(pid)) {
-        throw new Error(`stateDir is already owned by pid ${pid || "unknown"}`);
+      const read = readLockOwner(this.lock);
+      // A live owner is authoritative: two backends must never share a store.
+      if (read.state === "live") {
+        throw new Error(`stateDir is already owned by pid ${read.owner.pid} (${this.lock})`);
       }
+      // A lock that cannot be read back is left for a human: the provider never
+      // guesses its way past an owner it cannot identify.
+      if (read.state === "unknown") {
+        throw new Error(`stateDir is already owned by an unreadable lock (${this.lock})`);
+      }
+      // The claim directory keeps two reclaimers from tearing down the same lock.
       const reclaim = `${this.lock}.reclaim`;
       mkdirSync(reclaim);
       try {
@@ -197,8 +206,91 @@ export class SessionStore {
         rmSync(reclaim, { recursive: true });
       }
     }
-    writeFileSync(resolve(this.lock, "pid"), String(process.pid), { mode: 0o600 });
+    writeOwner(this.lock);
   }
+}
+
+/**
+ * The process a lock directory names, as far as it can be read back.
+ *
+ * `pid` alone is what an owner wrote before locks carried an identity. `start` is
+ * the process start time in clock ticks since boot and `boot` is the boot's own
+ * identity: no later process can reuse that pair, so the two tell a live owner
+ * apart from a stale lock whose pid number the OS has since recycled.
+ */
+interface LockOwner {
+  pid: number;
+  start?: number;
+  boot?: string;
+}
+
+type LockRead =
+  | { state: "live"; owner: LockOwner }
+  | { state: "stale"; owner: LockOwner }
+  | { state: "unknown" };
+
+function readLockOwner(lock: string): LockRead {
+  let text: string;
+  try {
+    text = readFileSync(resolve(lock, "owner.json"), "utf8");
+  } catch {
+    try {
+      text = readFileSync(resolve(lock, "pid"), "utf8");
+    } catch {
+      return { state: "unknown" };
+    }
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return classifyPid(text);
+  }
+  // A bare number is a legacy pid-only lock file, not an owner document.
+  if (typeof parsed === "number") return classifyPid(parsed);
+  if (typeof parsed !== "object" || parsed === null) return { state: "unknown" };
+  const { pid, start, boot } = parsed as Record<string, unknown>;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return { state: "unknown" };
+  return classifyOwner({
+    pid,
+    start: typeof start === "number" && Number.isSafeInteger(start) && start >= 0 ? start : undefined,
+    boot: typeof boot === "string" && boot.length > 0 ? boot : undefined,
+  });
+}
+
+/** A lock file that names its owner by pid alone, as older versions wrote it. */
+function classifyPid(text: string | number): LockRead {
+  const pid = typeof text === "number" ? text : Number(text);
+  return Number.isSafeInteger(pid) && pid > 0 ? classifyOwner({ pid }) : { state: "unknown" };
+}
+
+/**
+ * Whether the process named by a readable lock is still the one that claimed it.
+ *
+ * An owner that left no identity can never be told apart from a recycled pid, so
+ * it keeps the directory for as long as some process holds its pid number.
+ */
+function classifyOwner(owner: LockOwner): LockRead {
+  if (!processIsAlive(owner.pid)) return { state: "stale", owner: { pid: owner.pid } };
+  if (owner.start === undefined || owner.boot === undefined) return { state: "live", owner };
+  const current = processIdentity(owner.pid);
+  return current !== undefined && owner.start === current.start && owner.boot === current.boot
+    ? { state: "live", owner }
+    : { state: "stale", owner: { pid: owner.pid } };
+}
+
+function processIdentity(pid: number): { start: number; boot: string } | undefined {
+  const start = processStartTime(pid);
+  const boot = bootIdentity();
+  return start === undefined || boot === undefined ? undefined : { start, boot };
+}
+
+function writeOwner(lock: string): void {
+  const owner: LockOwner = { pid: process.pid, ...processIdentity(process.pid) };
+  writeFileSync(resolve(lock, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+  try {
+    unlinkSync(resolve(lock, "pid"));
+  } catch {}
 }
 
 function processIsAlive(pid: number): boolean {
@@ -207,6 +299,32 @@ function processIsAlive(pid: number): boolean {
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** One boot's identity, so a pid from an earlier boot is never mistaken for its successor. */
+function bootIdentity(): string | undefined {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A process's start time in clock ticks since boot.
+ *
+ * Field 3 of `/proc/<pid>/stat` is the command, and it may itself contain spaces
+ * or parentheses, so the fields after it are read from behind the last `)`.
+ */
+export function processStartTime(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const start = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+    const ticks = Number(start);
+    return Number.isSafeInteger(ticks) && ticks >= 0 ? ticks : undefined;
+  } catch {
+    return undefined;
   }
 }
 
