@@ -1,6 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+
+/**
+ * The version this plugin reports to the App Server.
+ *
+ * Read from the manifest rather than written down twice: the package version is
+ * the one source of truth, and a stale literal here would misreport the client
+ * to the backend after every bump. `lib/rpc.js` and `src/rpc.ts` are both one
+ * directory below the manifest.
+ */
+const PLUGIN_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export class RpcError extends Error {
   constructor(message: string, readonly code?: number, readonly data?: unknown) {
@@ -85,7 +96,7 @@ export class AppServer extends EventEmitter {
       this.disconnect(new UncertainError(`App server exited (${code ?? signal})${reason === "" ? "" : `: ${reason}`}; execution state unknown`));
     });
     await this.request("initialize", {
-      clientInfo: { name: "dsh-codex-app-provider", version: "0.1.0" },
+      clientInfo: { name: "dsh-codex-app-provider", version: PLUGIN_VERSION },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: "initialized" });

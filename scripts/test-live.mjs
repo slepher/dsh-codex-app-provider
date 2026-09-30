@@ -59,7 +59,8 @@ await mkdir(profile, { recursive: true }); await mkdir(workspace);
 const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const version = manifest.version;
 const tarball = resolve(root, process.env.DSH_PROVIDER_TEST_TARBALL ?? `dsh-codex-app-provider-${version}.tgz`);
-const workflowTarball = resolve(root, process.env.DSH_WORKFLOW_TEST_TARBALL ?? "../dsh-workflow-kit/dsh-workflow-kit-0.1.0.tgz");
+const workflowTarball = resolve(root, process.env.DSH_WORKFLOW_TEST_TARBALL
+  ?? `../dsh-workflow-kit/dsh-workflow-kit-${JSON.parse(await readFile(join(root, "../dsh-workflow-kit/package.json"), "utf8")).version}.tgz`);
 // The composed app is the official DSH release, and the generation is the one
 // this plugin declares for itself: the isolated profile installs that CLI and
 // lets npm resolve the rest of the family from the plugin's own peer ranges,
