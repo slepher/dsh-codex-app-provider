@@ -36,27 +36,43 @@ const run = (command, args, cwd, env, log) => new Promise((resolveRun, reject) =
   });
 });
 
+/**
+ * The DSH generation this package declares for itself, read from the one place
+ * that already has to name it: its exact `devDependencies` pin.
+ * @param manifest - this package's manifest.
+ * @returns the exact generation.
+ * @throws when the dsh entries disagree or are not exact versions.
+ */
+function dshGeneration(manifest) {
+  const versions = new Set(Object.entries(manifest.devDependencies ?? {})
+    .filter(([name]) => name.startsWith("@deepseek-ai/dsh-"))
+    .map(([, spec]) => spec));
+  if (versions.size !== 1 || ![...versions].every(spec => /^\d+\.\d+\.\d+/.test(spec))) {
+    throw new Error(`devDependencies must pin one exact DSH generation, got: ${[...versions].join(", ") || "none"}`);
+  }
+  return [...versions][0];
+}
+
 const dir = await mkdtemp(join(tmpdir(), "dsh-app-live-"));
 const home = join(dir, "home"), profile = join(home, "profiles", "codex-app-test"), workspace = join(dir, "workspace");
 await mkdir(profile, { recursive: true }); await mkdir(workspace);
-const version = JSON.parse(await readFile(join(root, "package.json"), "utf8")).version;
+const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+const version = manifest.version;
 const tarball = resolve(root, process.env.DSH_PROVIDER_TEST_TARBALL ?? `dsh-codex-app-provider-${version}.tgz`);
 const workflowTarball = resolve(root, process.env.DSH_WORKFLOW_TEST_TARBALL ?? "../dsh-workflow-kit/dsh-workflow-kit-0.1.0.tgz");
-// The composed app is the official DSH release. `scripts/dsh-coordinated.json`
-// describes a locally modified core ("0.1.5-rc.1 with local changes; not
-// registry rc.1"), so its tarballs are applied only when a run explicitly asks
-// for that environment: a default run must prove the plugins work on the
-// unmodified core.
-const pins = JSON.parse(await readFile(join(root, "scripts/dsh-baseline.json"), "utf8"));
-const coordinated = process.env.DSH_LIVE_COORDINATED === "1"
-  ? JSON.parse(await readFile(join(root, "scripts/dsh-coordinated.json"), "utf8"))
-  : undefined;
-if (workflowChild) pins["dsh-codex-app-provider"] = `file:${tarball}`;
-for (const [name, path] of Object.entries(coordinated?.packages ?? {})) pins[name] = `file:${resolve(root, path)}`;
+// The composed app is the official DSH release, and the generation is the one
+// this plugin declares for itself: the isolated profile installs that CLI and
+// lets npm resolve the rest of the family from the plugin's own peer ranges,
+// exactly as a real profile does. No version snapshot is written down here.
+const generation = dshGeneration(manifest);
+// The only pin left is the sibling plugin's own tarball, so a workflow child
+// resolves `dsh-codex-app-provider` to the build under test.
+const overrides = {};
+if (workflowChild) overrides["dsh-codex-app-provider"] = `file:${tarball}`;
 await writeFile(join(profile, "package.json"), JSON.stringify({
   name: "codex-app-isolated-test", private: true, type: "module",
-  dependencies: { "@deepseek-ai/dsh": "0.1.5-rc.1", "dsh-codex-app-provider": `file:${tarball}`, ...(workflowChild ? { "dsh-workflow-kit": `file:${workflowTarball}` } : {}) },
-  overrides: pins,
+  dependencies: { "@deepseek-ai/dsh": generation, "dsh-codex-app-provider": `file:${tarball}`, ...(workflowChild ? { "dsh-workflow-kit": `file:${workflowTarball}` } : {}) },
+  ...(Object.keys(overrides).length === 0 ? {} : { overrides }),
   dsh: { profile: { bundles: ["@deepseek-ai/dsh-base", browser ? "@deepseek-ai/dsh-web-app" : "@deepseek-ai/dsh-headless", "dsh-codex-app-provider", ...(workflowChild ? ["dsh-workflow-kit"] : [])], patchReload: "startup" } },
 }, null, 2));
 const model = process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna";
@@ -115,8 +131,7 @@ if (nativeChild) {
 }
 const env = { ...process.env, DSH_EXTERNAL_EVENTS_TEST: externalEvents ? "1" : "0", DSH_HOME: home, DSH_NATIVE_CHILD_RESULT: join(dir, "native-child-result.json"), ...(workflowHandoff ? { DSH_HANDOFF_DRIVER_EVIDENCE: join(evidence, `${prefix}-driver.json`) } : {}), ...(fake ? { DSH_FAKE_CODEX_LOG: join(dir, "fake-codex-requests.jsonl"), DSH_FAKE_CODEX_STATE: join(dir, "fake-codex-threads") } : {}) };
 const report = { status: "UNRUN", directory: dir, profile, workspace, model,
-  dshVersion: coordinated?.version ?? "registry 0.1.5-rc.1", core: coordinated === undefined ? "official" : "coordinated",
-  ...(coordinated === undefined ? {} : { dshSourceCommit: coordinated.sourceCommit }), pluginVersion: version };
+  dshVersion: `registry ${generation}`, pluginVersion: version };
 await writeFile(join(evidence, `${prefix}-result.json`), JSON.stringify(report, null, 2));
 try {
   const args = ["install", "--ignore-scripts", "--fetch-retries=0", "--prefer-offline"];

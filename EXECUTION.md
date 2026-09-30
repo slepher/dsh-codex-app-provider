@@ -261,7 +261,7 @@ E3：客户端打包沿用源项目 ModuleLoader 格式，module id 为 dsh-code
 - cwd：`/home/slepher/project/agents/dsh/dsh-codex-app-provider`；`npm run build`、`npm run typecheck`、`npm pack --dry-run`、`npm pack` exit 0，日志为 `evidence/current-build.log`、`current-typecheck.log`、`current-pack-dry.log`、`package.json`。
 - `npm test` 提权运行 exit 0，48/48 PASS，无 skipped/cancelled；`evidence/current-tests.log`。其中 FakeServer/注册/客户端加载为模拟，`rpc-failure.test.mjs` 使用真实 Node 子进程但不是模型运行；不得合并称为真实 Codex 48 项通过。
 - 隔离真实环境保留在 `/tmp/dsh-app-live-rAeTkh`。唯一原生主 Session：`session-dcd9fbf3-8d22-4c4e-871a-b4be1854e52a`；thread `01a098dd-3663-7230-b5cd-1ca15986e0f1`；turn `01a098dd-36fd-7cd2-94bd-5be8f8fca832`；实际 model `gpt-5.6-luna`、effort `medium`、report completed，输出 `DSH_CODEX_APP_OK`。本项目 stateDir 和原生 Session 压缩日志均在隔离目录中；未复制登录文件。
-- `scripts/dsh-baseline.json` 是源锁中 DSH 注册表包的版本清单，不是源 workspace 锁文件；干净消费目录自行生成锁。消费目录里的 provider 是 tarball 安装，不是源码链接；运行依赖不导入旧 kit/backend。
+- 隔离消费目录不带任何 DSH 版本清单：临时 profile 只装本包 `devDependencies` 钉的那一代 CLI 与插件 tarball，其余 dsh 包由 npm 按插件自身的 peer 范围解析，干净消费目录自行生成锁。消费目录里的 provider 是 tarball 安装，不是源码链接；运行依赖不导入旧 kit/backend。
 - E2.2 已实施参数通路与 descriptor v4，完整实际接口和新增证据见下方续接记录；此段原先的“尚未实施”已被本轮源码和验证替代。
 - E2.3 已切换 workflow 原生 child 消费与 profile 配置/选择；当前实现和模拟验证见下方追加记录。真实 workflow profile 运行、浏览器及安装/dev 脚本迁移仍未完成。
 - E3 原生外部执行呈现、E4 打开动作/显式 Session Conversation scope/tab、E5 完整浏览器与真实恢复验收尚未完成。设置保存已接原生机制，但没有侧栏消费者；file provider 默认持久化及浏览器跨页同步仍未验证。
