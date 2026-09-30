@@ -107,7 +107,7 @@ if (workflowHandoff) {
     }
   }
   const roles = cross
-    ? `        planner: { provider: codex, model: gpt-6-astra, reasoningEffort: high }\n        reviewer: { provider: codex, model: gpt-6-sol, reasoningEffort: high }\n        context_collector: { provider: codex, model: gpt-6-luna, reasoningEffort: high }\n        def_coding_worker: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: high }\n        sup_coding_worker: { provider: codex, model: gpt-6-sol, reasoningEffort: medium }\n        evidence_runner: { provider: codex, model: gpt-6-luna, reasoningEffort: medium }\n        full_tester: { provider: codex, model: gpt-6-luna, reasoningEffort: medium }\n`
+    ? `        planner: { provider: codex, model: gpt-6-astra, reasoningEffort: high }\n        reviewer: { provider: codex, model: gpt-6.1-sol, reasoningEffort: high }\n        context_collector: { provider: codex, model: gpt-6-luna, reasoningEffort: high }\n        def_coding_worker: { provider: deepseek-official, model: deepseek-flash, reasoningEffort: high }\n        sup_coding_worker: { provider: codex, model: gpt-6.1-sol, reasoningEffort: medium }\n        evidence_runner: { provider: codex, model: gpt-6-luna, reasoningEffort: medium }\n        full_tester: { provider: codex, model: gpt-6-luna, reasoningEffort: medium }\n`
     : "";
   await writeFile(join(home, "settings.yaml"), cross
     ? `dsh-workflow-kit:\n  defaultConfig: handoff\n  codingStrategy: bootstrap\n  integrateStrategy: economy\n  configs:\n    handoff:\n      roles:\n${roles}`
