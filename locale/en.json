@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex app provider",
+    "description": "Runs Codex as a native DSH provider: session backend, execution facts, and the codex_workers tool."
+  }
+}

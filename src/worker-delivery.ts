@@ -112,6 +112,9 @@ export function installWorkerDelivery(ctx: Context, backend: CodexBackend): Work
     hooks.push(ctx.on("agent/created", ({ agent }) => { start(agent); return undefined; }));
     hooks.push(ctx.on("agent/disposed", ({ agent }) => release(agent)));
     hooks.push(ctx.on("session/disposed", session => { for (const agent of parents.keys()) if (agent.session === session) release(agent); }));
+    // The idle edge of the status event, not a status poll: a turn that closed
+    // without further model input still has to publish the reports it settled,
+    // and this is the one event that reports that transition.
     hooks.push(ctx.on("agent/status", ({ agent, status }) => { if (status === "idle") start(agent); }));
     hooks.push(ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
       const identity = captureAgentIdentity(ctx, agent), decision = await next();

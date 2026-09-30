@@ -60,3 +60,21 @@ test("a disposed Session releases the Codex record that backed it", async t => {
   await instance.dispose();
   assert.equal(existsSync(join(stateDir, "owner.lock")), false);
 });
+
+test("an omitted stateDir lands in the launched profile's state tree", async t => {
+  const home = mkdtempSync(join(tmpdir(), "dsh-app-profile-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const ctx = new Context();
+  new LlmRuntime(ctx);
+  ctx.provide("agents", { get() {} });
+  ctx.provide("sessions", { get() {} });
+  // The launcher provides this in a profile-launched process; the plugin reads
+  // it instead of resolving a path against the directory `dsh` started in.
+  ctx.provide("profileContext", { name: "probe-profile", home });
+  t.after(async () => { await ctx.fiber.dispose(); });
+  const instance = await ctx.plugin(plugin, {});
+  assert.equal(existsSync(join(home, "state", "probe-profile", "codex", "owner.lock")), true,
+    "the default state directory is the profile's own");
+  await instance.dispose();
+  assert.equal(existsSync(join(home, "state", "probe-profile", "codex", "owner.lock")), false);
+});

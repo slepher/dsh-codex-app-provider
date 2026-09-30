@@ -1,6 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
 import { installCodexContextFilter } from "./context.js";
@@ -8,6 +9,7 @@ import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type { Agent } from "@deepseek-ai/dsh-agent";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import { agentCaller, assertAgentIdentity, captureAgentIdentity } from "./identity.js";
 import { executeWorkerAction, type WorkerAction } from "./worker-actions.js";
 import { installWorkerControl, type WorkerControl } from "./worker-control.js";
@@ -22,26 +24,77 @@ export { WORKFLOW_PRE_TOOL_USE, CodexGateBridge } from "./tool-gate.js";
 export type { CodexToolGate, GateBinding, GateDecision, GateEvent, GateHandler, HookRunEvidence } from "./tool-gate.js";
 
 export interface Config {
+  /**
+   * Where the plugin persists its own records and worker bindings. Omitted
+   * means `defaultStateDir`: the launched profile's state directory, never the
+   * directory the process happened to start in.
+   */
   stateDir?: string;
   command?: string;
   requestTimeoutMs?: number;
+  /**
+   * Model-settings working directory, and the working directory a Codex thread
+   * falls back to when its Session records none. Omitted means the project
+   * directory the Harness was launched in.
+   */
   providerCwd?: string;
 }
 
 export const Config: z<Config> = z.object({
-  stateDir: z.string().default(resolve(".dsh-state")),
+  stateDir: z.string().required(false),
   command: z.string().default("codex"),
   requestTimeoutMs: z.number().min(1).max(2_147_483_647).default(30_000),
-  providerCwd: z.string().default(process.cwd()),
+  providerCwd: z.string().required(false),
 });
 
 export const inject = ["agents", "sessions", "llm"];
+
+/**
+ * Launcher-provided profile facts.
+ * @param ctx - the Host context.
+ * @returns the launched profile's name, home, and launch directory, or
+ * `undefined` when the process was booted without a profile.
+ */
+function launchedProfile(ctx: Context): { name?: string; home?: string; cwd?: string } | undefined {
+  return ctx.get("profileContext") as { name?: string; home?: string; cwd?: string } | undefined;
+}
+
+/**
+ * Persistence root used when the entry config omits `stateDir`.
+ *
+ * The launcher-provided profile owns the Harness home and its own name, so the
+ * fallback lands inside that profile's state tree. Resolving against the
+ * current working directory instead would scatter state into whichever
+ * directory `dsh` was started from, and two profiles started from one directory
+ * would share it. A boot without a profile falls back to `$DSH_HOME`, then
+ * `~/.dsh`, under the `default` profile name.
+ * @param ctx - the Host context carrying the launcher-provided profile context.
+ * @returns the absolute state directory for this deployment.
+ */
+function defaultStateDir(ctx: Context): string {
+  const profile = launchedProfile(ctx);
+  const configuredHome = process.env.DSH_HOME?.trim();
+  const home = profile?.home ?? (configuredHome === undefined || configuredHome === "" ? join(homedir(), ".dsh") : configuredHome);
+  return join(home, "state", profile?.name ?? "default", "codex");
+}
+
+/**
+ * Project directory a Codex thread falls back to when its Session records none.
+ *
+ * The launcher captures the directory it was started in, so a later
+ * `process.chdir` in this process cannot move a thread's default workspace.
+ * @param ctx - the Host context carrying the launcher-provided profile context.
+ * @returns the absolute fallback working directory.
+ */
+function defaultProviderCwd(ctx: Context): string {
+  return launchedProfile(ctx)?.cwd ?? process.cwd();
+}
 
 /** Install one Codex execution owner and its native DSH route. */
 export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(function* () {
     const backend = new CodexSessionBackend(
-      resolve(config.stateDir ?? ".dsh-state"),
+      resolve(config.stateDir ?? defaultStateDir(ctx)),
       // The transport factory carries a gated runtime's gate environment and
       // leaves an ungated one with exactly the environment it had before.
       options => new AppServer({ command: config.command, timeoutMs: config.requestTimeoutMs,
@@ -89,7 +142,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       questions: ctx.get("userQuestions") as ProviderQuestionSeam | undefined,
       attachments: ctx.get("attachments") as ProviderAttachmentSeam | undefined,
       logger: ctx.logger,
-      providerCwd: resolve(config.providerCwd ?? process.cwd()),
+      providerCwd: resolve(config.providerCwd ?? defaultProviderCwd(ctx)),
     });
     unregister = ctx.llm.registerAdapter([CODEX_PROVIDER], provider);
     ctx.provide("codexToolGate", toolGate);
@@ -200,10 +253,7 @@ const WORKER_ACTIONS = ["create", "list", "get", "reports", "append", "steer", "
  */
 function liveSessionCwd(ctx: Context, sessionId: string): string | undefined {
   try {
-    const face = (ctx.sessions as unknown as {
-      get(id: string): { header?: { cwd?: string } } | undefined;
-    }).get(sessionId);
-    const cwd = face?.header?.cwd;
+    const cwd = ctx.sessions.get(SessionId(sessionId))?.header?.cwd;
     return typeof cwd === "string" ? cwd : undefined;
   } catch {
     return undefined;

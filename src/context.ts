@@ -60,7 +60,7 @@ interface ModelSelectionState {
  * Codex" so a missing projection never hides another provider's context.
  */
 export function selectedProvider(ctx: Context, agent: Agent): string | undefined {
-  const projections = (ctx as unknown as { get?: (name: string) => unknown }).get?.("sessionProjections") as
+  const projections = ctx.get("sessionProjections") as
     | { stateOf?: (session: unknown, key: string) => unknown }
     | undefined;
   const state = projections?.stateOf?.(agent.session, "modelSelection") as ModelSelectionState | undefined;
