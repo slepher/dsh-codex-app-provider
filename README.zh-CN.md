@@ -1,0 +1,292 @@
+# dsh-codex-app-provider
+
+[English](README.md) | [中文](README.zh-CN.md)
+
+把 Codex CLI App Server 作为 DSH 原生模型路由运行，并从 DSH Session 管理持久 Codex worker。
+
+`dsh-codex-app-provider` 是一个 DSH Host 插件。它注册 `codex` LLM adapter，把 Codex 自己的审批与提问接进 DSH 的交互面，把 Codex 实际执行的内容写入 DSH Session 日志，并提供 `codex_workers` 工具。它不含浏览器界面：子会话面板归 `dsh-subagent-ui-sidepanel`，角色/profile 策略归 `dsh-workflow-kit`。
+
+- [提供什么](#提供什么)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [配置](#配置)
+- [把 Codex 作为模型路由使用](#把-codex-作为模型路由使用)
+- [`codex_workers` 工具](#codex_workers-工具)
+- [Host 能力](#host-能力)
+- [Workflow session gate 与 PreToolUse hook](#workflow-session-gate-与-pretooluse-hook)
+- [兼容性](#兼容性)
+- [开发](#开发)
+- [仓库结构](#仓库结构)
+- [已知限制](#已知限制)
+- [许可证](#许可证)
+- [相关仓库](#相关仓库)
+
+## 提供什么
+
+```
+DSH 原生 Session / 原生 child Agent
+  → LLM 路由：codex
+  → dsh-codex-app-provider（Host 插件）
+    → provider adapter（模型、请求、事件、审批、提问）
+    → 内部 backend（App Server RPC、thread/turn 状态、存储、恢复）
+  → codex app-server --stdio（thread / turn / item）
+  → 原生事件映射回 DSH Session
+```
+
+| 能力面 | 说明 |
+|---|---|
+| `codex` LLM adapter | 把安装的 Codex 运行时作为 DSH provider：模型目录、请求转换、流式事件、token 用量、取消。 |
+| 上下文过滤器 | 从发给 Codex 的请求里剔除 DSH 注入的上下文（system/developer 消息、runtime context、skill catalog、已导入的执行事实）。 |
+| `codex_workers` 工具 | 创建、查看、引导和关闭由当前父 Session 持有的持久 Codex worker。 |
+| Worker 报告投递 | 先持久化报告，再把唤醒通知投给父 Session；确认与验收始终是显式工具动作。 |
+| 审批/提问桥接 | 权限判断仍归 Codex；它发出的审批与提问转发到 `ctx.approval` 与 `ctx.userQuestions`，没有应答者时按 fail-closed 拒绝。 |
+| 执行事实 | Codex 自己执行工具，否则 DSH 日志对这段执行是盲的；每个已执行步骤都以带来源的 `user/message` 事件写入 Session，且可重放而不会重复。 |
+| `ctx.codexExecution` | 给受信 Host 消费者的只读原生执行事实；不做 resume，也不发模型请求。 |
+| `ctx.codexHandoff` | 受信 Host 把一条 Codex thread 从源 Session 移交给预留的后继 Session。 |
+| `ctx.codexToolGate` | workflow session gate 桥：一个 Host handler 加一条 Codex PreToolUse hook 传输通道。 |
+
+插件自身不做角色、profile 或权限策略。它负责执行：一个 Codex adapter、一个 backend、每个部署一个状态目录。
+
+## 环境要求
+
+- Node.js >= 22.19.0。
+- 提供 `app-server` 的 Codex CLI（插件执行 `<command> app-server --stdio`，`command` 默认 `codex`）。
+- `dsh.compatibility.dshReleases` 中列出的 DSH 版本（见[兼容性](#兼容性)）。
+- 仅对启用 gate 的 Session：Codex PreToolUse hook 走 Unix domain socket，因此 hook IPC 限 Linux/macOS。其余能力与 DSH 平台一致。
+
+## 安装
+
+构建并打包：
+
+```bash
+npm ci
+npm run build          # tsc -> lib/
+npm test               # 单元与集成测试
+npm pack               # dsh-codex-app-provider-<version>.tgz
+```
+
+把 tarball 装进 DSH profile，并把插件加入该 profile 的 bundle 列表（保留该 profile 原有的 bundle，下面的 `@deepseek-ai/dsh-base` 与 `@deepseek-ai/dsh-web-app` 是 Web profile 的形态）：
+
+```jsonc
+// <profile>/package.json
+{
+  "name": "dsh-profile-codex",
+  "private": true,
+  "dependencies": {
+    "dsh-codex-app-provider": "file:/absolute/path/dsh-codex-app-provider-0.1.1.tgz"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-codex-app-provider"
+      ]
+    }
+  }
+}
+```
+
+在 profile 的 `cordis.patch.yml` 中加一个条目。一个部署只加载一个 Codex 插件，不要同时加载旧 Codex backend 或 host 插件：
+
+```yaml
+- id: dsh-codex-app-provider
+  config:
+    stateDir: /absolute/state/dir/codex
+```
+
+本仓库的 `cordis.patch.yml` 声明了同名条目，因此由 bundle 携带时无需再写 id。
+
+## 配置
+
+| 键 | 类型 | 默认值 | 含义 |
+|---|---|---|---|
+| `stateDir` | 绝对路径字符串 | `<DSH_HOME>/state/<profile>/codex` | 插件自有记录的存放目录。没有 launcher profile 时回落到 `$DSH_HOME`（再回落 `~/.dsh`）下的 `default` profile 名，绝不用进程当前目录。 |
+| `command` | 字符串 | `codex` | 作为 App Server 执行的程序（`<command> app-server --stdio`）。 |
+| `requestTimeoutMs` | 整数，1–2147483647 | `30000` | 单次 App Server 请求超时。 |
+| `providerCwd` | 字符串 | DSH 启动目录 | 模型设置的工作目录，也是 Session 未记录工作目录时 Codex thread 的回落目录。 |
+
+`stateDir` 下的持久化布局：
+
+- `sessions/<url编码后的session-id>.json` —— 每个 Codex Session 一条记录：thread/turn 身份、执行 cwd、最近确认的 model/effort、投影后的事实、报告与 gate 绑定。原子写入，权限 `0600`。
+- `owner.lock/owner.json` —— 单 owner 锁。同一状态目录不得被两个 provider 同时打开。
+
+## 把 Codex 作为模型路由使用
+
+- 插件注册的 provider id 是 `codex`。在 DSH 中按会话选择即可；主 Session 可以自由切换模型与 effort，而以固定执行输入创建的 child 会保持创建时的配置。
+- 模型目录来自安装的 Codex 运行时（`config/read` 加分页 `model/list`，缓存 30 秒），因此可选模型与 reasoning effort 就是该 Codex 构建对外声明的那一套。本仓库不维护模型清单。
+- 当 Codex 模型声明支持相应输入模态时，图片与 mention 随请求一起传递。
+- Codex 发出的审批请求转发到 DSH 审批面（`allowed-once` → accept，`cancelled` → cancel，其余情况包含没有应答者 → decline）。结构化提问走 `ctx.userQuestions`。服务缺失时 fail-closed，插件不伪造同意。
+- DSH Session 日志能看到 Codex 执行了什么：每个 item 变成一条来源为 `dsh-codex-app-provider` 的消息，身份由 `threadId`/`turnId`/`itemId` 推导，因此重放或冷恢复不会把同一条命令导入两次。
+- 对话历史与压缩检查点归 DSH；当一段 DSH 历史被回放进 Codex thread 时，导入区间会被标记（`[DSH history import`），不会再次喂回 Codex。
+
+## `codex_workers` 工具
+
+`codex_workers` 管理一个父 Session 自己持有的持久 Codex worker。它没有角色概念：带角色的 child 归 `dsh-workflow-kit`，由后者的 `codex_workflow` 工具派发。这里创建的 worker 对 workflow 插件不可见，反之亦然。
+
+| action | 字段 | 作用 |
+|---|---|---|
+| `create` | `workerId?`、`name?`、`cwd?`、`model?`、`effort?` | 启动一个 worker，可指定要创建的 id。`cwd` 默认父 Session 工作区。 |
+| `list` | — | 当前 Session 的 worker 列表。 |
+| `get` | `workerId` | 单个 worker 的投影。 |
+| `reports` | — | 当前 Session 各 worker 的持久报告。 |
+| `append` | `workerId`、`text` | 给已有 worker 追加一轮。 |
+| `steer` | `workerId`、`turnId`、`text` | 向运行中的轮次注入引导。 |
+| `interrupt` | `workerId`、`turnId` | 中断指定轮次。 |
+| `resume` | `workerId` | 恢复未运行的 worker。 |
+| `accept` | `workerId`、`turnId`、`acceptance` | 记录结论 `pending` \| `accepted` \| `changes-requested`。 |
+| `ack` | `workerId`、`turnId` | 标记报告已确认。 |
+| `close` | `workerId` | 关闭 worker。 |
+
+可以依赖的行为：
+
+- `action` 必填；其余字段只被列出它的 action 读取，多传的字段会被拒绝而不是忽略。
+- 归属按调用方父 Agent 围栏。身份取自活体 Agent，并在每次变更前重新校验，一个父 Session 碰不到另一个父 Session 的 worker。
+- `list`、`get`、`reports` 是只读动作，以只读卡片呈现；其余动作以执行卡片呈现。
+- 报告先落盘再通知，且每条报告对同一个父 Agent 最多被认领一次。空闲父 Agent 用 follow-up 唤醒；忙碌父 Agent 在下一步收到同一条通知。重启与重复事件都不会让父 Agent 重复处理同一份报告。
+- 确认与验收是分开的显式动作。验收不会重跑任何东西。
+
+## Host 能力
+
+这些是 Host 发布给其他受信插件的 Cordis 服务，不面向模型。
+
+| 服务 | 成员 | 用途 |
+|---|---|---|
+| `ctx.codexExecution` | `read(nativeSessionId)`、`facts?(nativeSessionId)` | 只读执行事实：状态、cwd、已确认 model/effort、待确认配置、报告、用量。不做 resume，不发模型请求。`facts` 返回已执行的历史行，用于在另一个 provider 下继续同一任务。 |
+| `ctx.codexHandoff` | `handoff(request)`、`read(sessionId)` | 让后继 Session 用同一条 Codex thread 继续一个任务。以 `requestId` 为键，重复请求复用已记录的移交。源记录被撤权，后继持有该 thread。`read` 返回 thread 归属（`threadId`、`handedOffTo`、`handoffFrom`）。 |
+| `ctx.codexToolGate` | `register(hook, handler)`、`bind(sessionId, binding)` | 下文描述的 session gate 桥。唯一的 handler 及其策略归 workflow Host，provider 只负责承载绑定与 hook 调用。 |
+
+## Workflow session gate 与 PreToolUse hook
+
+插件承载 workflow session gate，自身不做 gate 判定。`dsh-workflow-kit` 注册唯一的业务 handler（`workflow.preToolUse`），把它启动的每个 child 绑定为 `{ role, hook, args }`，并用同一个确定性函数判定两个入口。provider 是传输层：
+
+- **DSH 原生入口。** workflow 插件安装 DSH 工具 guard；provider 提供绑定存储与绑定查询。
+- **Codex 入口。** provider 为每个 App Server 运行时生成一次性随机 runtime key，并且只把 `DSH_PRETOOL_ENABLED=1`、`DSH_PRETOOL_SOCKET`、`DSH_PRETOOL_RUNTIME` 注入**该运行时**的 spawn 环境。普通 Codex Session 不受影响。`lib/pretool-client.js` 是安装的 hook 命令：它把 hook payload 经 socket 送到 Host，并把 Codex 需要的判定打印出来。
+- socket 位于 `mkdtemp` 目录（权限 `0700`），socket 本身 `0600`，插件卸载时一并删除。一个连接承载一次 JSON 请求与一次响应。
+- 接收端只用 runtime key 解析 Session。hook payload 里的任何内容——`session_id`、role、参数——都不能选择或替换绑定。未知或过期 key、已释放记录、cwd 不符、`turn_id` 不是该 Session 当前轮次，全部拒绝。
+- 每次运行时被替换或释放都会作废旧 key，因此重启或移交不会留下可用的旧 key。
+- 未启用时 `lib/pretool-client.js` 以退出码 `0` 且无输出结束。已启用但传输缺失、输入非 JSON、连接失败、应答超过 3 秒或应答非法时，一律返回显式 deny。它从不打印 runtime key。
+
+### 部署前置：安装并信任 hook
+
+Codex 会静默跳过未受信或被禁用的 hook。启动 gated Session 之前，provider 对该 Session 的 cwd 调用 `hooks/list`，要求存在一条满足以下条件的条目：
+
+- `command` 指向 `lib/pretool-client.js`；
+- 未禁用且没有 `errors`；
+- `trustStatus` 为 `managed` 或 `trusted`；
+- 是 PreToolUse hook。
+
+不存在这样的条目时，gated Session 会被拒绝并给出原因，而不是带着未生效的 gate 启动。
+
+受管部署（首选；Linux 为 `/etc/codex/requirements.toml`，需要 root）。若目标文件已有 `[features]` 表，把 `hooks = true` 合并进去，不要追加第二个 `[features]` 表：
+
+```toml
+[features]
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "<absolute-node> <absolute-provider>/lib/pretool-client.js"
+timeout = 10
+```
+
+没有 root 时，把同样的 `[[hooks.PreToolUse]]` 条目加到用户配置，再从 `hooks/list` 读到该条目的 `currentHash`，按 Codex 报告的键写入信任哈希：
+
+```toml
+[hooks.state."<sourcePath>:pre_tool_use:<matcherIndex>:<hookIndex>"]
+trusted_hash = "<currentHash>"
+```
+
+key 与哈希一致后 `trustStatus` 变为 `trusted`。代用户写信任记录等于绕过其信任提示，只应在明确授权的部署步骤中执行。
+
+gate 的策略不在这里：某个 `role` 能写什么、能调用哪些工具名，由 workflow handler 决定。因此 provider 的覆盖范围就是传输层的范围——它检查 Codex 报告的工具调用及其参数，不解析 shell 程序，所以 shell 命令内部的写文件行为不在其覆盖内。
+
+## 兼容性
+
+| DSH 版本 | 结论 |
+|---|---|
+| `0.1.7-rc.2` | compatible |
+| `0.2.0-rc.2` | compatible |
+
+所有 `@deepseek-ai/dsh-*` 宿主包都声明为可选 `*` peer 依赖，因此 harness 兼容性门禁不会用某一代钉死本插件，一份构建可加载到每个已声明版本。仓库内的 `devDependencies` 钉住用于类型检查与测试的那一代（`0.1.7-rc.2`）。
+
+`scripts/verify-dsh-compat.mjs` 才是让上表成立的依据：对每个已声明版本，它把该版 CLI 装进一次性的 `DSH_HOME` profile，加入两个插件 tarball，装配 profile，针对该版自身的接缝做探测，启动 web server，并断言插件能力面有应答。只有每一步都成立，该版本才会被判为 `compatible`。
+
+```bash
+node scripts/verify-dsh-compat.mjs                    # 所有已声明版本
+node scripts/verify-dsh-compat.mjs 0.1.7-rc.2 0.2.0-rc.2
+```
+
+## 开发
+
+```bash
+npm run build                     # tsc -p tsconfig.json
+npm run typecheck                 # tsc --noEmit
+npm test                          # node --test test/*.test.mjs
+npm run test:integration:handoff  # thread 移交集成测试
+npm run test:live                 # 真实 Codex CLI 端到端
+npm run test:live:handoff         # 真实模型后继移交（Codex → Codex）
+npm run test:live:handoff:cross   # 真实模型延续（Codex → DeepSeek）
+npm run publish                   # 暂存构建，原子替换 lib/
+npm run publish:watch             # 源码变化即重新发布
+```
+
+本仓库的测试会派生进程，因此派生进程的用例需要允许派生的环境。已记录的运行使用 `node --test --test-isolation=none test/*.test.mjs`，在单进程内跑完整套测试。
+
+测试分层，便于把失败归到正确层级：
+
+- **单元/集成**（`npm test`）：状态存储、归属围栏、provider 转换、上下文过滤、工具 gate、执行事件、故障与恢复，使用脚本化 App Server。
+- **确定性全栈**（`npm run test:live -- --fake`）：真实 Host 加真实插件，Codex CLI 换成脚本化 App Server——用于断言“首轮必须 resume 而不能 start”这类事实。
+- **真实模型、hermetic**（`npm run test:live:handoff`、`:cross`、`scripts/live-hermetic.mjs`）：把 `HOME`、`CODEX_HOME`、`TMPDIR` 与 npm 缓存重定位到本仓库内的 `.live/<时间戳>/`，因此真实运行无需审批，也不会写到仓库之外。凭据副本在运行结束时删除。
+- **装机形态**：把 tarball 装进真实 DSH profile 并重启 Host。
+
+真实模型运行需要 Codex 登录状态与网络，不属于 `npm test`。
+
+## 仓库结构
+
+```text
+src/
+  index.ts              插件入口：配置、backend、adapter、服务、工具
+  provider.ts           LLM adapter：模型、请求、事件、审批、提问
+  backend.ts            App Server RPC、thread/turn 状态机、恢复
+  rpc.ts                codex app-server --stdio 传输（stdio 上的 JSON 行）
+  store.ts              每 Session 记录与单 owner 锁
+  context.ts            codex 路由的上下文过滤器
+  facts.ts              写入 DSH Session 日志的执行事实消息
+  execution.ts          只读原生执行事实（ctx.codexExecution）
+  execution-events.ts   原生事件归约为事实与用量
+  execution-inputs.ts   声明输入与实际应用输入的比对
+  handoff.ts            thread 移交能力（ctx.codexHandoff）
+  tool-gate.ts          gate 桥、hook 传输、hook 前置校验
+  pretool-client.ts     安装到 Codex 的 PreToolUse hook 命令
+  worker-actions.ts     codex_workers 动作分发
+  worker-control.ts     worker 轮次的原生审批/提问桥
+  worker-delivery.ts    worker 报告的持久投递
+  identity.ts           调用方身份的捕获与重校验
+  models.ts, skills.ts, conversation.ts, browser-types.ts
+cordis.patch.yml        唯一的 Host 插件条目
+locale/                 插件目录文案（en、zh）
+test/                   node:test 测试与脚本化 App Server 夹具
+scripts/                兼容性验证、真实测试 harness、发布、watch
+EXECUTION.md            实施日志与各阶段证据索引
+```
+
+## 已知限制
+
+- workflow gate 的 Codex 路径需要已安装且受信的 PreToolUse hook（见上文）。没有它时 gated Codex Session 会拒绝启动；DSH 原生 gate 不依赖该前置条件。
+- hook IPC 使用 Unix domain socket，未实现 Windows。
+- gate 看到的是工具调用及其参数，不是 shell 程序的文件效果；`mcp__<server>__<name>` 工具与运行时注册代码（`cordis_define` / `cordis_run`）不在覆盖范围。
+- Codex → DeepSeek 延续路径在隔离 profile 扩展准备与后继轮次的等待预算上仍有已知缺口；记录的证据见 `EXECUTION.md`。
+- `EXECUTION.md` 是按时间顺序的实施日志，记录当前状态如何形成，不是插件的规格说明。
+
+## 许可证
+
+MIT —— 见 [LICENSE](LICENSE)。
+
+## 相关仓库
+
+- `dsh-workflow-kit` —— 角色、profile、任务合同、lane、验收与集成；持有 workflow session gate 策略，并把带角色的 child 派发进本 provider。
+- `dsh-subagent-ui-sidepanel` —— 原先位于本仓库的子会话侧栏/客户端半边。
