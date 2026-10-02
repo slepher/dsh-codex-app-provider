@@ -158,7 +158,6 @@ test("every thread path on the source is refused after the handover, including c
   const refusals = [
     ["start a turn", () => fixture.backend.startTurn(OWNER, OPENING, "more work")],
     ["resume its thread", () => fixture.backend.resumeSession(OWNER, OPENING)],
-    ["rebuild its thread", () => fixture.backend.restartSession(OWNER, OPENING)],
     ["configure its thread", () => fixture.backend.configureSession(OWNER, OPENING, { model: "third-model" })],
     ["compact its thread", () => fixture.backend.compactSession(OWNER, OPENING)],
   ];

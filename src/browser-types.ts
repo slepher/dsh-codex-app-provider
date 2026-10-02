@@ -18,12 +18,11 @@ export type RunState =
   | "saved";
 
 export type WorkerState = RunState;
-export type WorkerOwner = "user" | "agent";
 
 export interface Caller {
   nativeSessionId: string;
-  source: "ui" | "agent";
-  parentAgent?: { id: string; nativeSessionId: string };
+  source: "agent";
+  parentAgent: { id: string; nativeSessionId: string };
 }
 
 export interface SessionSnapshot {
@@ -168,34 +167,6 @@ export type TurnInput =
   | { type: "localImage"; path: string }
   | { type: "skill"; name: string; path: string };
 
-/** A Codex-native skill offered by the composer's `$` catalogue. */
-export interface Skill { name: string; path: string; description: string }
-
-export interface ConversationItem {
-  /** Public reasoning summary parts; raw reasoning content is never projected. */
-  summary?: string[];
-  id: string;
-  turnId: string;
-  role: "user" | "assistant" | "tool";
-  text: string;
-  kind?: string;
-  phase?: string;
-  status?: string;
-  title?: string;
-  output?: string;
-  cwd?: string;
-  exitCode?: number;
-  durationMs?: number;
-  arguments?: unknown;
-  images?: string[];
-  files?: { name: string; path: string }[];
-  changes?: { path: string; kind?: string; diff: string }[];
-}
-
-export interface ConversationTurn { id: string; status?: string; startedAt?: number; completedAt?: number; durationMs?: number; error?: string }
-export interface Conversation { turns?: ConversationTurn[]; items: ConversationItem[]; source: "thread" | "reports" }
-export type ConversationStreamEvent = { type: "item"; item: ConversationItem } | { type: "turn"; turn: ConversationTurn };
-
 /** Input modality DSH can route to a Codex model; Codex `audio` is not representable. */
 export type InputModality = "text" | "image";
 
@@ -253,7 +224,7 @@ export interface WorkerProjection {
   id: SessionId;
   updatedAt?: number;
   parentSessionId: string;
-  owner: WorkerOwner;
+  owner: "agent";
   name: string;
   detached: boolean;
   cwd: string;
@@ -266,7 +237,6 @@ export interface WorkerProjection {
   reports: readonly Report[];
   approvals: readonly ApprovalRequest[];
   usage?: unknown;
-  group: "user" | "active" | "inactive";
 }
 
 export interface ApprovalRequest {
@@ -357,7 +327,6 @@ export interface CodexBackend {
   listSessions(ownerId: string): Promise<readonly SessionSnapshot[]>;
   readSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
   resumeSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot>;
-  restartSession(owner: string | Caller, sessionId: SessionId, options?: TurnOptions): Promise<SessionSnapshot>;
   configureSession(owner: string | Caller, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
   closeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
   occupiedThreads(): Promise<readonly ThreadId[]>;
@@ -376,16 +345,11 @@ export interface CodexBackend {
   decideApproval(caller: Caller, workerId: SessionId, requestId: string, decision: ApprovalDecision): Promise<void>;
   pendingUserInputs(owner: string | Caller, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
   answerUserInput(ownerId: string, requestId: string, answers: UserInputAnswer): Promise<void>;
-  history(owner: string | Caller, sessionId: SessionId): Promise<Conversation>;
   readFacts(owner: string | Caller, sessionId: SessionId): Promise<readonly ExecutionFactLine[]>;
   readReports(owner: string | Caller, sessionId: SessionId): Promise<readonly Report[]>;
   acknowledgeReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId): Promise<Report>;
   acceptReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId, acceptance: ReportAcceptance): Promise<Report>;
   subscribe(owner: string | Caller, sessionId: SessionId, listener: (event: BackendEvent, sequence: number) => void, options?: SubscribeOptions): () => void;
   subscribeWorkers(caller: Caller, listener: (event: WorkerManagementEvent) => void): () => void;
-  listModels(cwd: string): Promise<readonly unknown[]>;
-  readConfig(cwd: string): Promise<unknown>;
-  listSkills(cwd: string): Promise<readonly unknown[]>;
   modelSettings(cwd: string): Promise<ModelSettings>;
-  skills(cwd: string): Promise<readonly Skill[]>;
 }

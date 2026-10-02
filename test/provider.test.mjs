@@ -766,15 +766,14 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
     "another thread's executed item never becomes this Session's execution fact");
 
   const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "agent", nativeSessionId: "parent" } };
-  const uiCaller = { nativeSessionId: "parent", source: "ui", parentAgent: { id: "agent", nativeSessionId: "parent" } };
   const changes = [];
-  fixture.backend.subscribeWorkers(uiCaller, event => changes.push(event));
+  fixture.backend.subscribeWorkers(caller, event => changes.push(event));
   const worker = await fixture.backend.createWorker(caller, { name: "legacy", cwd: childCwd });
   const workerServer = fixture.hub.servers.find(server => server.threadId === worker.threadId);
   const workerTurn = await fixture.backend.startTurn(caller, worker.id, "legacy work");
   workerServer.emit("request", { id: "worker-approval", method: "item/commandExecution/requestApproval", params: { threadId: worker.threadId, turnId: workerTurn.turnId, command: "ls" } });
   const [workerApproval] = await fixture.backend.pendingApprovals(caller, worker.id);
-  await fixture.backend.decideApproval(uiCaller, worker.id, workerApproval.requestId, "accept");
+  await fixture.backend.decideApproval(caller, worker.id, workerApproval.requestId, "accept");
   workerServer.notify("item/completed", { threadId: worker.threadId, turnId: workerTurn.turnId, item: { type: "agentMessage", phase: "final_answer", text: "worker done" } });
   workerServer.notify("turn/completed", { threadId: worker.threadId, turn: { id: workerTurn.turnId, status: "completed" } });
 

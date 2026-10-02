@@ -119,7 +119,6 @@ test("binds one thread and deduplicates native retries with approval identity", 
       { id: "while-interrupting", result: { decision: "cancel" } },
       { id: "late", message: "No active turn" },
     ]);
-    assert.deepEqual(await backend.history("owner", "session"), { source: "thread", turns: [{ id: "turn-1", status: undefined, startedAt: undefined, completedAt: undefined, durationMs: undefined, error: undefined }], items: [] });
   } finally {
     await backend.close();
   }
@@ -260,36 +259,6 @@ test("routes blocking user input to an interactive subscriber and answers exactl
   const [second] = await backend.pendingUserInputs("owner", "session");
   await backend.answerUserInput("owner", second.requestId, null);
   assert.deepEqual(server.responses.at(-1), { id: 78, result: { answers: {} } });
-});
-
-test("reloads a rebuilt provider Session whose reports came from an earlier thread", async t => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-rebuild-reports-"));
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
-  const servers = [];
-  const threadIds = ["thread-1", "thread-2"];
-  let backend = new CodexSessionBackend(stateDir, () => {
-    const server = new FakeServer();
-    server.threadId = threadIds[servers.length] ?? `thread-${servers.length + 1}`;
-    servers.push(server);
-    return server;
-  });
-  await backend.createSession("owner", "session", "/work");
-  const firstThread = (await backend.readSession("owner", "session")).threadId;
-  const turn = await backend.startTurn("owner", "session", "work");
-  servers[0].emit("notification", { method: "item/completed", params: { threadId: firstThread, turnId: turn.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } } });
-  servers[0].emit("notification", { method: "turn/completed", params: { threadId: firstThread, turn: { id: turn.turnId, status: "completed" } } });
-  await backend.restartSession("owner", "session");
-  const rebuiltThread = (await backend.readSession("owner", "session")).threadId;
-  assert.notEqual(rebuiltThread, firstThread);
-  await backend.close();
-
-  backend = new CodexSessionBackend(stateDir, () => new FakeServer());
-  t.after(() => backend.close());
-  const snapshot = await backend.readSession("owner", "session");
-  assert.equal(snapshot.threadId, rebuiltThread, "the rebuilt thread survives a reload");
-  const reports = await backend.readReports("owner", "session");
-  assert.equal(reports.length, 1);
-  assert.equal(reports[0].threadId, firstThread, "the earlier thread's report is retained, not rewritten");
 });
 
 test("preserves typed skills, reads rollout usage, and marks compact as maintenance", async t => {
@@ -501,7 +470,6 @@ test("an agent-owned worker is not closed while its thread has a command open", 
   const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
   t.after(() => backend.close());
   const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
-  const ui = { nativeSessionId: "parent", source: "ui", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
   const worker = await backend.createWorker(caller, { name: "worker", cwd: work });
   assert.equal(worker.owner, "agent", "the command guard applies to agent-owned workers");
   const turn = await backend.startTurn(caller, worker.id, "run it");
@@ -514,11 +482,11 @@ test("an agent-owned worker is not closed while its thread has a command open", 
   // The turn ended, so the record is idle and its report is decided first.
   await backend.acknowledgeReport(caller, worker.id, turn.turnId);
 
-  await assert.rejects(backend.closeSession(ui, worker.id), /command still running/,
+  await assert.rejects(backend.closeSession(caller, worker.id), /command still running/,
     "a command the thread reported as running is not abandoned by closing the Session");
   server.emit("notification", { method: "item/completed", params: { threadId: server.threadId, turnId: turn.turnId,
     item: { id: "cmd-1", type: "commandExecution", command: "sleep 20", status: "completed", exitCode: 0 } } });
-  await backend.closeSession(ui, worker.id);
+  await backend.closeSession(caller, worker.id);
   assert.equal((await backend.listWorkers(caller)).length, 0, "the closed worker is released from its parent");
 });
 

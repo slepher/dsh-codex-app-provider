@@ -266,7 +266,7 @@ src/
   worker-control.ts     worker 轮次的原生审批/提问桥
   worker-delivery.ts    worker 报告的持久投递
   identity.ts           调用方身份的捕获与重校验
-  models.ts, skills.ts, conversation.ts, browser-types.ts
+  models.ts, browser-types.ts
 cordis.patch.yml        唯一的 Host 插件条目
 locale/                 插件目录文案（en、zh）
 test/                   node:test 测试与脚本化 App Server 夹具

@@ -266,7 +266,7 @@ src/
   worker-control.ts     native approval/question bridge for worker turns
   worker-delivery.ts    durable worker-report delivery
   identity.ts           caller identity capture and revalidation
-  models.ts, skills.ts, conversation.ts, browser-types.ts
+  models.ts, browser-types.ts
 cordis.patch.yml        the one Host plugin entry
 locale/                 plugin catalog text (en, zh)
 test/                   node:test suites and scripted App Server fixtures

@@ -19,13 +19,13 @@ import type {
   RunState,
   SequencedBackendEvent,
   SessionSnapshot,
-  WorkerOwner,
   WorkerState,
 } from "./browser-types.js";
 
 export interface StoredWorker {
   parentSessionId: string;
-  owner: WorkerOwner;
+  /** `user` is accepted only when loading a legacy UI worker. */
+  owner: "agent" | "user";
   name: string;
   detached: boolean;
   savedState?: WorkerState;
@@ -108,7 +108,7 @@ export class SessionStore {
   }
 
   listWorkers(parentSessionId: string): StoredSession[] {
-    return [...this.records.values()].filter(record => record.worker?.parentSessionId === parentSessionId && !record.worker.detached);
+    return [...this.records.values()].filter(record => record.worker?.owner === "agent" && record.worker.parentSessionId === parentSessionId && !record.worker.detached);
   }
 
   bound(sessionId: string): StoredSession | undefined {

@@ -11,28 +11,29 @@ const waitFor = async check => {
 };
 
 function fixture(t, complete = true) {
-  const base = mkdtempSync(join(tmpdir(), "provider-watch-")), root = join(base, "workflow"), codex = join(base, "codex");
-  for (const path of [join(root, "scripts"), join(root, "src/client"), join(root, "lib/generated"), join(root, "lib/client"), join(root, "node_modules"), join(codex, "src/client")]) mkdirSync(path, { recursive: true });
+  const base = mkdtempSync(join(tmpdir(), "provider-watch-")), root = join(base, "provider"), codex = join(base, "codex");
+  for (const path of [join(root, "scripts"), join(root, "src"), join(root, "lib"), join(root, "node_modules"), join(codex, "src/client")]) mkdirSync(path, { recursive: true });
   writeFileSync(join(root, "scripts/watch.mjs"), readFileSync(new URL("../scripts/watch.mjs", import.meta.url)));
-  writeFileSync(join(root, "scripts/build-skills.mjs"), ""); writeFileSync(join(root, "scripts/build-client.mjs"), ""); writeFileSync(join(root, "tsconfig.client.json"), "{}"); writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { build: "fixture" } })); writeFileSync(join(root, "tsconfig.json"), "{}");
-  writeFileSync(join(root, "src/client/index.ts"), "w-0"); writeFileSync(join(root, "src/backend.ts"), "core-0"); writeFileSync(join(codex, "src/backend.ts"), "core-0");
-  if (complete) for (const path of ["lib/index.js", "lib/backend.js", "lib/provider.js", "lib/client.js", "lib/client/index.d.ts"]) writeFileSync(join(root, path), "live");
+  writeFileSync(join(root, "scripts/publish.mjs"), readFileSync(new URL("../scripts/publish.mjs", import.meta.url)));
+ writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { build: "fixture" } })); writeFileSync(join(root, "tsconfig.json"), "{}");
+  writeFileSync(join(root, "src/index.ts"), "w-0"); writeFileSync(join(root, "src/backend.ts"), "core-0"); writeFileSync(join(codex, "src/backend.ts"), "core-0");
+  if (complete) for (const path of ["lib/index.js", "lib/backend.js", "lib/provider.js"]) writeFileSync(join(root, path), "live");
   const npm = join(base, "npm");
   writeFileSync(npm, `#!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const home=${JSON.stringify(base)}, cwd=process.cwd();
-for (const file of ["tsconfig.client.json", "scripts/build-client.mjs"]) if (!existsSync(join(cwd,file))) process.exit(3);
-const text=readFileSync(join(cwd,"src/client/index.ts"),"utf8");
+
+const text=readFileSync(join(cwd,"src/index.ts"),"utf8");
 writeFileSync(join(home,"build-started"),text);
 if(text.includes("FAIL")){writeFileSync(join(home,"build-done"),text);process.exit(2);}
 if(text.includes("GATE")) await new Promise(resolve=>{const timer=setInterval(()=>{if(existsSync(join(home,"release"))){clearInterval(timer);resolve();}},10)});
 if(text.includes("BLOCK")){process.on("SIGINT",()=>setTimeout(()=>process.exit(0),80));await new Promise(()=>{});}
-mkdirSync(join(cwd,"lib"),{recursive:true});writeFileSync(join(cwd,"lib/index.js"),text);writeFileSync(join(home,"build-done"),text);
+for (const file of ["lib/index.js","lib/backend.js","lib/provider.js"]) { mkdirSync(join(cwd,file,".."),{recursive:true});writeFileSync(join(cwd,file),text); }writeFileSync(join(home,"build-done"),text);
 `); chmodSync(npm, 0o755);
   const env = { ...process.env, PATH: `${base}:${process.env.PATH}` }, children = [];
   t.after(async () => { for (const child of children) if (child.exitCode === null && child.signalCode === null) { child.kill("SIGINT"); await new Promise(resolve => child.once("exit", resolve)); } rmSync(base, { recursive: true, force: true }); });
-  return { base, root, codex, env, start(args = ["--no-initial-build", "--app-provider", codex]) { const child = spawn(process.execPath, [join(root,"scripts/watch.mjs"), ...args], { cwd: root, env, stdio: ["ignore","pipe","pipe"] }); child.output=""; child.stdout.on("data",c=>child.output+=c); child.stderr.on("data",c=>child.output+=c); children.push(child); return child; } };
+  return { base, root, codex, env, start(args = ["--watch", "--no-initial-build"], script = "publish.mjs") { const child = spawn(process.execPath, [join(root,"scripts",script), ...args], { cwd: root, env, stdio: ["ignore","pipe","pipe"] }); child.output=""; child.stdout.on("data",c=>child.output+=c); child.stderr.on("data",c=>child.output+=c); children.push(child); return child; } };
 }
 
 test("Provider no-initial mode requires the complete live baseline", t => {
@@ -42,23 +43,23 @@ test("Provider no-initial mode requires the complete live baseline", t => {
 
 test("Provider publishes only a complete staged build", async t => {
   const value=fixture(t), child=value.start(); await waitFor(()=>child.output.includes("watch ready"));
-  writeFileSync(join(value.root,"src/client/index.ts"),"w-1"); await waitFor(()=>child.output.includes("published"));
+  writeFileSync(join(value.root,"src/index.ts"),"w-1"); await waitFor(()=>child.output.includes("published"));
   assert.equal(readFileSync(join(value.root,"lib/index.js"),"utf8"),"w-1");
-  writeFileSync(join(value.root,"src/client/index.ts"),"w-FAIL"); await waitFor(()=>existsSync(join(value.base,"build-done"))&&readFileSync(join(value.base,"build-done"),"utf8")==="w-FAIL");
+  writeFileSync(join(value.root,"src/index.ts"),"w-FAIL"); await waitFor(()=>existsSync(join(value.base,"build-done"))&&readFileSync(join(value.base,"build-done"),"utf8")==="w-FAIL");
   assert.equal(readFileSync(join(value.root,"lib/index.js"),"utf8"),"w-1");
 });
 
-test("Execution source change overtaking client build permanently blocks publication", async t => {
-  const value=fixture(t), child=value.start(); await waitFor(()=>child.output.includes("watch ready"));
-  writeFileSync(join(value.root,"src/client/index.ts"),"w-GATE"); await waitFor(()=>existsSync(join(value.base,"build-started")));
-  writeFileSync(join(value.root,"src/backend.ts"),"core-1"); await waitFor(()=>child.output.includes("restart required"));
-  writeFileSync(join(value.base,"release"),""); await waitFor(()=>existsSync(join(value.base,"build-done"))&&readFileSync(join(value.base,"build-done"),"utf8")==="w-GATE");
-  writeFileSync(join(value.root,"src/client/index.ts"),"w-after-core"); await waitFor(()=>child.output.includes("publication skipped"));
+test("development watcher requires a restart for provider source changes", async t => {
+  const value=fixture(t), child=value.start(["--no-initial-build"], "watch.mjs");
+  await waitFor(()=>child.output.includes("watch ready"));
+  writeFileSync(join(value.root,"src/backend.ts"),"core-1");
+  await waitFor(()=>child.output.includes("restart required"));
+  assert.equal(existsSync(join(value.base,"build-started")),false);
   assert.equal(readFileSync(join(value.root,"lib/index.js"),"utf8"),"live");
 });
 
-test("SIGINT during cooperative client build cannot publish", async t => {
+test("SIGINT during cooperative publication build cannot publish", async t => {
   const value=fixture(t), child=value.start(); await waitFor(()=>child.output.includes("watch ready"));
-  writeFileSync(join(value.root,"src/client/index.ts"),"w-BLOCK"); await waitFor(()=>existsSync(join(value.base,"build-started"))); child.kill("SIGINT");
+  writeFileSync(join(value.root,"src/index.ts"),"w-BLOCK"); await waitFor(()=>existsSync(join(value.base,"build-started"))); child.kill("SIGINT");
   await waitFor(()=>child.exitCode!==null||child.signalCode!==null); assert.equal(readFileSync(join(value.root,"lib/index.js"),"utf8"),"live");
 });

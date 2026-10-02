@@ -1,75 +1,86 @@
-/**
- * One-shot publication of this plugin's built artifacts.
- *
- * The dev profile resolves this package through a symlink to this checkout, so
- * publishing means writing `lib/` here — never copying a tarball into DSH_HOME.
- * The build runs in a staging directory and replaces `lib/` in one rename, so a
- * host watching this directory never observes a half-written bundle.
- *
- * Usage: node scripts/publish.mjs            # build and publish once
- *        node scripts/publish.mjs --watch    # republish on every source change
- */
+// Build in staging and replace lib only after a complete, successful build.
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync, symlinkSync, watch } from "node:fs";
+import { cpSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, symlinkSync, watch } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const NAME = "dsh-codex-app-provider";
 const root = fileURLToPath(new URL("../", import.meta.url));
-const stageRoot = join(root, ".watch");
+const NAME = "dsh-codex-app-provider";
 const required = ["lib/index.js", "lib/backend.js", "lib/provider.js"];
-const watchMode = process.argv.includes("--watch");
-let child, pending = false, stopping = false;
+let child, stopped = false;
 
-/** Replace a directory with a freshly built stage, restoring the original on failure. */
-export function replaceDirectory(source, target) {
-  const backup = `${target}.watch-backup`; rmSync(backup, { recursive: true, force: true });
+function replaceDirectory(source, target) {
+  const backup = `${target}.watch-backup`;
+  rmSync(backup, { recursive: true, force: true });
   try {
     if (existsSync(target)) renameSync(target, backup);
-    renameSync(source, target); rmSync(backup, { recursive: true, force: true });
+    renameSync(source, target);
+    rmSync(backup, { recursive: true, force: true });
   } catch (error) {
     if (!existsSync(target) && existsSync(backup)) renameSync(backup, target);
     throw error;
   }
 }
 
-const build = () => new Promise((resolveExit, rejectExit) => {
-  child = spawn("npm", ["run", "build"], { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
-  child.once("error", rejectExit);
-  child.once("exit", code => resolveExit(code ?? 1));
-});
-
-/** Build in staging, verify the expected artifacts, then publish atomically. */
-export async function publish() {
-  const stage = join(stageRoot, "publish-build");
+async function publish(canPublish = () => true) {
+  const stage = join(root, ".watch", "publish-build");
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(join(stage, "scripts"), { recursive: true });
   for (const path of ["src", "package.json", "tsconfig.json"]) cpSync(join(root, path), join(stage, path), { recursive: true });
   symlinkSync(join(root, "node_modules"), join(stage, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-  const staged = await new Promise((resolveExit, rejectExit) => {
-    const build = spawn("npm", ["run", "build"], { cwd: stage, stdio: "inherit", shell: process.platform === "win32" });
-    build.once("error", rejectExit);
-    build.once("exit", code => resolveExit(code ?? 1));
-  });
-  if (staged !== 0) throw new Error(`${NAME} build failed (${staged})`);
+  const code = await new Promise((resolveExit, rejectExit) => {
+    child = spawn("npm", ["run", "build"], { cwd: stage, stdio: "inherit", shell: process.platform === "win32" });
+    child.once("error", rejectExit);
+    child.once("exit", code => resolveExit(code ?? 1));
+  }).finally(() => { child = undefined; });
+  if (stopped || !canPublish()) return;
+  if (code !== 0) throw new Error(`${NAME} build failed (${code})`);
   const missing = required.filter(path => !existsSync(join(stage, path)));
   if (missing.length) throw new Error(`${NAME} staged build is missing: ${missing.join(", ")}`);
   replaceDirectory(join(stage, "lib"), join(root, "lib"));
   console.log(`${NAME} published`);
 }
 
-if (!watchMode) {
-  try { await publish(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
-} else {
-  const rebuild = async () => {
-    if (child !== undefined || stopping || !pending) return;
-    pending = false;
-    try { await publish(); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
-    if (!stopping) void rebuild();
+export async function watchPublication(development = false) {
+  let pending = false, building = false, coreChanged = false;
+  const watchers = [];
+  const stop = () => {
+    stopped = true;
+    for (const watcher of watchers) watcher.close();
+    child?.kill("SIGINT");
   };
-  const stop = () => { stopping = true; child?.kill("SIGINT"); };
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, stop);
-  const watcher = watch(join(root, "src"), { recursive: true }, () => { pending = true; void rebuild(); });
-  console.log(`${NAME} publish watch ready`);
-  process.once("exit", () => watcher.close());
+  try {
+    if (process.argv.includes("--no-initial-build")) {
+      const missing = required.filter(path => !existsSync(join(root, path)));
+      if (missing.length) throw new Error(`--no-initial-build requires baseline artifacts: ${missing.join(", ")}`);
+    } else await publish();
+    if (stopped) return;
+    const rebuild = async () => {
+      if (building || stopped || !pending) return;
+      if (coreChanged) { pending = false; console.log(`${NAME} publication skipped: backend restart required`); return; }
+      building = true;
+      try {
+        while (pending && !stopped && !coreChanged) {
+          pending = false;
+          await publish(() => !coreChanged);
+        }
+      } catch (error) { console.error(String(error)); process.exitCode = 1; }
+      finally { building = false; if (pending && !stopped) void rebuild(); }
+    };
+    const changed = () => { pending = true; void rebuild(); };
+    const restart = () => {
+      if (!coreChanged) console.log(`${NAME} execution source changed; restart required; publication paused for this watch run`);
+      coreChanged = true;
+    };
+    watchers.push(watch(join(root, "src"), { recursive: true }, development ? restart : changed));
+    console.log(`${NAME} watch ready`);
+  } catch (error) { stop(); throw error; }
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    if (process.argv.includes("--watch")) await watchPublication();
+    else await publish();
+  } catch (error) { console.error(String(error)); process.exitCode = 1; }
 }
