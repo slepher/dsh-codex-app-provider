@@ -80,6 +80,22 @@ export class SessionStore {
   private readonly lock: string;
   private readonly records = new Map<string, StoredSession>();
 
+  /**
+   * Own one state directory.
+   *
+   * This store writes through `node:fs` on purpose. The platform filesystem
+   * seam (`ctx.fs`) is sandbox-fenced: under `workspace-write` it refuses every
+   * target outside the policy's writable roots, and this plugin's state
+   * directory lives under `$DSH_HOME/state/<profile>/codex`, which is outside
+   * the workspace — verified live on 0.2.0-rc.2, where a write here fails with
+   * `FS_SANDBOX_DENIED`. The seam also models text reads and version-guarded
+   * writes only; it has no exclusive directory creation, rename or directory
+   * listing, which is exactly what the single-owner lock and the record
+   * directory need. The record layer's convergence target is therefore
+   * `ctx.storageDomain` (a storage backend owns layout and atomicity), not
+   * `ctx.fs`.
+   * @param stateDir - absolute directory this store exclusively owns.
+   */
   constructor(readonly stateDir: string) {
     if (!isAbsolute(stateDir)) throw new Error("stateDir must be absolute");
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });

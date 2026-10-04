@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import type {
@@ -66,7 +66,7 @@ interface Runtime {
 
 interface ThreadResult {
   cwd?: string;
-  thread?: { id?: string; cwd?: string; path?: string; name?: string | null; preview?: string; updatedAt?: number; status?: { type?: string }; turns?: { id?: string; status?: string }[] };
+  thread?: { id?: string; cwd?: string; name?: string | null; preview?: string; updatedAt?: number; status?: { type?: string }; turns?: { id?: string; status?: string }[] };
   model?: string;
   reasoningEffort?: string;
   approvalPolicy?: string;
@@ -198,7 +198,6 @@ export class CodexSessionBackend implements CodexBackend {
       record.threadId = result.thread.id;
       reconcileBoundary(record, result);
       checkExecutionModel(record, result);
-      if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, result.thread.id) ?? record.usage;
       record.model = result.model;
       record.reasoningEffort = result.reasoningEffort;
       record.state = "idle";
@@ -249,7 +248,6 @@ export class CodexSessionBackend implements CodexBackend {
       record.threadId = result.thread.id;
       reconcileBoundary(record, result);
       checkExecutionModel(record, result);
-      if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, result.thread.id) ?? record.usage;
       record.model = result.model;
       record.reasoningEffort = result.reasoningEffort;
       record.state = "idle";
@@ -326,7 +324,6 @@ export class CodexSessionBackend implements CodexBackend {
       if (result.thread.status?.type === "active" || result.thread.turns?.some(turn => turn.status === "inProgress")) {
         throw new Error("Thread appears active; refusing to claim it");
       }
-      if (typeof result.thread.path === "string") record.usage = rolloutUsage(result.thread.path, record.threadId) ?? record.usage;
       record.state = "idle";
       if (record.worker !== undefined) record.worker.savedState = undefined;
       record.released = false;
@@ -935,6 +932,9 @@ export class CodexSessionBackend implements CodexBackend {
       }
       this.publish(record, { type: "turn.output", turnId: record.turnId, item: params.item });
     } else if (message.method === "thread/tokenUsage/updated") {
+      // The native notification is the single source of usage, and it is
+      // persisted so a cold recovery reports the last value this provider was
+      // told rather than re-reading Codex's private rollout file.
       record.usage = params.tokenUsage;
       this.store.put(record);
       this.publish(record, { type: "usage.updated", sessionId: record.sessionId, usage: params.tokenUsage });
@@ -1350,23 +1350,6 @@ function reconcilePending(record: StoredSession, result: ThreadResult): void {
   if (typeof result.model === "string" && result.model.length > 0) record.model = result.model;
   if (typeof result.reasoningEffort === "string" && result.reasoningEffort.length > 0) record.reasoningEffort = result.reasoningEffort;
   delete record.pending;
-}
-
-function rolloutUsage(path: string, threadId: string): unknown | undefined {
-  if (!isAbsolute(path)) return undefined;
-  let matches = false, usage: unknown;
-  try {
-    for (const line of readFileSync(path, "utf8").split("\n")) {
-      let row: any;
-      try { row = JSON.parse(line); } catch { continue; }
-      if (row?.type === "session_meta") matches = row.payload?.id === threadId;
-      if (!matches || row?.type !== "event_msg" || row.payload?.type !== "token_count") continue;
-      const info = row.payload.info;
-      if (!info) continue;
-      usage = { total: tokenValues(info.total_token_usage), last: tokenValues(info.last_token_usage), modelContextWindow: count(info.model_context_window) };
-    }
-  } catch { return undefined; }
-  return matches ? usage : undefined;
 }
 
 function tokenValues(value: any): UsageValues {

@@ -296,6 +296,7 @@ src/
   provider.ts           LLM adapter: models, requests, events, approvals, questions
   backend.ts            App Server RPC, thread/turn state machine, recovery
   rpc.ts                codex app-server --stdio transport (JSON lines over stdio)
+  process.ts            child-process and timer seams (ctx.subprocess, ctx.timer)
   store.ts              per-Session records and the single-owner lock
   context.ts            context filter for the codex route
   facts.ts              executed-fact messages committed to the DSH Session log
@@ -316,6 +317,21 @@ test/                   node:test suites and scripted App Server fixtures
 scripts/                compat verification, live harnesses, publish, watch
 EXECUTION.md            implementation log and per-phase evidence references
 ```
+
+## Process and usage ownership
+
+The App Server inherits its process policy from the deployment instead of owning one. When the
+composition provides `ctx.subprocess`, the runtime is spawned through it: `terminate()` runs the
+provider's TERM→KILL ladder over its whole managed range, and `waitForExit()` proves that range
+gone, so a descendant of the Codex CLI cannot outlive the plugin instance that started it.
+Request deadlines and the shutdown grace come from `ctx.timer`, so they are released with the
+provider rather than with a bare `setTimeout`. A composition that provides neither capability still
+runs the App Server, as an unmanaged child of this process, and the plugin logs one warning saying
+so — the same behaviour as before those capabilities existed.
+
+Usage is taken from Codex's own `thread/tokenUsage/updated` notification and persisted with the
+Session record, so a cold recovery reports the last value this provider was told. This plugin does
+not read Codex's private rollout JSONL for usage.
 
 ## Known limitations
 

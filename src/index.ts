@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
+import type { AppServerSpawner, AppServerTimer } from "./process.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
@@ -111,14 +112,56 @@ function defaultProviderCwd(ctx: Context): string {
   return launchedProfile(ctx)?.cwd ?? process.cwd();
 }
 
+/**
+ * The deployment's managed-process capability, when it has one.
+ *
+ * Read structurally rather than trusted by name: the service is optional and
+ * untyped here, so a value that does not actually offer `spawn` is treated as
+ * absent instead of failing later inside the transport.
+ * @param ctx - the Host context.
+ * @returns the spawner, or `undefined` when this composition has none.
+ */
+function subprocessSeam(ctx: Context): AppServerSpawner | undefined {
+  const value = ctx.get("subprocess") as Partial<AppServerSpawner> | undefined;
+  return value !== null && typeof value === "object" && typeof value.spawn === "function"
+    ? value as AppServerSpawner
+    : undefined;
+}
+
+/**
+ * The deployment's disposable-timer capability, when it has one.
+ * @param ctx - the Host context.
+ * @returns the timer seam, or `undefined` when this composition has none.
+ */
+function timerSeam(ctx: Context): AppServerTimer | undefined {
+  const value = ctx.get("timer") as Partial<AppServerTimer> | undefined;
+  return value !== null && typeof value === "object" && typeof value.timeout === "function"
+    ? value as AppServerTimer
+    : undefined;
+}
+
 /** Install one Codex execution owner and its native DSH route. */
 export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(function* () {
+    // Process ownership and timers are deployment capabilities, not plugin
+    // policy: `ctx.subprocess` terminates a whole managed range and joins it on
+    // release, which an unmanaged child of this process cannot promise. Both
+    // are optional capabilities, so a composition that provides neither still
+    // runs the App Server, as a child this process owns directly — and says so.
+    const spawner = subprocessSeam(ctx);
+    const timer = timerSeam(ctx);
+    const unmanaged = [spawner === undefined && "subprocess", timer === undefined && "timer"]
+      .filter((name): name is string => typeof name === "string");
+    if (unmanaged.length > 0) {
+      ctx.logger.warn("dsh-codex-app-provider: ctx.%s unavailable; the Codex App Server runs as an unmanaged child of this process", unmanaged.join(", ctx."));
+    }
     const backend = new CodexSessionBackend(
       resolve(config.stateDir ?? defaultStateDir(ctx)),
       // The transport factory carries a gated runtime's gate environment and
       // leaves an ungated one with exactly the environment it had before.
       options => new AppServer({ command: config.command, timeoutMs: config.requestTimeoutMs,
+        ...(spawner === undefined ? {} : { spawner }),
+        ...(timer === undefined ? {} : { timer }),
         ...(options?.env === undefined ? {} : { env: options.env }) }),
     );
     let provider: CodexProviderAdapter | undefined;

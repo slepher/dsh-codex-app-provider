@@ -261,18 +261,15 @@ test("routes blocking user input to an interactive subscriber and answers exactl
   assert.deepEqual(server.responses.at(-1), { id: 78, result: { answers: {} } });
 });
 
-test("preserves typed skills, reads rollout usage, and marks compact as maintenance", async t => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-rollout-"));
+test("preserves typed skills and marks compact as maintenance", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-skills-"));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
-  const servers = [], rollout = join(stateDir, "rollout.jsonl");
-  writeFileSync(rollout, `${JSON.stringify({ type: "session_meta", payload: { id: "history-thread" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 12, input_tokens: 8, output_tokens: 4 }, last_token_usage: { total_tokens: 5 }, model_context_window: 100 } } })}\n`);
-  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); server.threadPath = rollout; server.threadId = "history-thread"; servers.push(server); return server; });
+  const servers = [];
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); server.threadId = "history-thread"; servers.push(server); return server; });
   t.after(() => backend.close());
 
   const opened = await backend.createSession("owner", "opened", "/work");
   assert.equal(opened.threadId, "history-thread");
-  assert.equal((await backend.readSession("owner", "opened")).usage.total.totalTokens, 12,
-    "the claimed thread's rollout usage is read from its record");
 
   const turn = await backend.startTurn("owner", "opened", [
     { type: "text", text: "use it" },
@@ -295,12 +292,34 @@ test("preserves typed skills, reads rollout usage, and marks compact as maintena
   assert.equal((await backend.occupiedThreads()).includes("history-thread"), false, "idle close releases occupancy");
 });
 
+test("a resumed Session recovers the last usage from the provider's own record", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-usage-recovery-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const servers = [];
+  const first = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
+  await first.createSession("owner", "codex:session", "/work");
+  const turn = await first.startTurn("owner", "codex:session", "count the tokens");
+  servers.at(-1).emit("notification", { method: "thread/tokenUsage/updated", params: {
+    threadId: "thread-1", turnId: turn.turnId,
+    tokenUsage: { total: { totalTokens: 12, inputTokens: 8, outputTokens: 4 }, last: { totalTokens: 5 }, modelContextWindow: 100 },
+  } });
+  assert.equal((await first.readSession("owner", "codex:session")).usage.total.totalTokens, 12);
+  // A process that ends mid-turn leaves the record durable, and the usage with it.
+  await first.close();
+
+  const second = new CodexSessionBackend(stateDir, () => new FakeServer());
+  t.after(() => second.close());
+  const recovered = await second.readSession("owner", "codex:session");
+  assert.equal(recovered.usage.total.totalTokens, 12, "the last known usage is this provider's own record, not Codex's rollout file");
+  assert.equal(recovered.usage.modelContextWindow, 100);
+  assert.equal(recovered.state, "unknown", "the interrupted turn is still uncertain, without losing the usage it reported");
+});
+
 test("maps base64 and host-path images and rejects invalid image payloads before any turn", async t => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-image-input-"));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
-  const servers = [], rollout = join(stateDir, "rollout.jsonl");
-  writeFileSync(rollout, `${JSON.stringify({ type: "session_meta", payload: { id: "history-thread" } })}\n`);
-  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); server.threadPath = rollout; servers.push(server); return server; });
+  const servers = [];
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
   t.after(() => backend.close());
   await backend.createSession("owner", "imported", "/work");
 

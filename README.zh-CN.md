@@ -288,6 +288,7 @@ src/
   provider.ts           LLM adapter：模型、请求、事件、审批、提问
   backend.ts            App Server RPC、thread/turn 状态机、恢复
   rpc.ts                codex app-server --stdio 传输（stdio 上的 JSON 行）
+  process.ts            子进程与计时器接缝（ctx.subprocess、ctx.timer）
   store.ts              每 Session 记录与单 owner 锁
   context.ts            codex 路由的上下文过滤器
   facts.ts              写入 DSH Session 日志的执行事实消息
@@ -308,6 +309,17 @@ test/                   node:test 测试与脚本化 App Server 夹具
 scripts/                兼容性验证、真实测试 harness、发布、watch
 EXECUTION.md            实施日志与各阶段证据索引
 ```
+
+## 进程与用量的归属
+
+App Server 的进程策略来自部署，而不是自带一套。组合提供 `ctx.subprocess` 时，runtime 由它启动：
+`terminate()` 在托管范围内执行 provider 自己的 TERM→KILL 梯度，`waitForExit()` 证明该范围已经清空，
+因此 Codex CLI 的后代进程不会比启动它的插件实例活得更久。请求超时与关闭宽限来自 `ctx.timer`，
+随 provider 释放，而不是裸 `setTimeout`。若组合两者都没有，App Server 仍会运行，只是作为本进程的
+非托管子进程，插件会为此警告一次——与这两个能力出现之前的行为一致。
+
+用量取自 Codex 自己的 `thread/tokenUsage/updated` 通知，并随 Session 记录一起落盘，因此冷恢复读到的是
+本 provider 最后被告知的值。插件不读 Codex 的私有 rollout JSONL 来取用量。
 
 ## 已知限制
 
