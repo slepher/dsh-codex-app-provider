@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import type {
@@ -1185,11 +1184,6 @@ function normalizeUsage(value: unknown): Usage | null {
   };
 }
 
-function availableDirectory(path: unknown): path is string {
-  if (typeof path !== "string" || !isAbsolute(path)) return false;
-  try { return statSync(path).isDirectory(); } catch { return false; }
-}
-
 /**
  * Record one command item's live status.
  *
@@ -1206,16 +1200,3 @@ function trackCommand(runtime: Runtime, method: string, params: Record<string, u
   runtime.commands.set(item.id, typeof item.status === "string" ? item.status : method === "item/started" ? "inProgress" : "completed");
 }
 
-/**
- * Whether the runtime still has a command item open.
- *
- * A runtime that is gone cannot be asked. Its record's own state already decides:
- * only an idle or confirmed-stopped Session is closable, and a resume is refused
- * while the thread reports a turn in progress, so an accepted runtime has no open
- * command to lose.
- * @param runtime - the runtime holding the Session, when this process holds one.
- * @returns whether any tracked command item is still running.
- */
-function hasActiveCommand(runtime: Runtime | undefined): boolean {
-  return [...(runtime?.commands.values() ?? [])].some(status => status === "inProgress");
-}
