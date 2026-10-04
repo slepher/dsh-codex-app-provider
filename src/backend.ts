@@ -29,7 +29,8 @@ import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { feedsExecutionFacts, projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
 import { modelSettings } from "./models.js";
 import { AppServer, RpcError, type RpcMessage, UncertainError } from "./rpc.js";
-import { SessionStore, type StoredSession } from "./store.js";
+import { SessionStore } from "./store.js";
+import type { StoredSession } from "./records.js";
 import { normalizeUsage } from "./usage.js";
 import type { CodexGateBridge, GateRecordFacts, HookRunEvidence } from "./tool-gate.js";
 
