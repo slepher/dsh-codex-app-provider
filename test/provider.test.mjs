@@ -100,7 +100,7 @@ function cleanup(fixture) {
   rmSync(fixture.cwd, { recursive: true, force: true });
 }
 
-function adapterFor(fixture, { approval, questions, attachments, agents = new Map(), sessions = new Map() } = {}) {
+function adapterFor(fixture, { approval, questions, attachments, agents = new Map(), sessions = new Map(), logger } = {}) {
   return new CodexProviderAdapter({
     backend: fixture.backend,
     sessions: { get: id => sessions.get(id) },
@@ -108,7 +108,7 @@ function adapterFor(fixture, { approval, questions, attachments, agents = new Ma
     approval,
     questions,
     attachments,
-    logger: { warn() {} },
+    logger: logger ?? { warn() {} },
     providerCwd: fixture.cwd,
   });
 }
@@ -1754,4 +1754,59 @@ test("an approval policy the plugin never asked for is recorded as native fact",
   const record = await fixture.backend.readSession(OWNER, "codex:child");
   assert.equal(record.applied.approvalPolicy, "on-request", "native facts are recorded, not the request");
   assert.equal(record.state, "idle");
+});
+
+test("refuses a call control the Codex route cannot honor", async t => {
+  const fixture = setup("dsh-provider-options-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const adapter = adapterFor(fixture);
+  t.after(() => adapter.close());
+  const messages = [user("u1", "hello")];
+
+  for (const [field, value] of [["temperature", 0.5], ["maxTokens", 128], ["stop", ["halt"]]]) {
+    await assert.rejects(collect(adapter.stream(options("main", messages, { [field]: value }))), error => {
+      const code = error?.failure?.code ?? error?.code;
+      return code === "UNSUPPORTED_OPTION" && String(error?.message).includes(field);
+    }, `${field} is refused rather than silently dropped`);
+  }
+  assert.equal(fixture.hub.servers.length, 0, "the refusal happens before any thread is started");
+});
+
+test("refuses to import facts when the session log cannot be read", async t => {
+  const fixture = setup("dsh-provider-factlog-");
+  t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
+  const session = new FakeAppendSession("main", fixture.cwd);
+  const adapter = adapterFor(fixture, { sessions: new Map([["main", session]]) });
+  t.after(() => adapter.close());
+
+  // One turn with a readable log imports the executed fact exactly once.
+  await liveTurn(adapter, fixture, "main", options("main", [user("u1", "run it")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: {
+      id: "item-1", type: "commandExecution", command: "echo hi", status: "completed", exitCode: 0, aggregatedOutput: "hi\n" } });
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  assert.equal(session.appended.length, 1, "the executed fact is imported while the log is readable");
+
+  // The same record behind a session face that cannot read its log. Treating it
+  // as an empty log would append the whole executed history again every turn.
+  const reimported = [];
+  const unreadable = { header: { cwd: fixture.cwd }, append(...args) { reimported.push(args); } };
+  const warnings = [];
+  const second = new CodexProviderAdapter({
+    backend: fixture.backend,
+    sessions: { get: id => (id === "main" ? unreadable : undefined) },
+    agents: { get() {} },
+    logger: { warn: message => warnings.push(message) },
+    providerCwd: fixture.cwd,
+  });
+  t.after(() => second.close());
+
+  const chunks = await liveTurn(second, fixture, "main", options("main", [user("u2", "again")]), async server => {
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done again" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  assert.equal(reimported.length, 0, "an unreadable log is never treated as an empty one");
+  assert.ok(warnings.some(message => /not readable/.test(message)), `the degradation is reported once, got: ${warnings.join(" | ")}`);
+  assert.equal(chunks.at(-1)?.reason?.kind, "stop", "the turn itself still completes");
 });

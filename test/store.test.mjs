@@ -152,7 +152,12 @@ test("rejects partial or owner-mismatched worker blocks", () => {
   }
 });
 
-test("a lock is read by process identity, not by a recycled pid number", async t => {
+// The lock's process identity is `/proc`-based, so this case can only assert
+// what the platform can express.
+const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
+
+test("a lock is read by process identity, not by a recycled pid number",
+  { skip: existsSync(BOOT_ID_PATH) ? false : "requires /proc boot identity (Linux)" }, async t => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-lock-identity-"));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const lock = join(stateDir, "owner.lock");
@@ -161,7 +166,7 @@ test("a lock is read by process identity, not by a recycled pid number", async t
     writeFileSync(join(lock, "owner.json"), JSON.stringify(owner));
   };
   const start = processStartTime(process.pid);
-  const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  const boot = readFileSync(BOOT_ID_PATH, "utf8").trim();
   assert.notEqual(start, undefined, "this process has a start time to identify it by");
 
   // The process named by the lock is running and is still the process that wrote it.

@@ -546,3 +546,31 @@ test("a record keeps the executed facts and not the notifications that carried t
   assert.equal("nextEventSequence" in onDisk, false, "the live subscriber cursor is not durable state");
   assert.equal(JSON.stringify(onDisk).includes("STREAMED_PROSE"), false, "model text never enters the record");
 });
+
+test("stream text is published without rewriting the record, and a settled item is durable", async t => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-persist-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const servers = [];
+  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
+  t.after(() => backend.close());
+  await backend.createSession("owner", "session", "/work");
+  const turn = await backend.startTurn("owner", "session", "work");
+  const server = servers[0];
+
+  // Count record writes at the only seam that has them.
+  const store = backend.store;
+  const writes = [];
+  const put = store.put.bind(store);
+  store.put = record => { writes.push(record.sessionId); return put(record); };
+
+  for (const delta of ["Hel", "lo", "!"]) {
+    server.emit("notification", { method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: turn.turnId, itemId: "msg", delta } });
+  }
+  assert.deepEqual(writes, [], "a streaming delta carries no durable record change");
+
+  server.emit("notification", { method: "item/completed", params: { threadId: "thread-1", turnId: turn.turnId,
+    item: { id: "msg", type: "agentMessage", text: "Hello!", phase: "final_answer" } } });
+  assert.equal(writes.length, 1, "a settled assistant message is durable state");
+  const onDisk = JSON.parse(readFileSync(join(stateDir, "sessions", `${encodeURIComponent("session")}.json`), "utf8"));
+  assert.equal(onDisk.lastOutput, "Hello!", "the settled output survives a restart");
+});

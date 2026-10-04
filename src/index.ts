@@ -1,6 +1,6 @@
 import type { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { CodexSessionBackend } from "./backend.js";
 import { AppServer } from "./rpc.js";
@@ -50,13 +50,30 @@ export const Config: z<Config> = z.object({
 export const inject = ["agents", "sessions", "llm"];
 
 /**
- * Launcher-provided profile facts.
+ * Launcher-provided profile facts, read defensively.
+ *
+ * `profileContext` is not a typed DSH service face: the live runtime carries
+ * the profile's name (state lands under it today) while the declared contract
+ * does not name that field, so no value here is trusted unexamined. A field
+ * that is absent or unusable is omitted, and the derivations below fall back
+ * to the environment.
  * @param ctx - the Host context.
- * @returns the launched profile's name, home, and launch directory, or
- * `undefined` when the process was booted without a profile.
+ * @returns the usable profile facts, or `undefined` when the service is absent.
  */
 function launchedProfile(ctx: Context): { name?: string; home?: string; cwd?: string } | undefined {
-  return ctx.get("profileContext") as { name?: string; home?: string; cwd?: string } | undefined;
+  const value = ctx.get("profileContext") as Record<string, unknown> | undefined;
+  if (value === null || typeof value !== "object") return undefined;
+  const name = text(value.name), home = text(value.home), cwd = text(value.cwd);
+  return {
+    ...(name === undefined ? {} : { name }),
+    ...(home === undefined || !isAbsolute(home) ? {} : { home }),
+    ...(cwd === undefined || !isAbsolute(cwd) ? {} : { cwd }),
+  };
+}
+
+/** A non-empty string, or `undefined` for every other value. */
+function text(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 /**
@@ -75,7 +92,11 @@ function defaultStateDir(ctx: Context): string {
   const profile = launchedProfile(ctx);
   const configuredHome = process.env.DSH_HOME?.trim();
   const home = profile?.home ?? (configuredHome === undefined || configuredHome === "" ? join(homedir(), ".dsh") : configuredHome);
-  return join(home, "state", profile?.name ?? "default", "codex");
+  // The profile name is what keeps two profiles on one home apart.
+  // `profileContext.name` is the launcher's own answer; `DSH_PROFILE` is the
+  // same fact from the environment, used when a host does not expose the former.
+  const name = profile?.name ?? text(process.env.DSH_PROFILE) ?? "default";
+  return join(home, "state", name, "codex");
 }
 
 /**

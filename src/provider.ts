@@ -185,6 +185,18 @@ export class CodexProviderAdapter extends LlmAdapter {
     return { id: provider, name: "Codex" };
   }
 
+  /**
+   * This route declares no image pricing.
+   *
+   * Codex reports its own token accounting (`thread/tokenUsage/updated`) and
+   * exposes no per-image price to this client, so the route states that it has
+   * none instead of inventing a number for the token meter. The images still
+   * travel; only the price is absent.
+   */
+  imageRequestPricing(_provider: string, _model: string): undefined {
+    return undefined;
+  }
+
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const settings = await this.catalog();
     return settings.models.map(model => ({
@@ -276,6 +288,7 @@ export class CodexProviderAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (this.closed) throw new LlmError("Codex provider is shutting down", "DISPOSED");
+    assertSupportedOptions(options);
     const controller = new AbortController();
     const onAbort = (): void => controller.abort();
     options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -389,11 +402,19 @@ export class CodexProviderAdapter extends LlmAdapter {
       this.noteFactImportFailure(sessionId, "the Session is not appendable in this composition");
       return;
     }
+    if (session.snapshotEvents === undefined) {
+      // Reading the log is what makes the import idempotent. Without it an
+      // already-imported fact is indistinguishable from a new one, and
+      // importing anyway would append the whole executed history again on
+      // every turn. Refuse, and report that once.
+      this.noteFactImportFailure(sessionId, "the Session log is not readable in this composition, so an already-imported fact cannot be recognized");
+      return;
+    }
     try {
       const facts = await this.deps.backend.readFacts(OWNER_ID, backendSessionId(sessionId));
       const pending = factMessages(facts);
       if (pending.length === 0) return;
-      const imported = new Set(importedFactIds(session.snapshotEvents?.() as readonly { type: string; data: unknown }[] | undefined));
+      const imported = new Set(importedFactIds(session.snapshotEvents()));
       for (const fact of pending) {
         if (imported.has(fact.id)) continue;
         // Called on the Session itself: `append` is an instance method that owns
@@ -1276,6 +1297,28 @@ function isAgentMessage(value: unknown): value is { type: "agentMessage"; text: 
   if (typeof value !== "object" || value === null) return false;
   const item = value as { type?: unknown; text?: unknown };
   return item.type === "agentMessage" && typeof item.text === "string";
+}
+
+/**
+ * Refuse a call control this route cannot honor.
+ *
+ * The cookbook's rule is explicit: a `GenerateOptions` field the provider
+ * cannot honor is rejected with `UNSUPPORTED_OPTION` rather than silently
+ * dropped, because an ignored setting is indistinguishable from an applied one.
+ * `system`, `tools` and `toolHistory` are deliberately unread — Codex owns its
+ * own prompt and tool surface, and `installCodexContextFilter` keeps DSH's
+ * copies out of the request — so they are not rejections.
+ * @param options - the assembled request.
+ * @throws when the request carries a call control Codex cannot receive.
+ */
+function assertSupportedOptions(options: GenerateOptions): void {
+  const unsupported = ([
+    ["temperature", options.temperature],
+    ["maxTokens", options.maxTokens],
+    ["stop", options.stop],
+  ] as const).filter(([, value]) => value !== undefined).map(([field]) => `"${field}"`);
+  if (unsupported.length === 0) return;
+  throw new LlmError(`The Codex route cannot honor ${unsupported.join(", ")}; remove the setting for this route`, "UNSUPPORTED_OPTION");
 }
 
 function turnOptions(options: GenerateOptions): { model: string; reasoningEffort?: string } {

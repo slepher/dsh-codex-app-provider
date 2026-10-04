@@ -881,6 +881,7 @@ export class CodexSessionBackend implements CodexBackend {
       record.approvals = [];
       runtime.requests.clear();
       runtime.inputs.clear();
+      this.store.put(record);
       this.publish(record, { type: "session.uncertain", error: `Execution state unknown: ${String(error)}` });
       this.projectFacts(record);
       if (record.worker !== undefined) this.notifyWorker(record, "uncertain");
@@ -930,6 +931,7 @@ export class CodexSessionBackend implements CodexBackend {
       if (item.type === "agentMessage" && typeof item.text === "string") {
         if (item.phase === "final_answer") record.lastOutput = item.text;
         else if (item.phase == null) record.lastUnphasedOutput = item.text;
+        this.store.put(record);
       }
       this.publish(record, { type: "turn.output", turnId: record.turnId, item: params.item });
     } else if (message.method === "thread/tokenUsage/updated") {
@@ -985,6 +987,9 @@ export class CodexSessionBackend implements CodexBackend {
         reportReady = { type: "report.ready", workerId: record.sessionId, turnId: turn.id, parentSessionId: record.worker.parentSessionId };
       }
     }
+    // The terminal transition is durable state: the turn identity, the state,
+    // the report and the cleared approval ledger must survive a restart.
+    this.store.put(record);
     const event: BackendEvent = {
       type: "turn.state",
       turn: turnSnapshot(record, terminal),
@@ -1104,8 +1109,11 @@ export class CodexSessionBackend implements CodexBackend {
     const committed = events.map(event => ({ sequence: ++this.sequence, event: structuredClone(event) }));
     // Only the events a fact can be projected from are retained; the stream that
     // carries model text and status notices is published, not stored.
+    // Persistence belongs to state transitions, not to the notification feed:
+    // a streaming item delta carries no durable record change, and rewriting
+    // the whole record per delta is pure I/O. Callers that mutate the record
+    // persist it themselves.
     for (const item of committed) if (runtime !== undefined && feedsExecutionFacts(item.event)) runtime.facts.push(item);
-    this.store.put(record);
     for (const { event, sequence } of committed) {
       for (const listener of this.listeners.get(record.sessionId) ?? []) listener(structuredClone(event), sequence);
     }
