@@ -286,12 +286,33 @@ ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), do
 
 结论：**可以迁，但不该与本次一起做**。收益是删掉 ~140 行手写校验器 + 原子写，代价是一次
 带迁移的状态目录搬家 + 坏记录语义放宽 + 锁逻辑仍要自持；而 §10.2 已经把"记录是缓存"这一
-结构性问题解决。建议的下一步（独立交付单元）：先落 zapf 级别的 zod schema 与 `defineDomain`
+结构性问题解决。建议的下一步（独立交付单元）：先落字段级的 zod schema 与 `defineDomain`
 声明 + 一个测试证明"同一批记录在域里 open→put→get 往返等价"，再写一次性迁移与回滚，
 最后删 `store.ts` 的手写持久化。
 
-### 10.4 仍未做
 
-- §10.3 的域迁移；§10.2 里"彻底删掉记录中的身份缓存"（需要把日志读面升级为必需 seam）。
-- LEAN-PLAN §3 里 C1 的分层（`provider.ts`/`backend.ts` 各 1200+ 行仍承担多职责）。
-- T5：`npm run test:live -- --fake` 的确定性全栈；B3 的整轮行为探针。
+### 10.4 用户裁定（2026-10-04，晚）：记录可弃，不做搬迁
+
+§10.3 里"需要一次性迁移"这一条**作废**：用户明确表示 provider 自己的记录无所谓，不搬迁也可以。
+于是 T3-2 的形态变为"直接把持久化层换成域，旧 `sessions/*.json` 原样留下（不自动删）"，代价只剩
+下面三条**已实测**的前置条件：
+
+1. `zod@4.6.5` 在 `node_modules/zod` 里存在（传递依赖）但 `package.json` 未声明 → 需先声明；
+   本机无网络，改 lockfile 要靠 `npm install --offline` 或换机器。
+2. `@deepseek-ai/dsh-storage-domain` **从插件目录 resolve 不到**（只在 DSH asar 载荷里），所以
+   `import { defineDomain }` 在当前环境不可用；但 `open(spec)` 只读
+   `name/version/layout/tables[t].valueSchema/global/invalidRecords`（无 brand、无注册表），
+   可用 `zod` 手搓等价 spec（`domainTable(schema)` 即 `{ valueSchema: schema }`）。
+   路线 A（加该包为依赖）需网络；路线 B（只用 zod + 本地结构类型）离线可行。
+3. `ctx.storageDomain` 来自 ctx，而 `CodexSessionBackend` 现在不需要 ctx（约 39 处测试直接构造）
+   → 需要先加一个可注入的 store 端口，改动量比"删校验器"大。
+
+**结论调整**：在"记录无所谓"的前提下，T3-2 的收益只剩删 ~140 行手写校验器与手写原子写，而
+§10.2 已解决结构性问题（身份不再是第二份真相）。若只为推进度，**优先做 C1 分层**（纯搬运、零
+宿主耦合）比 T3-2 更划算。T3-2 保留为可选单元。
+
+### 10.5 仍未做（更新）
+
+- T3-2（可选，见 §10.4 的三条前置条件）；T3-3：把日志读面升级为必需 seam 后删掉记录里的身份缓存。
+- C1 分层（`provider.ts` 1331 行 / `backend.ts` 1202 行）——**推荐的下一步**。
+- T5：`npm run test:live -- --fake`（本机被 npm network 阻塞）；B3 的整轮行为探针。
