@@ -55,6 +55,9 @@ function dshGeneration(manifest) {
 
 const dir = await mkdtemp(join(tmpdir(), "dsh-app-live-"));
 const home = join(dir, "home"), profile = join(home, "profiles", "codex-app-test"), workspace = join(dir, "workspace");
+// `evidence/` is this harness's ignored output directory; a clean checkout does
+// not have it, and the run report is written before anything else happens.
+await mkdir(evidence, { recursive: true });
 await mkdir(profile, { recursive: true }); await mkdir(workspace);
 const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const version = manifest.version;
