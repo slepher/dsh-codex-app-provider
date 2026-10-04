@@ -1,5 +1,13 @@
 import type { GateBinding } from "./tool-gate.js";
 
+/**
+ * The provider route this plugin registers with DSH, and the marker every
+ * message it commits to a Session log carries. Shared vocabulary: the adapter
+ * registers it, and the history layer reads it back out of the log to tell its
+ * own turns from another provider's.
+ */
+export const CODEX_PROVIDER = "codex";
+
 export type SessionId = string;
 export type ThreadId = string;
 export type TurnId = string;
