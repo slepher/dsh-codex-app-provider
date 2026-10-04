@@ -245,6 +245,41 @@ npm run publish:watch             # 源码变化即重新发布
 
 真实模型运行需要 Codex 登录状态与网络，不属于 `npm test`。
 
+### 开发期的热重载
+
+出厂底座以 `root: []` 启用 HMR：**配置类**变更（改 patch、安装、启停）对运行中的 Host 立即生效，
+但**不监视任何模块文件**，因此在 opt-in 之前，改本插件的代码仍需重启。官方 recipe 写在 profile 的
+patch 层：
+
+```yaml
+- id: hmr
+  disabled: false
+  config:
+    root: ["."]
+```
+
+该 recipe 监视 profile 目录树，而用 `link:` 安装的插件在其中被拼成 `node_modules/<name>/...`，
+会被默认的 `ignored: ["**/node_modules", ...]` 过滤，所以对本仓库不生效——在 0.2.0-rc.2 上实测：
+官方 recipe 在 `touch lib/index.js` 后插件毫无反应，而把 `base` 指向本 checkout、`root: ["lib"]`
+时几秒内即完成重载。
+
+`scripts/enable-hmr.mjs` 会替你写入这条条目（默认 dry-run）：
+
+```bash
+node scripts/enable-hmr.mjs                # 打印将要写入的内容
+node scripts/enable-hmr.mjs --write        # 写入 $DSH_PROFILE_DIR
+node scripts/enable-hmr.mjs --write --profile ~/.dsh/profiles/<profile>
+node scripts/enable-hmr.mjs --write --remove   # 回到出厂默认
+```
+
+HMR 监视 profile patch、home patch 与 profile manifest，因此这条条目**无需重启**即可生效；之后
+`npm run build`（或常驻的 `tsc --watch` / `npm run publish:watch`）会在写入后约两秒触发重载
+（`awaitWriteFinish` 2 秒 + 100 毫秒 debounce）。只监视本包的 `lib/`；重载会拆除插件实例，
+因此正在运行的 Codex worker 会被中断。
+
+这只是开发机设置。安装已发布版本的用户不需要它：首次安装会在运行中的 Host 内激活，而**替换**包
+需要重启进程才能加载新的模块代际（`@deepseek-ai/dsh-plugin-manager` 已把这条列为已知限制）。
+
 ## 仓库结构
 
 ```text

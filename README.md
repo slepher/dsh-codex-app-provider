@@ -245,6 +245,49 @@ Test layers, so a failure is reported at the right level:
 
 Real-model runs need Codex login state and network; they are not part of `npm test`.
 
+### Hot reload while developing
+
+The shipped base bundle enables HMR with `root: []`: configuration changes
+(patch edits, installs, enable/disable) apply to a running Host immediately,
+but **no module files are watched**, so editing this plugin's code needs a
+restart until you opt in. Its README gives the official recipe, to be written
+in the profile's patch layer:
+
+```yaml
+- id: hmr
+  disabled: false
+  config:
+    root: ["."]
+```
+
+That recipe watches the profile tree. A plugin installed with `link:` resolves
+to `node_modules/<name>/...` there and is filtered out by the default
+`ignored: ["**/node_modules", ...]`, so it does not reload this checkout —
+measured on 0.2.0-rc.2: the official recipe left the plugin untouched on a
+touched `lib/index.js`, while `base` pointed at the checkout with
+`root: ["lib"]` reloaded it within seconds.
+
+`scripts/enable-hmr.mjs` writes that entry for you (dry run by default):
+
+```bash
+node scripts/enable-hmr.mjs                # print the change
+node scripts/enable-hmr.mjs --write        # apply to $DSH_PROFILE_DIR
+node scripts/enable-hmr.mjs --write --profile ~/.dsh/profiles/<profile>
+node scripts/enable-hmr.mjs --write --remove   # back to the shipped default
+```
+
+HMR watches the profile patch, the home patch and the profile manifest, so the
+entry applies without a restart; afterwards `npm run build` (or a running
+`tsc --watch` / `npm run publish:watch`) reloads the plugin about two seconds
+after the write (`awaitWriteFinish` 2 s + 100 ms debounce). Only this package's
+`lib/` is watched, and a reload tears down the plugin instance, so live Codex
+workers are interrupted.
+
+This is a development-machine setting only. A user who installs a published
+build does not need it: a first install activates in the running Host, while a
+package **replacement** needs a process restart to load a fresh module
+generation, as `@deepseek-ai/dsh-plugin-manager` documents.
+
 ## Repository layout
 
 ```text
