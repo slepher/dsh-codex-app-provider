@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -277,6 +277,56 @@ test("relearns the context window from persisted provider records after a restar
   });
   const info = await second.resolveModel("codex", "luna");
   assert.equal(info.context.contextWindow, 123456, "persisted usage survives provider restarts");
+});
+
+test("recovers a native thread identity the record lost from the DSH session log", async t => {
+  const fixture = setup("dsh-provider-identity-");
+  const session = new FakeAppendSession("s1", fixture.cwd);
+  const sessions = new Map([["s1", session]]);
+  const first = adapterFor(fixture, { sessions });
+  let threadId, turnId;
+  await liveTurn(first, fixture, "s1", options("s1", [user("u1", "first")]), async server => {
+    threadId = server.threadId;
+    turnId = server.turnId;
+    server.notify("item/completed", { threadId, turnId, item: { type: "agentMessage", phase: "final_answer", text: "first answer" } });
+    server.notify("turn/completed", { threadId, turn: { id: turnId, status: "completed" } });
+  });
+  first.close();
+  await fixture.backend.close();
+  // What the core writes when a turn settles: the reply carrying the identity the
+  // adapter reported as its own replay state.
+  appendCodexReply(session, threadId, { id: "a1", text: "first answer", turnId, input: "first" });
+
+  // The provider's own record is a cache. A lost cache must not lose the thread.
+  const recordPath = join(fixture.stateDir, "sessions", `${encodeURIComponent("codex:s1")}.json`);
+  const persisted = JSON.parse(readFileSync(recordPath, "utf8"));
+  assert.equal(persisted.threadId, threadId);
+  delete persisted.threadId;
+  writeFileSync(recordPath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+  const restarted = new CodexSessionBackend(fixture.stateDir, () => new FakeServer(fixture.hub));
+  const second = new CodexProviderAdapter({
+    backend: restarted,
+    sessions: { get: id => sessions.get(id) },
+    agents: { get: () => undefined },
+    logger: { warn() {} },
+    providerCwd: fixture.cwd,
+  });
+  t.after(async () => { second.close(); await restarted.close(); cleanup(fixture); });
+
+  const done = collect(second.stream(options("s1", [user("u2", "second")])));
+  // The identity is adopted only once the resumed thread confirms it, so wait for
+  // the record rather than for the call the transport has merely issued.
+  await waitFor(async () => (await restarted.readSession(OWNER, "codex:s1"))?.threadId === threadId, "recovered thread identity");
+  const server = fixture.hub.servers.find(item => item.calls?.some(call => call.method === "thread/resume"));
+  assert.deepEqual(server.calls.filter(call => call.method === "thread/resume").map(call => call.params.threadId), [threadId],
+    "the log's replay state supplies the identity the record no longer carries");
+  assert.equal(server.calls.some(call => call.method === "thread/start"), false,
+    "a Session whose log carries a thread identity never starts a new thread");
+  await waitFor(() => server.turnId !== undefined, "recovered turn identity");
+  server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "second answer" } });
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  assert.equal((await done).at(-1).reason.kind, "stop");
 });
 
 test("imports cross-provider and tool history once and fails closed on images without the attachment seam", async t => {

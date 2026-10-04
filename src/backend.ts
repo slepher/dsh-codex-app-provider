@@ -212,9 +212,14 @@ export class CodexSessionBackend implements CodexBackend {
     return record === undefined ? undefined : snapshot(record);
   }
 
-  async resumeSession(ownerId: string, sessionId: string): Promise<SessionSnapshot> {
+  async resumeSession(ownerId: string, sessionId: string, threadId?: string): Promise<SessionSnapshot> {
     const record = this.required(ownerId, sessionId);
     this.assertThreadOwnership(record, "resume its thread");
+    // The record's own copy says which thread it was running. A caller that
+    // recovered the same identity from the DSH Session log supplies it when that
+    // cache is gone, and the resumed thread then proves it: the identity is kept
+    // only after the App Server reports the thread it actually resumed.
+    const identity = record.threadId ?? threadId;
     const prior = this.live.get(sessionId);
     if (prior !== undefined) {
       // A runtime this process still holds is authoritative: an uncertain one has
@@ -226,7 +231,7 @@ export class CodexSessionBackend implements CodexBackend {
     // resumed directly. What a previous process wrote about its own execution is
     // not evidence that it still runs; the resumed thread's reported status is,
     // and the resume refuses a thread that is still active.
-    if (record.threadId === undefined) throw new Error("No thread identity to resume");
+    if (identity === undefined) throw new Error("No thread identity to resume");
     if (prior !== undefined) {
       await prior.rpc.close();
       this.live.delete(sessionId);
@@ -237,9 +242,10 @@ export class CodexSessionBackend implements CodexBackend {
       if (record.options?.gate !== undefined) await this.gate?.preflight((method, params) => runtime.rpc.request(method, params), record.executionCwd ?? record.cwd);
       const result = await runtime.rpc.request<ThreadResult>("thread/resume", {
         ...threadParams(record),
-        threadId: record.threadId,
+        threadId: identity,
       });
-      if (result.thread?.id !== record.threadId) throw new Error("Recovered thread identity mismatch");
+      if (result.thread?.id !== identity) throw new Error("Recovered thread identity mismatch");
+      record.threadId = identity;
       reconcilePending(record, result);
       reconcileBoundary(record, result);
       checkExecutionModel(record, result);

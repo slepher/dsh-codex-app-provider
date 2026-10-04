@@ -223,3 +223,75 @@ composition，属于另一个交付单元；`codex_workers` 的删除不受影�
 
 **验收**：按 REVIEW 附录 A.2 的结论，删除**接受**"逐轮结构化报告 / 验收 / 按 turn 寻址"三项语义差异；
 两侧 README 已新增 `Delegation` 一节，用表格逐条列出替代与需接受的差异（附录 A 为完整判定）。
+
+---
+
+## 10. P2 执行记录与 `storageDomain` 评估（2026-10-04）
+
+### 10.1 决策：`codexToolGate` / `codexHandoff` **不拆分**（用户决定）
+
+两者继续留在本插件内，§9 里"待定"的拆分项就此关闭。原因已在 §9 记录：`dsh-workflow-kit`
+对它们是硬依赖（`host.ts:26` 的 `inject`、`workers.ts:388` 的缺则抛错），而用户选择不为此改动
+另一个仓库/部署。README 的 Host 能力章节仍照实列出这两个服务。
+
+### 10.2 已实施：线程身份以会话日志为权威（P2 第一步）
+
+**测试先行**（`test/provider.test.mjs`："recovers a native thread identity the record lost from the
+DSH session log"）：跑完一轮 → 关掉进程 → 从磁盘记录里删掉 `threadId` → 用**新进程**重新加载
+同一 `stateDir` → 新开一轮。断言：`thread/resume` 带的是日志里 `finish.replayState` 的线程
+id，**没有** `thread/start`，且该身份重新落回记录。
+
+实现（三处）：
+
+| 位置 | 改动 |
+|---|---|
+| `provider.ts` | 新增 `recoveredThreadId(events)`：从最新一条 `finish.replayState` 取线程身份；`streamMain` 用 `record?.threadId ?? logThreadId` 作为历史边界，并在"记录没有副本、日志有"时用该身份 resume |
+| `backend.ts` | `resumeSession(ownerId, sessionId, threadId?)`：`identity = record.threadId ?? threadId`；**只有 App Server 回报的线程 id 与之一致时才写回记录**（不验证不落盘） |
+| `browser-types.ts` | `CodexSessionBackend.resumeSession` 声明第三个可选参数 |
+
+**当前语义（有意保留）**：日志可以重建身份，但身份仍会被写回记录 —— 记录是**缓存**而不是
+第二份真相：`snapshotEvents` 是可选 seam（B11 的 fail-closed 前提），只依赖日志会让"没有该
+seam 的 composition"无法冷恢复。要彻底删掉缓存，前提是把会话日志读面升级为必需依赖
+（`ctx.sessionQuery` / `ctx.sessionPersistence`），那是独立一步。
+
+验证：`npm run typecheck`、`npm run build`、`node --test --test-isolation=none test/*.test.mjs`
+→ **139 tests / 136 pass / 0 fail / 3 skipped**（新增 1 项），既有 cold-recovery 用例全绿。
+
+### 10.3 `store.ts → ctx.storageDomain` 评估（契约已核实）
+
+契约来自 live 0.2.0-rc.2 的 `@deepseek-ai/dsh-storage-domain`（asar 解包 + 本机布局实测）：
+
+```
+defineDomain({ name, version, compatibleVersions?, layout: 'single' | 'per-record',
+               invalidRecords?: 'backup-and-skip', tables: { t: domainTable(zodSchema) }, global? })
+ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), domain/changed }
+```
+
+已核实的事实：
+
+1. **`layout: 'per-record'` 与插件现状同构**：本机 `$DSH_HOME/storages/session_projcache/sessions/`
+   就是 per-record 布局（一记录一文件），而 `workspace.json` 是 `single`。每条记录一次原子写、
+   后端保证落盘后才 resolve —— 正是 `store.ts` 手写 temp+rename 想做的事。
+2. **坏记录策略不同**：per-record 的契约是"一个坏/过期的记录文件读作不存在"；插件现在是
+   `parseRecord` 抛错 → 整个 store 打开失败。迁移即**放宽**（若要保持严格，需要 `invalidRecords:
+   'backup-and-skip'` + 自检告警，不能两者兼得）。
+3. **位置会变**：域的路由与根由**部署**决定（本机 `storage-json` 的 root = `$DSH_HOME/storages`），
+   插件无法为自己的域选路径。迁移意味着记录从 `$DSH_HOME/state/<profile>/codex/sessions/*.json`
+   搬到 `$DSH_HOME/storages/<name>/`，**需要一次性迁移**（插件已有 `LegacyMirror` 的先例，可复用
+   同样的"读旧写新后删除旧字段"模式）。
+4. **跨进程单所有者排除不是域的能力**：`already-open` 只在同一个 facility/进程内生效，后端也
+   明确不串行化跨进程并发写。`owner.lock` 必须保留。
+5. **校验器可整体替换**：`parseRecord`/`validReport`/`validPending`/`validGate`/`validHandoff`/
+   `validUsage` 等约 140 行手写校验器对应一份 zod schema（记录是普通不可变数据，读是内存同步读）。
+
+结论：**可以迁，但不该与本次一起做**。收益是删掉 ~140 行手写校验器 + 原子写，代价是一次
+带迁移的状态目录搬家 + 坏记录语义放宽 + 锁逻辑仍要自持；而 §10.2 已经把"记录是缓存"这一
+结构性问题解决。建议的下一步（独立交付单元）：先落 zapf 级别的 zod schema 与 `defineDomain`
+声明 + 一个测试证明"同一批记录在域里 open→put→get 往返等价"，再写一次性迁移与回滚，
+最后删 `store.ts` 的手写持久化。
+
+### 10.4 仍未做
+
+- §10.3 的域迁移；§10.2 里"彻底删掉记录中的身份缓存"（需要把日志读面升级为必需 seam）。
+- LEAN-PLAN §3 里 C1 的分层（`provider.ts`/`backend.ts` 各 1200+ 行仍承担多职责）。
+- T5：`npm run test:live -- --fake` 的确定性全栈；B3 的整轮行为探针。

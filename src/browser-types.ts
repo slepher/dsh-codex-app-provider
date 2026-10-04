@@ -275,7 +275,8 @@ export interface CodexBackend {
   createSession(ownerId: string, sessionId: SessionId, cwd: string, options?: CreateSessionOptions): Promise<SessionSnapshot>;
   listSessions(ownerId: string): Promise<readonly SessionSnapshot[]>;
   readSession(ownerId: string, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
-  resumeSession(ownerId: string, sessionId: SessionId): Promise<SessionSnapshot>;
+  /** `threadId` supplies an identity the record lost, recovered from the Session log. */
+  resumeSession(ownerId: string, sessionId: SessionId, threadId?: ThreadId): Promise<SessionSnapshot>;
   configureSession(ownerId: string, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
   closeSession(ownerId: string, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
   occupiedThreads(): Promise<readonly ThreadId[]>;

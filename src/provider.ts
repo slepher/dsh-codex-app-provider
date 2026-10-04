@@ -576,16 +576,26 @@ export class CodexProviderAdapter extends LlmAdapter {
     // demanding that a missing live Agent snapshot still declares them. A first
     // creation with neither keeps the ordinary, unscoped Codex path.
     const effective = execution ?? recorded;
+    const events = this.deps.sessions.get(sessionId)?.snapshotEvents?.();
+    // The DSH Session log is the durable record of what this provider ran: every
+    // settled turn wrote its thread identity into `finish.replayState`. The
+    // record's own copy is a cache, so a record that lost it still resumes the
+    // same thread instead of abandoning it — or worse, starting a new one.
+    const logThreadId = recoveredThreadId(events);
+    const threadId = record?.threadId ?? logThreadId;
     // A record that already owns a thread and never ran a turn is a prepared
     // binding: the successor a controlled handover created, a rebuilt thread, or
     // an imported one. Its first request must resume that exact thread.
     const prepared = record !== undefined && record.turnId === undefined && record.threadId !== undefined && record.state === "idle";
     const successor = prepared ? await this.bindPreparedThread(record!, options) : false;
-    const plan = await planInput(durableMessages(options.messages), record?.threadId, this.cursors.get(sessionId), this.imageResolver,
-      this.deps.sessions.get(sessionId)?.snapshotEvents?.());
+    const plan = await planInput(durableMessages(options.messages), threadId, this.cursors.get(sessionId), this.imageResolver, events);
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
       record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective });
+    } else if (record.threadId === undefined && logThreadId !== undefined) {
+      // The cache is gone and the log still names the thread: resume that exact
+      // thread. `thread/start` would silently fork the conversation.
+      record = await backend.resumeSession(owner, backendId, logThreadId).catch(error => { throw providerError(error); });
     } else if (record.state === "unknown" || record.state === "saved") {
       // What a previous process recorded about its own execution is not evidence
       // that it still runs. Resuming reports the thread's status and refuses one
@@ -951,6 +961,27 @@ async function replayTurn(backend: CodexBackend, owner: string, backendId: strin
   }
   if (report === undefined) throw new LlmError("Codex turn has no recorded outcome", "EXECUTION_UNKNOWN");
   return { status: report.status, output: report.result, ...(report.error === undefined ? {} : { error: report.error }) };
+}
+
+/**
+ * The native thread identity this Session's own log still carries.
+ *
+ * Read from the newest `finish.replayState` the adapter committed, so a record
+ * whose cached identity was lost can resume the thread those turns actually ran
+ * on. The newest marker wins: a rebuilt or handed-over thread is written to the
+ * log as soon as it runs, so an older marker never overrides a newer one.
+ * @param events - the Session log's events, when the Host exposes them.
+ * @returns the thread identity, or `undefined` when the log carries none.
+ */
+function recoveredThreadId(events: readonly { type: string; data: unknown }[] | undefined): string | undefined {
+  if (events === undefined) return undefined;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const message = eventMessage(events[index]!);
+    if (message?.source.kind !== "model" || message.source.provider !== CODEX_PROVIDER) continue;
+    const threadId = replayThread(message.source.replayState);
+    if (threadId !== undefined) return threadId;
+  }
+  return undefined;
 }
 
 async function planInput(
