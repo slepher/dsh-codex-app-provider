@@ -316,12 +316,13 @@ ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), do
 - T3-2（可选，见 §10.4 的三条前置条件）；T3-3：把日志读面升级为必需 seam 后删掉记录里的身份缓存。
 - C1 分层（`provider.ts` 1331 行 / `backend.ts` 1202 行）——**推荐的下一步**。
 - T5：`npm run test:live -- --fake`（本机被 npm network 阻塞）；B3 的整轮行为探针。
+  → **本轮已更新，见 §11.4**（阻塞点确认为 registry TLS 证书 `ERR_TLS_CERT_ALTNAME_INVALID`）。
 
 ---
 
 ## 11. C1 执行记录（2026-10-04 晚，本轮）
 
-按 §10.5 的推荐先做 C1（纯搬运、零宿主耦合）。四个提交，每步独立、每步全套绿：
+按 §10.5 的推荐先做 C1（纯搬运、零宿主耦合）。四个搬运提交 + 一个补测试提交，每步独立、每步全套绿：
 
 | 提交 | 内容 | 规模 |
 |---|---|---|
@@ -329,6 +330,8 @@ ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), do
 | `e53cf53` | `provider.ts` + `backend.ts` → `usage.ts`：token 记账两个方向 | `usage.ts` 90；两侧各减 |
 | `cca48d7` | `store.ts` → `records.ts`：记录 schema 与单所有者锁分家 | `store.ts` 461 → 277；`records.ts` 228 |
 | `86e9ab9` | `backend.ts` → `wire.ts`：App Server 线格式翻译 | `backend.ts` 1202 → 1040；`wire.ts` 214 |
+| `3350180` | `test/usage.test.mjs`：`usage.ts` 的直接边界用例（+7） | 139 → 146 tests |
+| `0234081` | 文档：本 §11 + FUNCTION-MAP 更正 + 两侧 README 模块表 | — |
 
 ### 11.1 各模块职责（搬运后）
 
@@ -356,8 +359,9 @@ ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), do
 ### 11.3 验证方式（比"跑一遍测试"更强）
 
 - 每一步都跑了 §7 第一行：`npm run typecheck` + `npm run build` +
-  `node --test --test-isolation=none test/*.test.mjs` → **139 tests / 136 pass / 0 fail / 3 skipped**，
-  四步全部与基线逐字相同。
+  `node --test --test-isolation=none test/*.test.mjs` → 四步搬运期间都是
+  **139 tests / 136 pass / 0 fail / 3 skipped**（与搬运前逐字相同）；最后一步 `3350180` 为
+  `usage.ts` 补了 7 项直接用例 → **146 tests / 143 pass / 0 fail / 3 skipped**。
 - 纯搬运用**脚本比对**证明，而不是肉眼看 diff：把上一版 `git show HEAD:src/<file>.ts` 与新版逐函数
   抽取函数体/接口体，规范化掉新增的 `export` 后逐行比较。结论：
   - `history.ts` 与 `usage.ts`：搬运函数体全部 `IDENTICAL`（`history.ts` 中 `recoveredThreadId`/
@@ -367,23 +371,40 @@ ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), do
     `store.ts` 保留的 12 个 `SessionStore` 成员（含 `constructor`、`acquireLock`、`persist`）与 7 个锁
     辅助函数全部 `IDENTICAL`。
   - `wire.ts`：10 个函数 + 2 个接口全部 `IDENTICAL`（仅差 `export`）。
+- 补的直接用例（`test/usage.test.mjs`，7 项）断言的是**搬运后按原样保留**的行为，不是"为了让测试过而
+  改代码"：`usageChunk` 要把 cached 前缀从 input 里减掉（Codex 把 cached 计入 input，DSH 另算
+  `cacheReadTokens`，重复计费在 UI 上看不出来）、未上报字段保持 `null` 而不是编造 0、
+  两侧都未上报时不产出 usage chunk、`remainingContextRatio` 只在两个量都已知时出现、
+  camelCase 与 snake_case 两种拼写归一到同一字段。
 - 冷恢复专项：`node --test --test-isolation=none --test-name-pattern="recovers a native thread identity"
   test/provider.test.mjs` → 1 pass（T3 前半的语义没被搬运碰坏）。
-- 构建触发的 link 重载已生效：`$DSH_HOME/state/desktop/codex/owner.lock/owner.json` mtime 前进到 16:58:02。
+- 构建触发的 link 重载已生效：`$DSH_HOME/state/desktop/codex/owner.lock/owner.json` mtime 前进到 16:58:02
+  （之后每次 `npm run build` 都继续前进）。
 - `npx tsc --noEmit --noUnusedLocals --noUnusedParameters` 只剩一处**搬运前就有**的未用形参绑定
   （`provider.ts` `streamAuxiliary` 的 `sequence`），未在本轮顺手改，避免把无关改动混进纯搬运提交。
 
 ### 11.4 未做（仍然可选）
 
-- **T3-2**（`store.ts → ctx.storageDomain`）：§10.4 的三条前置条件未变（无网络 → 不能加
-  `@deepseek-ai/dsh-storage-domain` 依赖、需手搓 spec、要给 `CodexSessionBackend` 加 store 端口）。
-  本轮把记录 schema 独立成 `records.ts` 后，这条路线的第三步（删 ~140 行手写校验器）**比之前更好做**：
-  要替换的现在集中在一个文件里，且不再与 `node:fs`、`owner.lock` 混在一起。**A 路线仍需网络**；
-  离线只能走 B 路线（只依赖 `zod` 手搓 spec，见 §10.4 第 2 条）。
+- **T3-2**（`store.ts → ctx.storageDomain`）：**未做，且本轮离线不可完成**。§10.4 的三条前置条件
+  逐条复核结果：
+  1. `zod@4.6.5` 物理在 `node_modules/zod`（lockfile 里 `"dev": true`，是 `dsh-llm`/`dsh-sandbox-policy`
+     的传递依赖），但 `package.json` 未声明。本轮实测 `npm install zod@4.6.5 --offline
+     --save --package-lock-only` → **`ENOTCACHED`**（`--offline` 只读 npm cache，而该包是 `link:`
+     安装/预置 `node_modules`，不在 cache 里），所以连 lockfile 都**不能在这个环境里被权威地更新**；
+     手改 lockfile 无法验证（`npm ls`/`npm ci` 都需要网络或 cache）。→ 需要换机器或先修网络。
+  2. `@deepseek-ai/dsh-storage-domain` 仍 `require.resolve` 不到（只在 DSH asar 载荷里）→ A 路线需网络；
+     B 路线（手搓 spec）可行但要手改 lockfile 才能声明 `zod`，同样卡在第 1 条。
+  3. `ctx.storageDomain` 来自 ctx，`CodexSessionBackend` 现在不需要 ctx（约 39 处测试直接构造）→ 仍需先加
+     store 端口。
+  本轮把记录 schema 独立成 `records.ts` 后，第三步（删 ~140 行手写校验器）**比之前更好做**：
+  要替换的代码集中在一个文件里，且不再与 `node:fs`、`owner.lock` 混在一起。**建议的下一步**：
+  在有网络/有 cache 的机器上落 `zod` 依赖声明 + 一个 open→put→get 往返测试，再谈换实现。
 - **T3-3**：把日志读面升级为必需 seam 后删掉记录里的 `threadId` 缓存。
 - **T5**：`npm run test:live -- --fake` 仍走不通。本轮重试一次（2026-10-04 17:02），
   `a141d05` 的 `mkdir evidence/` 修复**已验证有效**：harness 不再 ENOENT，而是稳定产出结构化报告
   `{"status":"FAIL", ..., "error":"npm failed: exit=1 ... see evidence/live-install.log"}`。
   阻塞点是 registry 本身：`ERR_TLS_CERT_ALTNAME_INVALID`（TLS 证书不含 DNS 名），不是插件的错。
   换机器或修复本机 TLS 后可重跑；B3 的整轮行为探针同样走这条路。
+- **不做的事**（用户裁定，未重新推导）：`codexToolGate`/`codexHandoff` 不拆分（§10.1）；
+  provider 自己的记录不搬迁（§10.4）。
 
