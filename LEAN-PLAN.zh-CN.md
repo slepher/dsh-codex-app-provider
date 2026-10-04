@@ -316,3 +316,74 @@ ctx.storageDomain.open(spec) -> { table(name).get/put/update/delete, close(), do
 - T3-2（可选，见 §10.4 的三条前置条件）；T3-3：把日志读面升级为必需 seam 后删掉记录里的身份缓存。
 - C1 分层（`provider.ts` 1331 行 / `backend.ts` 1202 行）——**推荐的下一步**。
 - T5：`npm run test:live -- --fake`（本机被 npm network 阻塞）；B3 的整轮行为探针。
+
+---
+
+## 11. C1 执行记录（2026-10-04 晚，本轮）
+
+按 §10.5 的推荐先做 C1（纯搬运、零宿主耦合）。四个提交，每步独立、每步全套绿：
+
+| 提交 | 内容 | 规模 |
+|---|---|---|
+| `c5016b1` | `provider.ts` → `history.ts`：DSH 对话↔原生线程边界 | `provider.ts` 1362 → 1113；`history.ts` 280 |
+| `e53cf53` | `provider.ts` + `backend.ts` → `usage.ts`：token 记账两个方向 | `usage.ts` 90；两侧各减 |
+| `cca48d7` | `store.ts` → `records.ts`：记录 schema 与单所有者锁分家 | `store.ts` 461 → 277；`records.ts` 228 |
+| `86e9ab9` | `backend.ts` → `wire.ts`：App Server 线格式翻译 | `backend.ts` 1202 → 1040；`wire.ts` 214 |
+
+### 11.1 各模块职责（搬运后）
+
+- **`history.ts`**：新输入边界（`planInput`）、历史段渲染（`importedInput`）、
+  `recoveredThreadId`、`nativeHistoryCursor`、`toolCallNames`、`HISTORY_IMPORT_MARKER`。
+  依赖只有类型 + `context.ts` 的可见性谓词 + `dsh-llm` 词表；不含进程、后端句柄或宿主能力。
+- **`usage.ts`**：`tokenValues`/`count`/`normalizeUsage`（wire → 记录）与
+  `usageChunk`/`usageContextWindow`（记录 → `TokenUsage`）。两个方向同处一文件。
+- **`records.ts`**：`StoredSession` 及两个 handoff 记录、legacy 镜像、`recover`、`parseRecord`、
+  全部 `valid*` 校验器。**不打开任何文件、不创建目录**。
+- **`wire.ts`**：`turnInput`、`snapshot`/`turnSnapshot`、`statusState`/`terminalState`、
+  `objectValue`、`approvalResponse`、`userInputQuestions`、`normalizedBoundary`、`threadParams`、
+  `ThreadResult`/`TurnResult`。
+- **`store.ts`** 只剩 `SessionStore`（状态目录 + 记录内存表 + 原子写）、`owner.lock` 跨进程单所有者
+  逻辑、`processStartTime`；**`backend.ts`** 只剩 transport / runtime / 记录存储 / 事件归约。
+
+### 11.2 两个"单一真相"顺带修掉
+
+1. **`CODEX_PROVIDER` 曾有两份**：`provider.ts` 导出 `"codex"`，而 `history.ts` 需要读同一个标记来
+   从日志里认出自己的 turn。现移到 `browser-types.ts`（共享词表），`provider.ts` 原样 re-export，
+   公开导出面不变 → 语义常量只有一份。
+2. **`StoredSession` 的类型来源**：`store.ts` re-export 记录类型，因此既有 `import { StoredSession }
+   from "./store.js"` 的调用方零改动；声明它的是 `records.ts`。
+
+### 11.3 验证方式（比"跑一遍测试"更强）
+
+- 每一步都跑了 §7 第一行：`npm run typecheck` + `npm run build` +
+  `node --test --test-isolation=none test/*.test.mjs` → **139 tests / 136 pass / 0 fail / 3 skipped**，
+  四步全部与基线逐字相同。
+- 纯搬运用**脚本比对**证明，而不是肉眼看 diff：把上一版 `git show HEAD:src/<file>.ts` 与新版逐函数
+  抽取函数体/接口体，规范化掉新增的 `export` 后逐行比较。结论：
+  - `history.ts` 与 `usage.ts`：搬运函数体全部 `IDENTICAL`（`history.ts` 中 `recoveredThreadId`/
+    `planInput`/`nativeHistoryCursor`/`importedInput`/`renderBlocks`/`toolCallNames` 等，`usage.ts` 中
+    `tokenValues`/`normalizeUsage`/`usageChunk`/`usageContextWindow`）。
+  - `records.ts`：`parseRecord`/`recover`/`claimsThread` 仅差 `export`；其余 `valid*` 逐字相同。
+    `store.ts` 保留的 12 个 `SessionStore` 成员（含 `constructor`、`acquireLock`、`persist`）与 7 个锁
+    辅助函数全部 `IDENTICAL`。
+  - `wire.ts`：10 个函数 + 2 个接口全部 `IDENTICAL`（仅差 `export`）。
+- 冷恢复专项：`node --test --test-isolation=none --test-name-pattern="recovers a native thread identity"
+  test/provider.test.mjs` → 1 pass（T3 前半的语义没被搬运碰坏）。
+- 构建触发的 link 重载已生效：`$DSH_HOME/state/desktop/codex/owner.lock/owner.json` mtime 前进到 16:58:02。
+- `npx tsc --noEmit --noUnusedLocals --noUnusedParameters` 只剩一处**搬运前就有**的未用形参绑定
+  （`provider.ts` `streamAuxiliary` 的 `sequence`），未在本轮顺手改，避免把无关改动混进纯搬运提交。
+
+### 11.4 未做（仍然可选）
+
+- **T3-2**（`store.ts → ctx.storageDomain`）：§10.4 的三条前置条件未变（无网络 → 不能加
+  `@deepseek-ai/dsh-storage-domain` 依赖、需手搓 spec、要给 `CodexSessionBackend` 加 store 端口）。
+  本轮把记录 schema 独立成 `records.ts` 后，这条路线的第三步（删 ~140 行手写校验器）**比之前更好做**：
+  要替换的现在集中在一个文件里，且不再与 `node:fs`、`owner.lock` 混在一起。**A 路线仍需网络**；
+  离线只能走 B 路线（只依赖 `zod` 手搓 spec，见 §10.4 第 2 条）。
+- **T3-3**：把日志读面升级为必需 seam 后删掉记录里的 `threadId` 缓存。
+- **T5**：`npm run test:live -- --fake` 仍走不通。本轮重试一次（2026-10-04 17:02），
+  `a141d05` 的 `mkdir evidence/` 修复**已验证有效**：harness 不再 ENOENT，而是稳定产出结构化报告
+  `{"status":"FAIL", ..., "error":"npm failed: exit=1 ... see evidence/live-install.log"}`。
+  阻塞点是 registry 本身：`ERR_TLS_CERT_ALTNAME_INVALID`（TLS 证书不含 DNS 名），不是插件的错。
+  换机器或修复本机 TLS 后可重跑；B3 的整轮行为探针同样走这条路。
+

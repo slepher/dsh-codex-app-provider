@@ -285,10 +285,14 @@ HMR 监视 profile patch、home patch 与 profile manifest，因此这条条目*
 src/
   index.ts              插件入口：配置、backend、adapter、服务、工具
   provider.ts           LLM adapter：模型、请求、事件、审批、提问
+  history.ts            DSH 对话 ↔ 原生线程边界与历史导入
+  usage.ts              token 记账：原生载荷 → 记录 → TokenUsage
   backend.ts            App Server RPC、thread/turn 状态机、恢复
+  wire.ts               App Server 线格式翻译：输入、快照、thread 参数
   rpc.ts                codex app-server --stdio 传输（stdio 上的 JSON 行）
   process.ts            子进程与计时器接缝（ctx.subprocess、ctx.timer）
-  store.ts              每 Session 记录与单 owner 锁
+  store.ts              状态目录与单 owner 锁
+  records.ts            记录的形态与记录校验
   context.ts            codex 路由的上下文过滤器
   facts.ts              写入 DSH Session 日志的执行事实消息
   execution.ts          只读原生执行事实（ctx.codexExecution）

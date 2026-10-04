@@ -1,5 +1,12 @@
 # dsh-codex-app-provider 代码 → 功能点对照
 
+> **已过期（2026-10-04 晚）**：本文档写于 `bef8e4c`（P1 之前）。P1 已删除 worker 四模块与
+> `codex_workers` 工具（§H/§I/§J/§K 及 §2 的 A9/A10/A13、§2 的"持久 worker"整行、§2 的 C/D/B
+> 若干行、§4 的 worker 用例都已失效），P2/C1 又把大文件拆开：`provider.ts` → +`history.ts`、
+> `backend.ts` → +`wire.ts`、`store.ts` → +`records.ts`，并且新增了 `usage.ts`。
+> **当前模块拓扑与职责以 `LEAN-PLAN.zh-CN.md` §11 为准**；本文只当索引，**不要照抄 `文件:行`**。
+> §1 与 §D 的模块归属已按 C1 的结果就地更正，其余章节的锚点行号未逐一重算。
+
 对象：`dsh-codex-app-provider` 0.1.1（工作树 HEAD `bef8e4c`，2026-10-03，clean）。
 范围：`src/` 全部 19 个 TypeScript 文件；`test/`、`scripts/`、打包与本地化在后续章节。
 方法：逐文件阅读源码，把每条可观察行为归到一个功能点，并给出代码锚点 `文件:行`。行号对应当前工作树。
@@ -13,11 +20,11 @@
 
 | 主线 | 一句话 | 主要代码 |
 |---|---|---|
-| 模型路由 | `codex` provider 的目录、请求转换、流式事件、用量、取消 | `provider.ts`、`models.ts`、`backend.ts` |
-| 原生执行记录 | Codex 自己执行工具，插件把执行事实写回 DSH 会话日志（幂等） | `execution-events.ts`、`facts.ts`、`provider.ts` |
-| 持久 worker | `codex_workers` 工具 + 报告投递 + 审批/提问桥 | `worker-actions.ts`、`worker-delivery.ts`、`worker-control.ts`、`identity.ts` |
+| 模型路由 | `codex` provider 的目录、请求转换、流式事件、用量、取消 | `provider.ts`、`models.ts`、`backend.ts`、`wire.ts`、`usage.ts` |
+| 原生执行记录 | Codex 自己执行工具，插件把执行事实写回 DSH 会话日志（幂等） | `execution-events.ts`、`facts.ts`、`provider.ts`、`history.ts` |
+| ~~持久 worker~~ | **已删除（P1）**：`codex_workers` 工具与整套报告投递 | 无（原 `worker-actions.ts` 等四模块已删） |
 | Host 服务 | `ctx.codexExecution` / `ctx.codexHandoff` / `ctx.codexToolGate` | `index.ts`、`execution.ts`、`handoff.ts`、`tool-gate.ts` |
-| 传输与持久化 | App Server JSON-RPC over stdio、单所有者状态目录 | `rpc.ts`、`store.ts` |
+| 传输与持久化 | App Server JSON-RPC over stdio、单所有者状态目录、记录 schema | `rpc.ts`、`store.ts`、`records.ts` |
 
 ---
 
@@ -81,16 +88,21 @@
 | B34 | 事件通道（异步迭代器） | `provider.ts:904`–`939` | 队列 + abort 唤醒；关闭后不再入队 |
 | B35 | 会话↔native id 映射 | `provider.ts:1324`、`handoff.ts:71`–`75` | 双向 `codex:` 前缀 |
 
-### C. 后端状态机（`src/backend.ts`）
+### C. 后端状态机（`src/backend.ts`；纯翻译已拆到 `src/wire.ts`）
+
+> C1 之后：C26 的 `normalizedBoundary`、C31 的 `trackCommand` 之外，**线格式翻译全部在 `wire.ts`**
+> （`turnInput`=C36、`snapshot`/`turnSnapshot`、`statusState`/`terminalState`、`objectValue`、
+> `approvalResponse`、`userInputQuestions`、`threadParams`），`ThreadResult`/`TurnResult` 也随之搬家；
+> C29 的手写 rollout 解析已在 T1c 删除，用量唯一来源是 `thread/tokenUsage/updated`（`usage.ts`）。
 
 | ID | 功能点 | 代码锚点 | 关键约束 |
 |---|---|---|---|
 | C1 | runtime 生命周期与不确定态 | `backend.ts:856`–`890` | 替换 runtime 前先退役 gate key；uncertain 时清空审批/输入并发布 `session.uncertain`，后续 server request 一律 reject |
 | C2 | 建会话（`thread/start`） | `backend.ts:161`–`212` | 校验 owner/session/绝对 cwd；gate 在 thread 存在前 preflight；失败落 `unknown` 并提示先检查 |
-| C3 | 建 worker | `backend.ts:214`–`265` | 需要 name 与非空目录；id 不可占用；携带 `worker.parentSessionId = owner` |
+| ~~C3~~ | ~~建 worker~~ | **已删除（P1）** | `codex_workers` 与 worker 记录字段整块删除 |
 | C4 | 恢复会话（`thread/resume`） | `backend.ts:294`–`345` | 活 runtime 权威；`active` 线程拒绝接管；对账 pending/boundary/model；失败清 live 并退役 gate key |
-| C5 | 配置会话 | `backend.ts:347`–`357` | worker 拒绝改配置（"Workers keep their creation configuration"） |
-| C6 | 关会话 | `backend.ts:359`–`399` | worker 必须 idle、无待批审批、无未确认报告、无运行中命令；普通会话需 idle 或显式确认已停 |
+| C5 | 配置会话 | `backend.ts:347`–`357` | ~~worker 拒绝改配置~~（P1 后仅剩普通会话路径） |
+| C6 | 关会话 | `backend.ts:359`–`399` | ~~worker 必须 idle、无待批审批、无未确认报告~~（P1 后无 worker 分支）；普通会话需 idle 或显式确认已停 |
 | C7 | 宿主销毁释放 | `backend.ts:411`–`423` | 无视状态标记 `released` 并关闭 runtime；被跟踪的 close 会等进程真正退出 |
 | C8 | 启动一轮 | `backend.ts:566`–`621` | 幂等键命中直接返回既有快照；非 idle 拒绝；`pending` 记录未确认的模型/effort 目标 |
 | C9 | steer | `backend.ts:645`–`666` | 必须匹配当前 turnId 且状态为 running；runtime 不在则拒绝 |
@@ -122,21 +134,25 @@
 | C35 | 线程占用视图 | `backend.ts:439`–`441` | 由 store 判定仍可操作线程的记录集合 |
 | C36 | 输入编码 | `backend.ts:1140`–`1159` | text/image/localImage/skill 各自的必填校验，空输入直接拒绝 |
 
-### D. 状态持久化（`src/store.ts`）
+### D. 状态持久化（锁与文件：`src/store.ts`；记录 schema：`src/records.ts`）
+
+> C1 之后按职责分家：**"这个文件是不是一条记录"在 `records.ts`**（不打开任何文件），
+> **"谁独占这个目录、记录怎么落盘"在 `store.ts`**。D6–D11 现在都在 `records.ts`；
+> D1–D5 留在 `store.ts`。`store.ts` re-export 记录类型，调用方无需改 import。
 
 | ID | 功能点 | 代码锚点 | 关键约束 |
 |---|---|---|---|
-| D1 | 单所有者锁 | `store.ts:185`–`210` | 锁目录 `owner.lock`；活 owner 直接拒绝第二个 backend |
-| D2 | 锁所有权识别 | `store.ts:232`–`312` | `owner.json`（pid+start+boot）；回退 `pid` 文件；boot_id 防 pid 复用；不可读 → `unknown` 交由人工 |
-| D3 | 陈旧锁回收 | `store.ts:199`–`207` | 用 `owner.lock.reclaim` 防止两个回收者互相拆锁 |
-| D4 | 锁释放 | `store.ts:178`–`183` | 仅当锁 owner 正是本进程时删除 |
-| D5 | 原子写 + 权限 | `store.ts:161`–`176` | 临时文件 `{pid}.tmp` → rename；文件 0600；目录 0700 |
-| D6 | 启动载入与迁移 | `store.ts:83`–`104`、`store.ts:344`–`356` | 旧版 `events` 镜像投影为 `facts` 并回写；`running/waiting-approval` → `unknown`；worker → `saved` + savedState |
-| D7 | 记录校验 | `store.ts:358`–`382` | 必填字段、worker、reports、pending、gate、handoff 任一畸形即整条记录失败 |
-| D8 | 查询面 | `store.ts:106`–`152` | `list`（非 worker、按 ownerId）、`listWorkers`（未 detached）、`bound`、`lookup`、`get`（owner 校验 + worker 拒绝）、`findByThread`、`occupiedThreads` |
-| D9 | 占用判定 | `store.ts:421`–`430` | 未交接且（非 worker 未 released / worker 未 detached 或非 idle） |
-| D10 | 报告合法性 | `store.ts:451`–`481` | 每条报告 turnId 唯一；accepted 必须有非空结果且无 protocolError；非 pending 必须有 ack 时间 |
-| D11 | 用量与时间戳合法性 | `store.ts:483`–`504` | 计数为非负安全整数或 null；剩余比例 0..1 |
+| D1 | 单所有者锁 | `store.ts:133`–`158`（`SessionStore.acquireLock`） | 锁目录 `owner.lock`；活 owner 直接拒绝第二个 backend |
+| D2 | 锁所有权识别 | `store.ts:180`–`277`（`readLockOwner`/`classifyPid`/`classifyOwner`/`processIdentity`/`processStartTime`） | `owner.json`（pid+start+boot）；回退 `pid` 文件；boot_id 防 pid 复用；不可读 → `unknown` 交由人工 |
+| D3 | 陈旧锁回收 | `store.ts:133`–`158` `acquireLock` 内 | 用 `owner.lock.reclaim` 防止两个回收者互相拆锁 |
+| D4 | 锁释放 | `store.ts:126`–`131` `close()` | 仅当锁 owner 正是本进程时删除 |
+| D5 | 原子写 + 权限 | `store.ts:114`–`124` `persist()` | 临时文件 `{pid}.tmp` → rename；文件 0600；目录 0700 |
+| D6 | 启动载入与迁移 | `store.ts:45`–`65` 构造函数 + `records.ts:91` `recover()` | 旧版 `events` 镜像投影为 `facts` 并回写；`running/waiting-approval` → `unknown`（worker → `saved` 已在 P1 删除） |
+| D7 | 记录校验 | `records.ts:113` `parseRecord()` | 必填字段、reports、pending、gate、handoff 任一畸形即整条记录失败（worker 校验已删） |
+| D8 | 查询面 | `store.ts:68`–`107` `list`/`has`/`lookup`/`get`/`findByThread`/`occupiedThreads` | 按 ownerId 过滤；`get` 做 owner 校验（worker 相关查询已删） |
+| D9 | 占用判定 | `records.ts:173` `claimsThread()`/`occupied()` | 未交接且未 released |
+| D10 | 报告合法性 | `records.ts:181` `validReports()`/`validReport()` | 每条报告 turnId 唯一（accepted/ack 语义已随 worker 删除） |
+| D11 | 用量与时间戳合法性 | `records.ts:206` `validUsage()`/`validUsageValues()`/`validTimestamp()` | 计数为非负安全整数或 null；剩余比例 0..1 |
 
 ### E. 执行事件 → 事实（`src/execution-events.ts`、`src/facts.ts`）
 

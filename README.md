@@ -301,10 +301,14 @@ generation, as `@deepseek-ai/dsh-plugin-manager` documents.
 src/
   index.ts              plugin entry: config, backend, adapter, services, tool
   provider.ts           LLM adapter: models, requests, events, approvals, questions
+  history.ts            DSH conversation <-> native thread boundary and history import
+  usage.ts              token accounting: native payload -> record -> TokenUsage
   backend.ts            App Server RPC, thread/turn state machine, recovery
+  wire.ts               App Server wire translation: inputs, snapshots, thread params
   rpc.ts                codex app-server --stdio transport (JSON lines over stdio)
   process.ts            child-process and timer seams (ctx.subprocess, ctx.timer)
-  store.ts              per-Session records and the single-owner lock
+  store.ts              the state directory and the single-owner lock
+  records.ts            what a recorded Session is, and record validation
   context.ts            context filter for the codex route
   facts.ts              executed-fact messages committed to the DSH Session log
   execution.ts          read-only native execution facts (ctx.codexExecution)
