@@ -1,0 +1,193 @@
+# 把 dsh-codex-app-provider 收敛为"模型接入项"的精简方案
+
+问题：作为模型接入项是否过于复杂？哪些功能可以交给 DSH 内置 API？
+结论：**是的，明显过重**。当前 19 个文件 / 5875 行里，属于"Codex 作为模型路由"本身的约 **1800–2100 行**；其余是自建平台设施（~1000 行）、委派组件（~500 行）、面向 workflow 的 Host 能力（~800 行）和用户可选面（执行事实/原生压缩）。以下是逐项处置。
+
+依据：官方 [Adding an LLM adapter](https://deepseek-harness.github.io/deepseek-harness/en/reference/cookbook/adding-an-llm-adapter.md)、[Storage](https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/storage.md)、[Session persistence](https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/persistence.md)、[Subagents](https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/subagent.md)，以及本机 live 契约（desktop 0.2.0-rc.2）的 `llm` / `subprocess` / `fs` / `timer` / `agents` / `storageDomain` / `sessionQuery` / `sessionPersistence` / `spillStore` / `subagents`。**未运行任何构建或测试；行数为估算。**
+
+---
+
+## 1. 不可替代的复杂度（模型路由的"翻译层"）
+
+这三件事 DSH 没有对应 API，因为 Codex 是一个**自带 agent loop 的外部执行者**，而 DSH 的 adapter 契约假设"模型只返回文本与工具调用、执行由 DSH 完成"：
+
+| 能力 | 为什么必须自带 | 现有实现 |
+|---|---|---|
+| 原生会话/线程身份与冷恢复 | DSH 不知道 Codex 的 thread/turn；`replayState` 是唯一官方接缝 | `provider.ts` 计划器 + `backend.ts` 线程状态机 |
+| 外部执行的语义翻译 | DSH 的会话日志看不到 Codex 执行了什么；Codex 的 item 语义只有本插件认识 | `execution-events.ts` → `facts.ts` |
+| 原生请求（审批/提问/权限）映射到 DSH seam | Codex 会向用户提问；不转发就会死锁或伪造同意 | `provider.ts` 的 `bridgeApproval` / `bridgeUserInput`（走 `ctx.approval` / `ctx.userQuestions`，**这两个内置 API 已经在用**） |
+| stdio JSON-RPC 的协议编排 | `app-server` 是 stdio 协议；`initialize` 握手、请求关联、超时、uncertain 语义 | `rpc.ts`（**进程管理可交给内置 API**，见 §2） |
+
+所以"复杂"的**根源**是 Codex 的形态，不是实现选择；但把这三件事写清楚，不需要 5900 行。
+
+---
+
+## 2. 可以交给内置 API 的（已核实契约）
+
+| 现有实现 | 内置 API（live 契约） | 处置 |
+|---|---|---|
+| `store.ts` 505 行：目录权限、原子写、单所有者锁、`/proc` 身份、手写校验器 | **`ctx.storageDomain.open(spec)`**：zod 校验、`version`/`compatibleVersions`、原子写链、`invalidRecords`、`domain/changed`；后端注册为 `json`/`sqlite`；本机已在使用（`$DSH_HOME/storages/workspace.json`、`storages/session_projcache/`） | 记录层迁移到域；只保留"跨进程单所有者排除"这一条（后端契约明确不串行化并发写） |
+| `rpc.ts`：`node:child_process.spawn`、1s/3s 杀进程梯度、超时表 | **`ctx.subprocess.spawn(spec)`**：`SubprocessSpawnSpec{argv,cwd,stdio:{stdin:'pipe',stdout:'pipe',stderr:…},graceMs,env,signal}` → `SubprocessHandle{stdin,stdout,stderr,collected,done,terminate(),waitForExit()}`；服务释放时终止其管理的全部进程 | 保留 JSON 帧/请求关联/超时/uncertain；进程与终止梯度交出去（`stderr` 还可用 `collect` 模式自动带 spill） |
+| `node:fs` 写记录、读 rollout | **`ctx.fs`**（`readText`/`writeText(expected)`/`editText`/`stat`，并有 `fs/write-intent`、`fs/observed`） | 状态写入与文件读取走 `ctx.fs`（rollout 解析本身建议删掉，见 §4） |
+| 裸 `setTimeout` | **`ctx.timer`**（`timeout`/`interval`/`debounce`，随插件释放） | 请求超时、目录 TTL 改用它 |
+| `identity.ts` 61 行手工注册表比对 | **`ctx.agents`**（`get`/`isOwnedBy`/`currentInitiator`/`requireInitiator`）+ 工具执行的 `execution.agent` | 随委派组件一起删除；若保留也应收敛成一次包装 |
+| `session.snapshotEvents?.()`（可选依赖，缺失即失去幂等） | **`ctx.sessionQuery.readSession(id)`**（live-preferred）或 **`ctx.sessionPersistence.open(id,'read')`** 句柄 | 事实导入的"已导入 id"读取改走这里，去掉 fail-open |
+| 600 字截断 + `full output at codex thread=… item=…`（悬空引用） | **`ctx.spillStore.saveText`** | 长输出存 spill，事实行写 `SpillRef` |
+| `codex_workers` + worker store/投递/控制（~500 行） | **`ctx.subagents`**（`startContinuable`/`sendMessage`/`interrupt`，spawn provider + `codex` 路由） | 删除，见 REVIEW 附录 A |
+
+> 注意：`ctx.subprocess` / `ctx.fs` / `storageDomain` 都是**可选能力服务**，使用前需 `ctx.get()` 判空或声明依赖；这本身就是"交给内置 API"的代价（也是好处：能力可被替换、可远程）。
+
+---
+
+## 3. 与"模型接入"无关、可整块删除的
+
+| 组件 | 行数 | 为什么可以删 | 删除的代价 |
+|---|---|---|---|
+| `worker-actions.ts` + `worker-delivery.ts` + `worker-control.ts` + `identity.ts` | 497 | 委派语义已由 `ctx.subagents` 承载 | 失去"不装 workflow 也能开普通 worker"的能力；相关 9+4+1 个测试用例一并删除 |
+| `codex_workers` 的 `store` 分支与 `backend` 的 worker CRUD | ~150（散落） | 同上 | 同上 |
+| `tool-gate.ts` + `pretool-client.ts` + `codexToolGate` | 591 | 这是 workflow 会话闸门的**传输**，不是模型接入 | workflow 的 role 门禁在 Codex 侧失效（DSH 原生 `tools/pre-execute` 路径不受影响） |
+| `handoff.ts` + `codexHandoff` + store 交接字段 | 79 + ~120 | 交接是 workflow 的"后继者"模式需要的能力 | workflow 无法把同一 Codex 线程交给后继子代理 |
+| `codexExecution`（`execution.ts`） | 61 + ~30 | 只读执行面；工作流/driver 在读 | 外部消费者失去读面（包括本仓库 driver 的断言） |
+| `browser-types.ts` 的类型面 | 355 → ~120 | 随 worker/handoff 一起裁掉 | 无 |
+| 原生压缩（`compactNativeThread`） | ~80 | 可选：Codex 自己会管上下文；DSH 压缩只需辅助摘要 | 原生线程上下文持续增长，长会话成本上升 |
+
+**决策点**：`codexExecution` / `codexHandoff` / `codexToolGate` 三者都**不是**模型路由的正确性所需，而是"让别的插件理解/约束 Codex 会话"的接口。删它们会让插件变小，但会连带削弱 `dsh-workflow-kit` 的能力。建议：**保留 `codexExecution`（便宜且是读面），把 `codexHandoff` 与 `codexToolGate` 移到独立的可选插件**（谁需要谁装）。
+
+---
+
+## 4. 一个结构性简化（收益最大）
+
+**线程身份已经在 DSH 会话日志里**：`finish.replayState` 携带 `threadId`，`planInput` 已经在用它做历史边界判定（`provider.ts:992`、`1222`）。也就是说，`store` 里那份 `threadId` 是**副本**——冷恢复所需的身份信息本可以从会话日志推导（cookbook 的意图正是如此："If the provider requires response ids… emit the minimal lossless-JSON projection as finish.replayState"）。
+
+同理，**执行事实不需要先缓冲后投影**：现在 `runtime.facts` 收集整个 turn、在终态 `projectFacts` 时一次性写入；其实可以在每个 item 完成时直接 `session.append('user/message', factMessage, {surfaceOp:'append'})`（幂等键已经是消息 id），于是 provider store 的 `facts` 字段、legacy 镜像迁移、turn 末投影全部消失。
+
+若这两条成立，`store.ts` 剩下的需求只有：`pending`/`applied` 配置对账、`reports`/`usage`、跨进程排除。前两者可以进一个小域（`global` slot 或 per-record），后者在部署层用一条 advisory lock 解决。
+
+**但必须验证**（我未运行测试）：完全无 store 的冷恢复是否可靠，取决于 `replayState` 的跨进程传递语义与"同一 adapter 注册"的判定。建议先用一个测试证明"删掉 store 的 threadId 后仍能 resume"，再动结构。
+
+---
+
+## 5. 目标形态与规模
+
+| 文件 | 现在 | 精简后（估） | 说明 |
+|---|---|---|---|
+| `provider.ts` | 1331 | ~700 | adapter + stream + 辅助/压缩 + 历史计划 + 审批/提问桥 + 读面 |
+| `backend.ts` | 1465 | ~450 | 会话/线程状态机 + 通知路由 + 审批账本 + 用量（去掉 worker/handoff/gate） |
+| `store.ts` | 505 | 0–120 | 交给 `ctx.storageDomain`，只留跨进程排除 |
+| `rpc.ts` | 157 | ~140 | 协议编排；进程管理交给 `ctx.subprocess` |
+| `context.ts` | 87 | ~70 | 保留（kind 清单集中化） |
+| `execution-inputs.ts` | 105 | ~80 | 保留（受管子代理的 boundary 语义） |
+| `execution-events.ts` + `facts.ts` | 353 | ~230 | 保留执行事实（审计/UI 需要），否则可删 |
+| `models.ts` | 28 | 28 | 保留 |
+| `index.ts` | 261 | ~80 | 入口只剩 adapter + bridge + filter + 少量服务 |
+| 其余（tool-gate/pretool-client/worker-*/identity/handoff/execution/browser-types 大部分） | ~1500 | 0–60 | 删除或移出为可选插件 |
+| **合计** | **5875** | **约 1800–2100（-65%）** | 含执行事实；不含则约 1600 |
+
+---
+
+## 6. 建议路径
+
+1. **P0（不改架构，先止损）— 2026-10-04 已执行**：停掉瞬态事件的落盘（B3）；对不支持选项抛 `UNSUPPORTED_OPTION` 并显式声明无图片定价（B2）；事实导入改 fail-closed（B11）；`profileContext` 字段改为校验读取 + `DSH_PROFILE` 兜底。
+   **尚未执行**：用 `ctx.subprocess`/`ctx.fs`/`ctx.timer` 替换自建设施——它会改动 `AppServer` 的构造与测试接缝，单列一轮（P0b）。
+2. **P1（减面）**：删除 `codex_workers` 全家（委派交给 `ctx.subagents` + workflow）；`codexHandoff`/`codexToolGate` 拆成独立可选插件。
+3. **P2（去状态）**：验证 replayState 冷恢复与"item 完成即 append"后，把 `store.ts` 迁到 `ctx.storageDomain`，只保留跨进程排除。
+
+每步都能独立交付，且第 1 步不改变任何对外能力。
+
+---
+
+## 7. 未核实项
+
+1. 完全无 store 的冷恢复（replayState 跨进程语义）：**未验证**，需测试证明。
+2. 行数为估算，未实际重构。
+3. `ctx.subprocess` 的具体 provider 实现是否已在本 profile 加载：契约已核实，**加载状态未核实**（`subprocess` 是可选能力服务）。
+4. 官方文档未锁定版本；契约判断以本机 0.2.0-rc.2 live 查询为准。
+
+---
+
+## 8. 验证补记（2026-10-04，P0b 执行后）
+
+本节修正 §2、§3、§7 中若干**未核实**的判断，并记录 P0b 的实际结论。方法：临时探针写入插件
+`apply()`（构建→热重载→读结果→撤销），因此下面每一条都是**行为证据**，不是 `cordis_inspect` 的
+Service 投影（B1 的教训）。证据文件：`/tmp/dsh-service-probe.json`、`probe2`、`probe3`（探针数据，
+未入库）。
+
+### 8.1 已核实：本 profile 的 live 服务（全部存在）
+
+在插件 `apply()` 内 `ctx.get(name)` 的实测结果（desktop 0.2.0-rc.2，profile `desktop`）：
+
+| 服务 | 实测实现 | 与本文档的关系 |
+|---|---|---|
+| `subprocess` | `LocalSubprocessRuntime` | §2 的处置**成立**，已采用（8.2） |
+| `timer` | `TimerService` | 同上，已采用 |
+| `fs` | `SandboxedFileSystem` | §2 的处置**不成立**，见 8.3 |
+| `spillStore` | `LocalSpillStore` | B5 的替代面确实在（尚未使用） |
+| `storageDomain` | `DomainFacility` | P2 目标面在（尚未使用） |
+| `subagents` | `SubagentRuntime` | P1 的替代面在（尚未使用） |
+| `sessionQuery` | `SqliteSessionQueryEngine` | B11 的改进面在（当前用 `session.snapshotEvents` 即可） |
+| `sessionPersistence`、`storage`、`approval`、`userQuestions`、`attachments`、`tools`、`systemPrompt`、`sessions`、`agents`、`llm`、`profileContext`、`hmr`、`jobs` | 均在 | — |
+
+`ctx.fs` 之所以存在而 `dsh-fs-local` 不在 profile 清单里：本 profile 实际加载的是
+`dsh-fs-sandbox`（`fs-sandbox` 这一行），它继承 `LocalFileSystem` 并把 `ctx.fs` 注册为
+`sandbox` 实现。**不要**用"清单里没有 `dsh-fs-local`"推断 `ctx.fs` 不存在。
+
+### 8.2 已核实并已实施：`ctx.subprocess` + `ctx.timer`
+
+- `ctx.subprocess.resolveExecutable("codex")` → `/Users/slepher/.local/bin/codex`；`spawn` 返回
+  `{stdin: Socket, stdout/stderr, done:{exitCode,signal}, terminate(), waitForExit()}`。
+- 显式 `env` 在 credential/`DSH_*` 清洗**之后**合并：探针子进程读到
+  `DSH_GATE_PROBE=yes`、`PATH`（678 字节）、`HOME`，说明门禁环境（`DSH_PRETOOL_*`）能到达
+  Codex 子进程。这是把 `env` 显式交给服务的前提。
+- 实施：`src/process.ts`（`AppServerSpawner`/`AppServerTimer` 两个接缝 + node 兜底实现）；
+  `src/rpc.ts` 只保留协议（分帧、关联、超时、uncertain），进程与计时全部来自接缝；
+  `src/index.ts` 注入 `ctx.subprocess` / `ctx.timer`。
+- **live 证据**：热重载后探针读到 `spawner:true, timer:true, ctor:LocalSubprocessRuntime`；
+  `codex_workers create → append → 报告 "T1-OK" → ack → close` 全程通过，平台服务 `live` 计数
+  1 → 2 → 1（我们的 App Server 在 close 后被托管范围释放），结束 `codex_workers list` 为 `[]`。
+- 兜底：组合里没有这两个能力时，App Server 用 `node:child_process`/`setTimeout` 直接跑
+  （与 P0b 前行为一致），并在 `apply()` 里 warn 一次。**这样 0.1.7-rc.2 兼容声明与所有既有
+  测试接缝都不受影响**（测试无需注入任何 ctx）。
+
+### 8.3 已核实：`ctx.fs` **不能**承载插件自己的状态目录（§2 该行撤回）
+
+- `ctx.fs.writeText` 需要先 `resolve(path)` 得到 `FsTarget`（直接传字符串是 `TypeError`），
+  且 `SandboxedFileSystem.checkedTarget` 在 `workspace-write` 下要求目标**位于可写根之内**。
+- 本机 policy：`mode=workspace-write`，可写根 `/Users/slepher/.dsh/profiles/desktop`；而插件
+  状态目录是 `/Users/slepher/.dsh/state/desktop/codex` → 实测
+  `FsError: cannot write "...": file access denied under workspace-write mode`。
+- 另外 `ctx.fs` 的接口只有 `resolve/stat/readText/streamText/writeText/editText/listDir`：**没有**
+  `mkdir`/`rename`/`readdir`/独占创建，而 `store.ts` 的单所有者锁（`mkdir` 原子抢占）、
+  原子写（temp+rename）、记录目录枚举都依赖这些。
+- 结论：`store.ts` 的记录层**保留 `node:fs`**；它真正的收敛目标是 `ctx.storageDomain`（P2），
+  而不是 `ctx.fs`。`src/store.ts` 里补一条注释说明这个已验证的原因。
+
+### 8.4 已核实：`tool-gate.ts:369` 不是裸 `setTimeout`
+
+REVIEW B6 列的"裸 `setTimeout`（`tool-gate.ts:369`）→ `ctx.timer`"是误读：该行是
+`net.Socket#setTimeout`，是这条一次性连接自己的接收超时（连接关闭即失效），换成 `ctx.timer`
+反而会把它与 socket 生命周期解耦。**此项不做**，只改 `rpc.ts` 的三处真实计时器（请求超时、
+close 宽限、close 观测），它们现在都来自 `ctx.timer`。
+
+### 8.5 已实施：B4 删除 rollout 读取
+
+- 删掉 `rolloutUsage()` 与 create/resume/createWorker 三处调用；`record.usage` 的唯一来源是
+  `thread/tokenUsage/updated`（通知即落盘），冷恢复读自己的记录。插件不再读 Codex 的私有
+  JSONL，resume 热路径上也没有同步整读。
+- 新增回归用例：`test/backend.test.mjs` "a resumed Session recovers the last usage from the
+  provider's own record"（首进程上报 usage → `close()` → 新进程 `readSession` 仍读到该 usage，
+  且中断轮仍为 `unknown`）。原来断言 rollout 读取的用例改为只覆盖 skills/compact 语义。
+- 代价（已接受）：无法从 Codex 的 rollout 里"捡回"本插件从未收到过的历史用量；正常生命周期里
+  该数据本来就是冗余的第二来源。
+
+### 8.6 环境事实的修正
+
+- 本机 `profiles/desktop/cordis.patch.yml` 的 `agent-default-model` 当前是
+  `provider: deepseek-account / model: deepseek-flash`（交接文书写的是 `provider: codex`）。
+  也就是说热重载不再等同于打断用户主会话；但 `cordis.yml` 里物化的那一行仍是 codex——两个
+  文件不一致，改插件前仍应确认。
+- 宿主进程的 `process.cwd()` 是 `/Users/slepher/.dsh/profiles/desktop`，`process.execPath` 是
+  `/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness`（宿主跑在 Electron 主进程里）。
+  因此 `sandboxPolicy` 的默认可写根是 profile 目录，而不是 workspace。
+- 读取 app.asar 的正确数据区基址是 `8 + headerSize`（不是 `16 + headerSize`）；asar 目录里的
+  `offset` 字段是**字符串**，比较前必须 `Number()`。本次会话早期按 16 字节解析，导致解出的每个
+  文件头部少 8 字节。
