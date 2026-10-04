@@ -18,7 +18,7 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
     { id: "catalog", role: "user", content: [{ type: "text", text: "catalog" }], source: { kind: "skill-catalog", form: "catalog", entries: [] } },
     { id: "snapshot", role: "user", content: [{ type: "text", text: "snapshot" }], source: { kind: "runtime-context", form: "snapshot", sections: [] } },
     // Tool declarations reach a route as developer messages; Codex owns its tools.
-    { id: "tools", role: "developer", content: [{ type: "tool-addition", tool: { name: "codex_workers" } }], source: { kind: "tool-registry" } },
+    { id: "tools", role: "developer", content: [{ type: "tool-addition", tool: { name: "shell_exec" } }], source: { kind: "tool-registry" } },
     // An imported executed fact is shaped exactly like a worker notice, so only
     // its identity distinguishes native work the thread already performed.
     { id: "codex-executed:t1:turn1:i1", role: "user", content: [{ type: "text", text: "executed" }], source: { kind: "dsh-codex-app-provider", form: "notice", summary: "Codex executed: ls" } },

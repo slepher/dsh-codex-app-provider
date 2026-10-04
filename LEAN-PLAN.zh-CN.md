@@ -191,3 +191,35 @@ close 宽限、close 观测），它们现在都来自 `ctx.timer`。
 - 读取 app.asar 的正确数据区基址是 `8 + headerSize`（不是 `16 + headerSize`）；asar 目录里的
   `offset` 字段是**字符串**，比较前必须 `Number()`。本次会话早期按 16 字节解析，导致解出的每个
   文件头部少 8 字节。
+
+---
+
+## 9. P1 执行记录（2026-10-04）
+
+**已执行**：删除第二套委派系统。
+
+- 删除 `worker-actions.ts`、`worker-control.ts`、`worker-delivery.ts`、`identity.ts`，以及
+  `codex_workers` 工具注册与它的系统提示段落。
+- `backend.ts`：删除 `createWorker`/`listWorkers`/`getWorker`/`pendingReports`/`subscribeWorkers`/
+  `acknowledgeReport`/`acceptReport`/`notifyWorker`/`validateCaller`/`canAccess`/`workerProjection`，
+  以及 close/resume/release/finish 里的 worker 分支；`report.ready` 事件随之消失。
+- `store.ts`：删除 worker 记录字段、worker 校验器、`listWorkers`/`bound`/`findBoundByThread`；
+  `occupied()` 退化为 `!released`（`handedOff` 仍排除占用）。
+- `browser-types.ts`：删除 `Caller`、`CreateWorkerInput`、`WorkerProjection`、`WorkerManagementEvent`、
+  `ReportAcceptance` 与 `Report` 的 `workerId`/`acceptance`/`acknowledgedAt`。`ctx.codexExecution` 的读面
+  （`NativeExecutionReport`）不含这些字段，因此 workflow kit 侧不受影响。
+- **顺带修掉 REVIEW C7**：`steerTurn`/`interruptTurn`/`decideApproval`/`readSession` 等 15 处
+  `owner: string | Caller` 双签名与位置参数互换退化为单一 `ownerId: string`（Caller 的产出者已被删除）。
+- 测试：删除 `worker-tool.test.mjs`(379)、`ownership.test.mjs`、`delegate-driver.mjs`；改写
+  `backend.test.mjs`/`provider.test.mjs`/`store.test.mjs` 中的 worker 用例。套件 150 → **138 项**，
+  135 pass / 0 fail / 3 skipped。
+- 规模：净删除 1775 行（src 净 -961）。
+
+**未执行（有意保留）**：`codexToolGate`/`codexHandoff` 仍在本插件内。原因是**跨仓库硬依赖**：
+`dsh-workflow-kit` 的 `src/host.ts:26` 把 `codexExecution` 与 `codexToolGate` 写进 `inject`，并在缺
+`codexToolGate` 时抛错（`workers.ts:388`）。把它们拆成独立插件需要同时改那个仓库并调整部署
+composition，属于另一个交付单元；`codex_workers` 的删除不受影响（workflow kit 只在门禁名单
+`gate.ts:76` 与一段工具描述里提到该名字，没有调用）。
+
+**验收**：按 REVIEW 附录 A.2 的结论，删除**接受**"逐轮结构化报告 / 验收 / 按 turn 寻址"三项语义差异；
+两侧 README 已新增 `Delegation` 一节，用表格逐条列出替代与需接受的差异（附录 A 为完整判定）。

@@ -2,16 +2,16 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Run the Codex CLI App Server as a native DSH model route, and manage persistent Codex workers from a DSH Session.
+Run the Codex CLI App Server as a native DSH model route, with its own executions recorded in the DSH Session log.
 
-`dsh-codex-app-provider` is a single DSH Host plugin. It registers the `codex` LLM adapter, carries Codex's own approvals and questions into the DSH conversation surfaces, persists what Codex executed into the DSH Session log, and exposes the `codex_workers` tool. It ships no browser UI: child-session panels belong to `dsh-subagent-ui-sidepanel`, and role/profile policy belongs to `dsh-workflow-kit`.
+`dsh-codex-app-provider` is a single DSH Host plugin. It registers the `codex` LLM adapter, carries Codex's own approvals and questions into the DSH conversation surfaces, persists what Codex executed into the DSH Session log, and publishes the Host capabilities that describe a Codex thread. It ships no browser UI: child-session panels belong to `dsh-subagent-ui-sidepanel`, and role/profile policy belongs to `dsh-workflow-kit`.
 
 - [What it provides](#what-it-provides)
 - [Requirements](#requirements)
 - [Install](#install)
 - [Configuration](#configuration)
 - [Using Codex as a model route](#using-codex-as-a-model-route)
-- [The `codex_workers` tool](#the-codex_workers-tool)
+- [Delegation](#delegation)
 - [Host capabilities](#host-capabilities)
 - [Workflow session gate and the PreToolUse hook](#workflow-session-gate-and-the-pretooluse-hook)
 - [Compatibility](#compatibility)
@@ -37,8 +37,7 @@ DSH native Session / native child Agent
 |---|---|
 | `codex` LLM adapter | The installed Codex runtime as a DSH provider: model catalog, request conversion, streamed events, token usage, cancellation. |
 | Context filter | Removes DSH-injected context (system/developer messages, runtime context, skill catalog, already-imported execution facts) from requests sent to Codex. |
-| `codex_workers` tool | Create, inspect, steer and close persistent Codex workers owned by the calling parent Session. |
-| Worker report delivery | A worker's report is persisted first, then delivered to the parent as a wake-up notice. Acknowledgement and acceptance stay explicit tool actions. |
+| Delegation | Owned by DSH core: `ctx.subagents` continuable children, with `dsh-workflow-kit` owning roles and acceptance. This plugin carries their execution when they run on the `codex` route. |
 | Approval / question bridge | Codex keeps its own permission judgment; its approval and question requests are forwarded to `ctx.approval` and `ctx.userQuestions`, and decline fail-closed when no answerer is composed. |
 | Execution facts | Codex executes its own tools, so the DSH log would otherwise be blind to it. Each executed step is committed to the Session as a sourced `user/message` event, idempotently. |
 | `ctx.codexExecution` | Read-only native execution facts for trusted Host consumers; performs no resume and no model request. |
@@ -120,31 +119,39 @@ Persistence layout under `stateDir`:
 - The DSH Session log shows what Codex executed: each item becomes a sourced `dsh-codex-app-provider` message whose identity is derived from `threadId`/`turnId`/`itemId`, so replay or cold recovery cannot import the same command twice.
 - Conversation history and compaction checkpoints stay DSH-owned; when a DSH history is replayed into a Codex thread, the imported range is marked (`[DSH history import`) so it is not fed back to Codex again.
 
-## The `codex_workers` tool
+## Delegation
 
-`codex_workers` manages the persistent Codex workers that one parent Session owns. It has no role concept: a role-bound child belongs to `dsh-workflow-kit`, whose `codex_workflow` tool dispatches it. Workers created here are not visible to the workflow plugin, and workflow children are not visible here.
+This plugin is a model route and a native execution base, not a second delegation
+system. Earlier releases also shipped a `codex_workers` tool with its own worker
+registry, report ledger and acceptance workflow; that surface duplicated the
+core `ctx.subagents` lifecycle, so it was removed. Delegation now happens
+through the core:
 
-| Action | Fields | Effect |
+- one-shot and continuable children: the `subagent` / `subagent_fork` tools
+  (`ctx.subagents.startContinuable`), with a message/interrupt/list control
+  surface for the continuable ones;
+- a child that runs on the `codex` route: name the provider in the child's
+  `agentOptions`, and its per-turn execution facts, usage and reports stay
+  readable through `ctx.codexExecution.read(childSessionId)`.
+
+Which concrete control tools exist depends on the composition — in a profile
+that also loads Agent Teams, the names `send_message`, `list_agents` and
+`interrupt_agent` belong to the Team surface, not to the subagent provider.
+
+Accepted differences from the removed tool (the comparison is recorded in
+`REVIEW.zh-CN.md` appendix A):
+
+| Removed capability | Replacement | Difference to accept |
 |---|---|---|
-| `create` | `workerId?`, `name?`, `cwd?`, `model?`, `effort?` | Start a worker, optionally naming the id to create. `cwd` defaults to the parent Session workspace. |
-| `list` | — | The calling Session's workers. |
-| `get` | `workerId` | One worker's projection. |
-| `reports` | — | Durable reports of the calling Session's workers. |
-| `append` | `workerId`, `text` | Add a turn to an existing worker. |
-| `steer` | `workerId`, `turnId`, `text` | Inject guidance into the running turn. |
-| `interrupt` | `workerId`, `turnId` | Stop the named turn. |
-| `resume` | `workerId` | Resume a worker that is not running. |
-| `accept` | `workerId`, `turnId`, `acceptance` | Record the verdict `pending` \| `accepted` \| `changes-requested`. |
-| `ack` | `workerId`, `turnId` | Mark a report acknowledged. |
-| `close` | `workerId` | Close the worker. |
+| `create`, `append`, `resume`, `close` | continuable children via `ctx.subagents` | the child is a DSH Session, not a bare native thread |
+| `steer` addressed by `turnId` | continuation addressed by child session | no per-turn addressing |
+| `interrupt(workerId, turnId)` | the child-session interrupt | child-session scope; a settled target is a silent no-op |
+| `list` / `get` / `reports` | the child-session projection | reports activity, not a worker record with its own ack state |
+| `ack` / `accept` | `dsh-workflow-kit` | acceptance is workflow business, not a model route |
+| the worker registry and its store branch | this plugin's own Session record | a Codex thread's identity, usage and reports stay in that record |
 
-Behaviour worth relying on:
-
-- `action` is required; every other field is read only by the actions that list it, and a stray field is refused rather than ignored.
-- Ownership is fenced to the calling parent Agent. The identity is captured from the live Agent, revalidated before every mutation, and one parent cannot reach another parent's workers.
-- `list`, `get` and `reports` are read-only and are presented as a read card; every other action is presented as execution.
-- A report is committed before anyone is notified, and a notice is claimed at most once per parent Agent. An idle parent is woken with a follow-up; a busy parent receives the same notice at its next step. Restarts and repeated events cannot make a parent act on one report twice.
-- Acknowledgement and acceptance are separate, explicit actions. Accepting does not re-run anything.
+Nothing the model route needs was dropped: what went away is a parallel
+lifecycle with its own identity, delivery and acceptance semantics.
 
 ## Host capabilities
 
@@ -306,10 +313,6 @@ src/
   handoff.ts            thread handover surface (ctx.codexHandoff)
   tool-gate.ts          gate bridge, hook transport, hook preflight
   pretool-client.ts     the installed Codex PreToolUse hook command
-  worker-actions.ts     codex_workers action dispatch
-  worker-control.ts     native approval/question bridge for worker turns
-  worker-delivery.ts    durable worker-report delivery
-  identity.ts           caller identity capture and revalidation
   models.ts, browser-types.ts
 cordis.patch.yml        the one Host plugin entry
 locale/                 plugin catalog text (en, zh)

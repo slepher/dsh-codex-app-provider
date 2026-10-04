@@ -61,7 +61,6 @@ function persist(stateDir, reports, worker) {
     approvals: [],
     facts: [],
     reports,
-    ...(worker === undefined ? {} : { worker }),
   });
   store.close();
 }
@@ -69,9 +68,9 @@ function persist(stateDir, reports, worker) {
 test("accepts valid historical report records", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-valid-reports-"));
   persist(stateDir, [
-    report({ turnId: "old-pending", createdAt: 0, acknowledgedAt: 0 }),
-    report({ turnId: "old-accepted", acceptance: "accepted", result: "done", acknowledgedAt: 3 }),
-    report({ turnId: "old-changes", acceptance: "changes-requested", acknowledgedAt: 4 }),
+    report({ turnId: "old-completed", createdAt: 0 }),
+    report({ turnId: "old-failed", status: "failed", result: "", createdAt: 3 }),
+    report({ turnId: "old-interrupted", status: "interrupted", result: "", createdAt: 4 }),
     report({ turnId: "rebuilt-thread", threadId: "previous-thread" }),
     report({ turnId: "current-turn", usage }),
   ]);
@@ -84,17 +83,11 @@ test("accepts valid historical report records", () => {
 test("rejects invalid persisted report records", () => {
   const invalid = [
     ["reports shape", {}],
-    ["worker identity", [report({ workerId: "other" })]],
-    ["empty worker identity", [report({ workerId: "" })]],
     ["empty thread identity", [report({ threadId: "" })]],
     ["empty turn identity", [report({ turnId: "" })]],
     ["duplicate turn", [report({ turnId: "same" }), report({ turnId: "same", status: "failed" })]],
-    ["accepted empty result", [report({ acceptance: "accepted", acknowledgedAt: 2 })]],
-    ["accepted protocol error", [report({ acceptance: "accepted", result: "done", protocolError: "bad", acknowledgedAt: 2 })]],
-    ["accepted without acknowledgement", [report({ acceptance: "accepted", result: "done" })]],
-    ["changes without acknowledgement", [report({ acceptance: "changes-requested" })]],
+    ["unknown status", [report({ status: "saved" })]],
     ["negative creation time", [report({ createdAt: -1 })]],
-    ["fractional acknowledgement time", [report({ acknowledgedAt: 1.5 })]],
     ["negative usage count", [report({ usage: { ...usage, total: { ...usage.total, totalTokens: -1 } } })]],
     ["usage ratio above one", [report({ usage: { ...usage, remainingContextRatio: 1.1 } })]],
   ];
@@ -105,51 +98,24 @@ test("rejects invalid persisted report records", () => {
     rmSync(stateDir, { recursive: true });
   }
 
-  const workerDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-invalid-reports-"));
-  persist(workerDir, [report({ threadId: "other" })], { parentSessionId: "owner", owner: "agent", name: "worker", detached: false });
-  assert.throws(() => new SessionStore(workerDir), /Invalid Session reports/, "worker thread identity");
-  rmSync(workerDir, { recursive: true });
 });
 
-test("keeps legacy records unbound and recovers complete worker records with unified occupancy", () => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-worker-store-"));
+test("occupancy follows release and handover rather than the record's momentary state", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-occupancy-"));
   const store = new SessionStore(stateDir);
-  const put = (sessionId, state, detached, threadId) => store.put({
-    ownerId: "parent", sessionId, threadId, cwd: "/work", state,
-    approvals: [], facts: [], reports: [],
-    worker: { parentSessionId: "parent", owner: "agent", name: sessionId, detached },
-  });
-  store.put({ ownerId: "parent", sessionId: "legacy", threadId: "legacy-thread", cwd: "/work", state: "idle", approvals: [], facts: [], reports: [] });
-  put("attached", "idle", false, "attached-thread");
-  put("detached-idle", "idle", true, "free-thread");
-  put("detached-running", "running", true, "busy-thread");
+  const put = (sessionId, extra) => store.put({ ownerId: "parent", sessionId, cwd: "/work", state: "idle", approvals: [], facts: [], reports: [], ...extra });
+  put("live", { threadId: "live-thread" });
+  put("released", { threadId: "released-thread", released: true });
+  put("handed", { threadId: "handed-thread", handedOff: { toSessionId: "successor", requestId: "r1", at: 1 } });
   store.close();
 
   const recovered = new SessionStore(stateDir);
-  assert.equal(recovered.get("parent", "legacy").worker, undefined);
-  assert.deepEqual(recovered.list("parent").map(record => record.sessionId), ["legacy"]);
-  assert.throws(() => recovered.get("parent", "attached"), /Contextual caller required/);
-  assert.deepEqual(recovered.listWorkers("parent").map(record => record.sessionId), ["attached"]);
-  assert.equal(recovered.bound("attached").state, "saved");
-  assert.equal(recovered.bound("attached").worker.savedState, "idle");
-  assert.equal(recovered.bound("detached-running").worker.savedState, "running");
-  assert.deepEqual(new Set(recovered.occupiedThreads()), new Set(["legacy-thread", "attached-thread", "busy-thread"]));
+  assert.deepEqual(recovered.occupiedThreads(), ["live-thread"]);
+  assert.equal(recovered.get("parent", "released").released, true, "the release survives the reload");
+  assert.equal(recovered.get("parent", "handed").handedOff.toSessionId, "successor");
+  assert.deepEqual(recovered.list("parent").map(record => record.sessionId).sort(), ["handed", "live", "released"]);
   recovered.close();
   rmSync(stateDir, { recursive: true });
-});
-
-test("rejects partial or owner-mismatched worker blocks", () => {
-  for (const worker of [
-    { parentSessionId: "parent" },
-    { parentSessionId: "other", owner: "user", name: "worker", detached: false },
-  ]) {
-    const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-kit-invalid-worker-"));
-    const store = new SessionStore(stateDir);
-    store.put({ ownerId: "parent", sessionId: "worker", cwd: "/work", state: "idle", approvals: [], facts: [], reports: [], worker });
-    store.close();
-    assert.throws(() => new SessionStore(stateDir), /Invalid Session worker/);
-    rmSync(stateDir, { recursive: true });
-  }
 });
 
 // The lock's process identity is `/proc`-based, so this case can only assert

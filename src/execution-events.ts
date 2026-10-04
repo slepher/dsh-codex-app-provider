@@ -139,7 +139,7 @@ function changedPaths(item: Record<string, unknown>): string[] {
  * Only executed facts cross: commands with their exit status, changed paths,
  * tool calls and their results, searches, and native compaction markers.
  * Model-authored reasoning and plan text stay out, and nothing here is an
- * instruction the worker may re-execute.
+ * instruction the child may re-execute.
  */
 function factLines(item: Record<string, unknown>, reference: string): string[] {
   const type = String(item.type);

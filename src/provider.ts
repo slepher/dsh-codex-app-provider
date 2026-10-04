@@ -25,7 +25,6 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   BackendEvent,
-  Caller,
   CodexBackend,
   InputModality,
   ModelOption,
@@ -441,7 +440,7 @@ export class CodexProviderAdapter extends LlmAdapter {
     const snapshot = await this.deps.backend.readSession(OWNER_ID, id);
     if (snapshot === undefined) return undefined;
     const { threadId, turnId, model, reasoningEffort, pending, state } = snapshot;
-    // The execution cwd, not the DSH Session's host workspace: a lane worker's
+    // The execution cwd, not the DSH Session's host workspace: a lane child's
     // thread runs in its lane, and that is the directory a consumer reconciles
     // the assignment against.
     const cwd = snapshot.executionCwd ?? snapshot.cwd;
@@ -554,7 +553,7 @@ export class CodexProviderAdapter extends LlmAdapter {
     const owner = OWNER_ID, backendId = backendSessionId(sessionId), backend = this.deps.backend;
     let record = await backend.readSession(owner, backendId);
     // `cwd` identifies the DSH Session's host workspace and `executionCwd` is
-    // where its Codex thread actually runs; a lane worker legitimately has two
+    // where its Codex thread actually runs; a lane child legitimately has two
     // different values, so neither check may be dropped or conflated.
     if (record !== undefined && record.cwd !== cwd) {
       throw new LlmError("This Session's workspace changed; start a new DSH Session for the new workspace", "WORKSPACE_CHANGED");
@@ -777,12 +776,10 @@ export class CodexProviderAdapter extends LlmAdapter {
    * @param request - the native request the App Server addressed to this client.
    * @param agent - the Agent whose approval surface answers; absent fails closed.
    * @param signal - the turn's cancellation lifetime.
-   * @param caller - the owning caller for a worker's approval; absent means the
-   *   request belongs to one of the provider's own Session records.
    */
-  private async bridgeApproval(owner: string, sessionId: string, request: ApprovalRequest, agent: Agent | undefined, signal?: AbortSignal, caller?: Caller): Promise<void> {
+  private async bridgeApproval(owner: string, sessionId: string, request: ApprovalRequest, agent: Agent | undefined, signal?: AbortSignal): Promise<void> {
     const decision = await this.askUserForApproval(sessionId, request, agent, signal);
-    await this.decide(owner, sessionId, request.requestId, decision, caller).catch(() => {});
+    await this.deps.backend.decideApproval(owner, request.requestId, decision).catch(() => {});
   }
 
   /** Resolve one native approval through the DSH answerer chain, failing closed. */
@@ -809,46 +806,6 @@ export class CodexProviderAdapter extends LlmAdapter {
     }
     if (outcome === "allowed-once") return "accept";
     return outcome === "cancelled" ? "cancel" : "decline";
-  }
-
-  /**
-   * Apply one decision to the request's recorded owner.
-   *
-   * A provider Session is decided by its owner string; an ordinary worker's
-   * records are owned by its parent Session, so its decision travels through the
-   * same owning caller that started the turn.
-   */
-  private async decide(owner: string, sessionId: string, requestId: string, decision: ApprovalDecision, caller?: Caller): Promise<void> {
-    if (caller === undefined) await this.deps.backend.decideApproval(owner, requestId, decision);
-    else await this.deps.backend.decideApproval(caller, sessionId, requestId, decision);
-  }
-
-  /**
-   * Carry one ordinary worker's native requests to the user.
-   *
-   * A `codex_workers` turn is started by the tool rather than by an
-   * `adapter.stream` call, so no stream loop watches the worker's Session: a
-   * request Codex raises to the user is recorded and the worker waits in
-   * `waiting-approval` with no path to an answer. This installs the same bridge
-   * the stream paths use — declared interactive, so a native question is asked
-   * instead of answered empty — and returns the unsubscribe the caller holds
-   * while the worker exists.
-   * @param caller - the validated parent caller that owns the worker.
-   * @param workerId - the worker's native Session identity.
-   * @param agent - the parent Agent whose approval and question surfaces answer.
-   * @returns the unsubscribe that ends the watch.
-   */
-  watchWorkerRequests(caller: Caller, workerId: string, agent: Agent): () => void {
-    // The worker's records are owned by its parent Session, not by this
-    // provider, so its owner string is the caller's Session identity.
-    const owner = caller.nativeSessionId;
-    return this.deps.backend.subscribe(caller, workerId, event => {
-      if (event.type === "approval.requested") {
-        void this.bridgeApproval(owner, workerId, event.request, agent, undefined, caller);
-      } else if (event.type === "userInput.requested") {
-        void this.bridgeUserInput(owner, workerId, event.request, agent);
-      }
-    }, { interactive: true });
   }
 
   /**

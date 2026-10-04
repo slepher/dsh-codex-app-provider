@@ -7,14 +7,11 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   BackendEvent,
-  Caller,
   CodexBackend,
   CreateSessionOptions,
   ExecutionFactLine,
-  CreateWorkerInput,
   PendingConfig,
   Report,
-  ReportAcceptance,
   SequencedBackendEvent,
   SessionSnapshot,
   StartTurnOptions,
@@ -30,8 +27,6 @@ import type {
   UserInputAnswer,
   UserInputQuestion,
   UserInputRequest,
-  WorkerProjection,
-  WorkerManagementEvent,
 } from "./browser-types.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { feedsExecutionFacts, projectExecutionFacts, reduceExecutionEvents } from "./execution-events.js";
@@ -91,7 +86,6 @@ export class CodexSessionBackend implements CodexBackend {
   private sequence = 0;
   private readonly listeners = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
   private readonly interactive = new Map<string, Set<(event: BackendEvent, sequence: number) => void>>();
-  private readonly workerListeners = new Map<string, Set<(event: WorkerManagementEvent) => void>>();
   private closed = false;
   /** The workflow gate registry, once the Host capability is installed. */
   private gate?: CodexGateBridge;
@@ -210,89 +204,18 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async createWorker(caller: Caller, input: CreateWorkerInput): Promise<WorkerProjection> {
-    validateCaller(caller);
-    const sessionId = input.id ?? randomUUID();
-    if (!sessionId || !input.name.trim() || !availableDirectory(input.cwd)) {
-      throw new Error("Parent, name and an existing absolute cwd are required");
-    }
-    if (this.store.has(sessionId)) throw new Error("Invalid or occupied worker identity");
-    const { id: _, name: __, cwd: ___, ...options } = input;
-    const boundary = normalizedBoundary(options.boundary);
-    const normalizedOptions = { ...options, ...(boundary === undefined ? {} : { boundary }) };
-    const record: StoredSession = {
-      ownerId: ownerIdentity(caller),
-      sessionId,
-      cwd: input.cwd,
-      executionCwd: boundary?.cwd ?? input.cwd,
-      state: "unknown",
-      model: options.model,
-      reasoningEffort: options.reasoningEffort,
-      approvals: [],
-      options: normalizedOptions,
-      facts: [],
-      reports: [],
-      worker: {
-        parentSessionId: ownerIdentity(caller),
-        owner: "agent",
-        name: input.name,
-        detached: false,
-      },
-    };
-    this.store.put(record);
-    const runtime = this.attach(record);
-    try {
-      await runtime.rpc.connect();
-      const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
-      if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
-      record.threadId = result.thread.id;
-      reconcileBoundary(record, result);
-      checkExecutionModel(record, result);
-      record.model = result.model;
-      record.reasoningEffort = result.reasoningEffort;
-      record.state = "idle";
-      this.store.put(record);
-      this.notifyWorker(record, "created");
-      return workerProjection(record);
-    } catch (error) {
-      record.state = "unknown";
-      this.store.put(record);
-      if (error instanceof UncertainError) this.notifyWorker(record, "uncertain");
-      throw new Error(`Worker ${sessionId} creation failed; inspect it before retrying: ${String(error)}`);
-    }
-  }
-
-  async listWorkers(caller: Caller): Promise<readonly WorkerProjection[]> {
-    validateCaller(caller);
-    return this.store.listWorkers(ownerIdentity(caller))
-      .filter(record => canAccess(caller, record))
-      .map(workerProjection);
-  }
-
-  async getWorker(caller: Caller, workerId: string): Promise<WorkerProjection> {
-    return workerProjection(this.boundRequired(caller, workerId));
-  }
-
-  async pendingReports(caller: Caller): Promise<readonly Report[]> {
-    validateCaller(caller);
-    return structuredClone(this.store.listWorkers(ownerIdentity(caller))
-      .filter(record => record.worker?.owner === "agent")
-      .flatMap(record => record.reports.filter(report => report.acceptance === "pending" && report.acknowledgedAt === undefined)));
-  }
-
   async listSessions(ownerId: string): Promise<readonly SessionSnapshot[]> {
     return this.store.list(ownerId).filter(record => !record.released).map(snapshot);
   }
 
-  async readSession(owner: string | Caller, sessionId: string): Promise<SessionSnapshot | undefined> {
-    const record = typeof owner === "string" ? this.store.get(owner, sessionId) : this.boundRequired(owner, sessionId);
+  async readSession(ownerId: string, sessionId: string): Promise<SessionSnapshot | undefined> {
+    const record = this.store.get(ownerId, sessionId);
     return record === undefined ? undefined : snapshot(record);
   }
 
-  async resumeSession(owner: string | Caller, sessionId: string): Promise<SessionSnapshot> {
-    const record = this.required(owner, sessionId);
+  async resumeSession(ownerId: string, sessionId: string): Promise<SessionSnapshot> {
+    const record = this.required(ownerId, sessionId);
     this.assertThreadOwnership(record, "resume its thread");
-    const ownerId = ownerIdentity(owner);
     const prior = this.live.get(sessionId);
     if (prior !== undefined) {
       // A runtime this process still holds is authoritative: an uncertain one has
@@ -325,7 +248,6 @@ export class CodexSessionBackend implements CodexBackend {
         throw new Error("Thread appears active; refusing to claim it");
       }
       record.state = "idle";
-      if (record.worker !== undefined) record.worker.savedState = undefined;
       record.released = false;
       record.approvals = [];
       this.store.put(record);
@@ -333,7 +255,6 @@ export class CodexSessionBackend implements CodexBackend {
     } catch (error) {
       record.state = "unknown";
       this.store.put(record);
-      if (record.worker !== undefined) this.notifyWorker(record, "uncertain");
       this.releaseGateRuntime(sessionId);
       this.live.delete(sessionId);
       await runtime.rpc.close().catch(() => {});
@@ -341,11 +262,9 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async configureSession(owner: string | Caller, sessionId: string, options: TurnOptions): Promise<SessionSnapshot> {
-    const record = this.required(owner, sessionId);
+  async configureSession(ownerId: string, sessionId: string, options: TurnOptions): Promise<SessionSnapshot> {
+    const record = this.required(ownerId, sessionId);
     this.assertThreadOwnership(record, "configure its thread");
-    if (typeof owner !== "string") throw new Error("Workers keep their creation configuration");
-    const ownerId = ownerIdentity(owner);
     if ("model" in options) record.model = options.model;
     if ("reasoningEffort" in options) record.reasoningEffort = options.reasoningEffort;
     record.options = { ...record.options, model: record.model, reasoningEffort: record.reasoningEffort };
@@ -353,37 +272,8 @@ export class CodexSessionBackend implements CodexBackend {
     return snapshot(record);
   }
 
-  async closeSession(owner: string | Caller, sessionId: string, confirmedStopped = false): Promise<void> {
-    const record = this.required(owner, sessionId);
-    if (record.worker !== undefined && confirmedStopped) throw new Error("Workers must be confirmed idle before closing");
-    const ownerId = ownerIdentity(owner);
-    if (record.worker !== undefined) {
-      const idle = record.state === "idle" || record.state === "saved" && record.worker.savedState === "idle";
-      if (!idle || record.approvals.length) throw new Error("Only idle workers can be closed");
-      if (record.reports.some(report => report.acceptance === "pending" && report.acknowledgedAt === undefined)) {
-        throw new Error("Process pending reports with accept or ack before closing");
-      }
-      if (hasActiveCommand(this.live.get(sessionId))) throw new Error("Tracked task command still running; verify its completion before closing");
-      record.state = "starting";
-      this.store.put(record);
-      try {
-        await this.live.get(sessionId)?.rpc.close();
-        this.releaseGateRuntime(sessionId);
-        this.live.delete(sessionId);
-        record.state = "saved";
-        record.worker.savedState = "idle";
-        record.worker.detached = true;
-        this.store.put(record);
-        this.notifyWorker(record, "closed", record.worker.parentSessionId, true);
-        this.dropSubscribers(sessionId);
-        return;
-      } catch (error) {
-        record.state = "unknown";
-        this.store.put(record);
-        this.notifyWorker(record, "uncertain");
-        throw error;
-      }
-    }
+  async closeSession(ownerId: string, sessionId: string, confirmedStopped = false): Promise<void> {
+    const record = this.required(ownerId, sessionId);
     // A Session this process still holds is not uncertain, so it must be idle to
     // close. Once no runtime is here, the caller may confirm the prior process
     // stopped: an `unknown` record left by a dead process is otherwise unreachable.
@@ -413,7 +303,6 @@ export class CodexSessionBackend implements CodexBackend {
     this.releaseGateRuntime(backendId);
     if (runtime !== undefined) this.live.delete(backendId);
     this.dropSubscribers(backendId);
-    if (record.worker !== undefined) record.worker.detached = true;
     record.released = true;
     this.store.put(record);
     return closing ?? Promise.resolve();
@@ -560,10 +449,9 @@ export class CodexSessionBackend implements CodexBackend {
     await live.rpc.close().catch(() => {});
   }
 
-  async startTurn(owner: string | Caller, sessionId: string, input: string | readonly TurnInput[], options: StartTurnOptions = {}): Promise<TurnSnapshot> {
-    const record = this.required(owner, sessionId);
+  async startTurn(ownerId: string, sessionId: string, input: string | readonly TurnInput[], options: StartTurnOptions = {}): Promise<TurnSnapshot> {
+    const record = this.required(ownerId, sessionId);
     this.assertThreadOwnership(record, "start a turn on its thread");
-    const ownerId = ownerIdentity(owner);
     const items = turnInput(input);
     if (options.idempotencyKey !== undefined && record.lastStartKey === options.idempotencyKey && record.turnId !== undefined) {
       return turnSnapshot(record, record.lastTurnState ?? record.state);
@@ -575,7 +463,7 @@ export class CodexSessionBackend implements CodexBackend {
     const target = pendingTarget(record, options);
     if (target === undefined) delete record.pending;
     else record.pending = target;
-    const runtime = await this.runtime(record, owner);
+    const runtime = await this.runtime(record, ownerId);
     record.state = "running";
     record.turnId = undefined;
     record.lastStartKey = options.idempotencyKey;
@@ -617,13 +505,11 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async compactSession(owner: string | Caller, sessionId: string): Promise<void> {
-    const record = this.required(owner, sessionId);
+  async compactSession(ownerId: string, sessionId: string): Promise<void> {
+    const record = this.required(ownerId, sessionId);
     this.assertThreadOwnership(record, "compact its thread");
     if (record.state !== "idle") throw new Error("Wait for the current turn before compacting");
-    if (typeof owner !== "string") throw new Error("Worker compaction is not supported");
-    const ownerId = ownerIdentity(owner);
-    const runtime = await this.runtime(record, owner);
+    const runtime = await this.runtime(record, ownerId);
     record.state = "running";
     record.turnId = undefined;
     record.operation = "compact";
@@ -639,18 +525,10 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async steerTurn(
-    owner: string | Caller,
-    workerOrTurnId: string,
-    turnOrInput: string | readonly TurnInput[],
-    contextualInput?: string | readonly TurnInput[],
-  ): Promise<void> {
-    const turnId = typeof owner === "string" ? workerOrTurnId : turnOrInput as string;
-    const input = typeof owner === "string" ? turnOrInput as string | readonly TurnInput[] : contextualInput!;
-    const record = typeof owner === "string" ? this.byTurn(owner, turnId) : this.required(owner, workerOrTurnId);
+  async steerTurn(ownerId: string, turnId: string, input: string | readonly TurnInput[]): Promise<void> {
+    const record = this.byTurn(ownerId, turnId);
     this.assertThreadOwnership(record, "steer its thread");
     if (record.turnId !== turnId) throw new Error("Turn not found");
-    const ownerId = ownerIdentity(owner);
     const items = turnInput(input);
     if (record.state !== "running") throw new Error("Steer precondition failed");
     const runtime = this.live.get(record.sessionId);
@@ -662,12 +540,10 @@ export class CodexSessionBackend implements CodexBackend {
     });
   }
 
-  async interruptTurn(owner: string | Caller, workerOrTurnId: string, contextualTurnId?: string): Promise<void> {
-    const turnId = typeof owner === "string" ? workerOrTurnId : contextualTurnId!;
-    const record = typeof owner === "string" ? this.byTurn(owner, turnId) : this.required(owner, workerOrTurnId);
+  async interruptTurn(ownerId: string, turnId: string): Promise<void> {
+    const record = this.byTurn(ownerId, turnId);
     this.assertThreadOwnership(record, "interrupt its thread");
     if (record.turnId !== turnId) throw new Error("Turn not found");
-    const ownerId = ownerIdentity(owner);
     if (record.state !== "running" && record.state !== "interrupt-requested") throw new Error("Interrupt precondition failed");
     const runtime = this.live.get(record.sessionId);
     if (runtime === undefined) throw new Error("Turn runtime unavailable");
@@ -676,12 +552,12 @@ export class CodexSessionBackend implements CodexBackend {
     this.store.put(record);
   }
 
-  async pendingApprovals(owner: string | Caller, sessionId: string): Promise<readonly ApprovalRequest[]> {
-    return structuredClone(this.required(owner, sessionId).approvals);
+  async pendingApprovals(ownerId: string, sessionId: string): Promise<readonly ApprovalRequest[]> {
+    return structuredClone(this.required(ownerId, sessionId).approvals);
   }
 
-  async pendingUserInputs(owner: string | Caller, sessionId: string): Promise<readonly UserInputRequest[]> {
-    const record = this.required(owner, sessionId);
+  async pendingUserInputs(ownerId: string, sessionId: string): Promise<readonly UserInputRequest[]> {
+    const record = this.required(ownerId, sessionId);
     return structuredClone([...this.live.get(record.sessionId)?.inputs.values() ?? []].map(pending => pending.request));
   }
 
@@ -696,33 +572,18 @@ export class CodexSessionBackend implements CodexBackend {
     throw new Error("User input is no longer pending");
   }
 
-  async decideApproval(
-    owner: string | Caller,
-    workerOrRequestId: string,
-    requestOrDecision: string,
-    contextualDecision?: ApprovalDecision,
-  ): Promise<void> {
-    const requestId = typeof owner === "string" ? workerOrRequestId : requestOrDecision;
-    const decision = (typeof owner === "string" ? requestOrDecision : contextualDecision) as ApprovalDecision;
-    const record = typeof owner === "string"
-      ? this.store.list(owner).find(item => item.approvals.some(request => request.requestId === requestId))
-      : this.required(owner, workerOrRequestId);
-    if (record !== undefined && !record.approvals.some(request => request.requestId === requestId)) throw new Error("Approval no longer pending");
-    if (record === undefined) throw new Error("Approval no longer pending");
+  async decideApproval(ownerId: string, requestId: string, decision: ApprovalDecision): Promise<void> {
+    const record = this.store.list(ownerId).find(item => item.approvals.some(request => request.requestId === requestId));
+    if (record === undefined || !record.approvals.some(request => request.requestId === requestId)) throw new Error("Approval no longer pending");
     const request = record.approvals.find(item => item.requestId === requestId)!;
     const runtime = this.live.get(record.sessionId);
     const rpcId = runtime?.requests.get(requestId);
-    const allowed = typeof owner === "string" ? ["accept", "decline", "cancel"] : ["accept", "decline"];
-    if (!allowed.includes(decision)) throw new Error("Invalid approval decision");
+    if (!["accept", "decline", "cancel"].includes(decision)) throw new Error("Invalid approval decision");
     if (runtime === undefined || rpcId === undefined
       || request.sessionId !== record.sessionId || request.threadId !== record.threadId || request.turnId !== record.turnId
       || !["running", "waiting-approval", "interrupt-requested"].includes(record.state)) {
       throw new Error("Approval no longer pending");
     }
-    // `required` already resolved the record through this caller's ownership,
-    // so a contextual decision only has to be one of the allowed verdicts: the
-    // parent Agent answers for its own worker; no other caller can reach it.
-    const ownerId = ownerIdentity(owner);
     runtime.rpc.respond(rpcId, approvalResponse(request, decision));
     runtime.requests.delete(requestId);
     record.approvals = record.approvals.filter(request => request.requestId !== requestId);
@@ -730,44 +591,16 @@ export class CodexSessionBackend implements CodexBackend {
     this.store.put(record);
   }
 
-  async readFacts(owner: string | Caller, sessionId: string): Promise<readonly ExecutionFactLine[]> {
-    return structuredClone(this.required(owner, sessionId).facts);
+  async readFacts(ownerId: string, sessionId: string): Promise<readonly ExecutionFactLine[]> {
+    return structuredClone(this.required(ownerId, sessionId).facts);
   }
 
-  async readReports(owner: string | Caller, sessionId: string): Promise<readonly Report[]> {
-    return structuredClone(this.required(owner, sessionId).reports);
+  async readReports(ownerId: string, sessionId: string): Promise<readonly Report[]> {
+    return structuredClone(this.required(ownerId, sessionId).reports);
   }
 
-  async acknowledgeReport(owner: string | Caller, sessionId: string, turnId: string): Promise<Report> {
-    const record = this.required(owner, sessionId);
-    const ownerId = ownerIdentity(owner);
-    const report = record.reports.find(item => item.turnId === turnId);
-    if (report === undefined) throw new Error("Unknown report");
-    if (report.acknowledgedAt === undefined) {
-      report.acknowledgedAt = Date.now();
-      this.store.put(record);
-    }
-    return structuredClone(report);
-  }
-
-  async acceptReport(owner: string | Caller, sessionId: string, turnId: string, acceptance: ReportAcceptance): Promise<Report> {
-    const record = this.required(owner, sessionId);
-    const ownerId = ownerIdentity(owner);
-    const report = record.reports.find(item => item.turnId === turnId);
-    if (report === undefined || !["pending", "accepted", "changes-requested"].includes(acceptance)) {
-      throw new Error("Unknown report or acceptance");
-    }
-    if (acceptance === "accepted" && (report.protocolError !== undefined || !report.result.trim())) {
-      throw new Error("Cannot accept a report without a deliverable result");
-    }
-    report.acceptance = acceptance;
-    if (acceptance !== "pending") report.acknowledgedAt ??= Date.now();
-    this.store.put(record);
-    return structuredClone(report);
-  }
-
-  subscribe(owner: string | Caller, sessionId: string, listener: (event: BackendEvent, sequence: number) => void, options: SubscribeOptions = {}): () => void {
-    this.required(owner, sessionId);
+  subscribe(ownerId: string, sessionId: string, listener: (event: BackendEvent, sequence: number) => void, options: SubscribeOptions = {}): () => void {
+    this.required(ownerId, sessionId);
     const listeners = this.listeners.get(sessionId) ?? new Set();
     listeners.add(listener);
     this.listeners.set(sessionId, listeners);
@@ -780,14 +613,6 @@ export class CodexSessionBackend implements CodexBackend {
       listeners.delete(listener);
       this.interactive.get(sessionId)?.delete(listener);
     };
-  }
-
-  subscribeWorkers(caller: Caller, listener: (event: WorkerManagementEvent) => void): () => void {
-    validateCaller(caller);
-    const listeners = this.workerListeners.get(ownerIdentity(caller)) ?? new Set();
-    listeners.add(listener);
-    this.workerListeners.set(ownerIdentity(caller), listeners);
-    return () => { listeners.delete(listener); };
   }
 
   async modelSettings(cwd: string) {
@@ -805,16 +630,9 @@ export class CodexSessionBackend implements CodexBackend {
     this.store.close();
   }
 
-  private required(owner: string | Caller, sessionId: string): StoredSession {
-    const record = typeof owner === "string" ? this.store.get(owner, sessionId) : this.boundRequired(owner, sessionId);
+  private required(ownerId: string, sessionId: string): StoredSession {
+    const record = this.store.get(ownerId, sessionId);
     if (record === undefined) throw new Error("Session not found");
-    return record;
-  }
-
-  private boundRequired(caller: Caller, sessionId: string): StoredSession {
-    validateCaller(caller);
-    const record = this.store.bound(sessionId);
-    if (record === undefined || !canAccess(caller, record)) throw new Error("Worker not found in this parent session");
     return record;
   }
 
@@ -840,11 +658,11 @@ export class CodexSessionBackend implements CodexBackend {
     throw new Error(`This Session handed its Codex thread to ${record.handedOff.toSessionId}; it can no longer ${action}`);
   }
 
-  private async runtime(record: StoredSession, owner: string | Caller = record.ownerId): Promise<Runtime> {
+  private async runtime(record: StoredSession, ownerId: string = record.ownerId): Promise<Runtime> {
     const existing = this.live.get(record.sessionId);
     if (existing?.uncertain) throw new UncertainError("Execution state unknown; do not redispatch");
     if (existing !== undefined) return existing;
-    await this.resumeSession(owner, record.sessionId);
+    await this.resumeSession(ownerId, record.sessionId);
     const runtime = this.live.get(record.sessionId);
     if (runtime === undefined) throw new Error("Session runtime unavailable");
     return runtime;
@@ -881,7 +699,6 @@ export class CodexSessionBackend implements CodexBackend {
       this.store.put(record);
       this.publish(record, { type: "session.uncertain", error: `Execution state unknown: ${String(error)}` });
       this.projectFacts(record);
-      if (record.worker !== undefined) this.notifyWorker(record, "uncertain");
     };
     runtime.rpc.on("uncertain", uncertain);
     return runtime;
@@ -967,25 +784,19 @@ export class CodexSessionBackend implements CodexBackend {
     record.approvals = [];
     this.live.get(record.sessionId)?.requests.clear();
     this.live.get(record.sessionId)?.inputs.clear();
-    let reportReady: BackendEvent | undefined;
     if (operation !== "compact") {
       const deliverable = typeof output === "string" && output.trim().length > 0;
       const report: Report = {
-        workerId: record.sessionId,
         threadId: record.threadId!,
         turnId: turn.id,
         status: terminal,
         result: deliverable ? output : "",
-        ...(!deliverable && terminal === "completed" ? { protocolError: "Result missing: completed turn has no deliverable final_answer; ask the same worker to supply its result without repeating the task" } : {}),
+        ...(!deliverable && terminal === "completed" ? { protocolError: "Result missing: completed turn has no deliverable final_answer; ask the same Session to supply its result without repeating the task" } : {}),
         ...(error === undefined ? {} : { error }),
         usage: normalizeUsage(record.usage),
         createdAt: Date.now(),
-        acceptance: "pending",
       };
       record.reports.push(report);
-      if (record.worker?.owner === "agent" && !record.worker.detached) {
-        reportReady = { type: "report.ready", workerId: record.sessionId, turnId: turn.id, parentSessionId: record.worker.parentSessionId };
-      }
     }
     // The terminal transition is durable state: the turn identity, the state,
     // the report and the cleared approval ledger must survive a restart.
@@ -997,9 +808,8 @@ export class CodexSessionBackend implements CodexBackend {
       ...(output === undefined ? {} : { finalOutput: output }),
       ...(error === undefined ? {} : { error }),
     };
-    this.commitEvents(record, [rawEvent, event, reportReady].filter((item): item is BackendEvent => item !== undefined));
+    this.commitEvents(record, [rawEvent, event].filter((item): item is BackendEvent => item !== undefined));
     this.projectFacts(record);
-    if (reportReady !== undefined) this.notifyWorker(record, "report");
   }
 
   private finished(record: StoredSession, turnId: string): boolean {
@@ -1116,14 +926,6 @@ export class CodexSessionBackend implements CodexBackend {
     for (const item of committed) if (runtime !== undefined && feedsExecutionFacts(item.event)) runtime.facts.push(item);
     for (const { event, sequence } of committed) {
       for (const listener of this.listeners.get(record.sessionId) ?? []) listener(structuredClone(event), sequence);
-    }
-  }
-
-  private notifyWorker(record: StoredSession, change: WorkerManagementEvent["change"], parentSessionId = record.worker?.parentSessionId, invalidated = false): void {
-    if (record.worker === undefined || parentSessionId === undefined) return;
-    const event: WorkerManagementEvent = { type: "worker.changed", parentSessionId, workerId: record.sessionId, change, ...(invalidated ? { invalidated: true } : {}) };
-    for (const listener of this.workerListeners.get(parentSessionId) ?? []) {
-      try { listener(structuredClone(event)); } catch {}
     }
   }
 
@@ -1383,46 +1185,9 @@ function normalizeUsage(value: unknown): Usage | null {
   };
 }
 
-function validateCaller(caller: Caller): void {
-  const parent = caller?.parentAgent;
-  if (typeof caller?.nativeSessionId !== "string" || !caller.nativeSessionId
-    || caller.source !== "agent" || typeof parent?.id !== "string" || !parent.id
-    || parent.nativeSessionId !== caller.nativeSessionId) throw new Error("Invalid contextual caller");
-}
-
-function canAccess(caller: Caller, record: StoredSession): boolean {
-  const worker = record.worker;
-  return worker?.owner === "agent" && !worker.detached && worker.parentSessionId === caller.nativeSessionId;
-}
-
-function ownerIdentity(owner: string | Caller): string {
-  return typeof owner === "string" ? owner : owner.nativeSessionId;
-}
-
 function availableDirectory(path: unknown): path is string {
   if (typeof path !== "string" || !isAbsolute(path)) return false;
   try { return statSync(path).isDirectory(); } catch { return false; }
-}
-
-function workerProjection(record: StoredSession): WorkerProjection {
-  const worker = record.worker!;
-  return structuredClone({
-    id: record.sessionId,
-    parentSessionId: worker.parentSessionId,
-    owner: "agent",
-    name: worker.name,
-    detached: worker.detached,
-    cwd: record.cwd,
-    model: record.model,
-    effort: record.reasoningEffort,
-    threadId: record.threadId,
-    turnId: record.turnId,
-    state: record.state,
-    savedState: worker.savedState,
-    reports: record.reports,
-    approvals: record.approvals,
-    usage: record.usage,
-  });
 }
 
 /**

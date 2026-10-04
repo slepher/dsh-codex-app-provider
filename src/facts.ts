@@ -26,7 +26,7 @@ import type { CodexExecutionFactLine } from "./execution-events.js";
 
 declare module "@deepseek-ai/dsh-llm" {
   interface MessageSourceMap {
-    /** Executed-fact records and worker-report notices this plugin commits. */
+    /** Executed-fact records this plugin commits. */
     "dsh-codex-app-provider": {
       kind: "dsh-codex-app-provider";
     } & ContextFormed;
@@ -49,9 +49,9 @@ const FACT_ID_PREFIX = "codex-executed:";
 /**
  * True when a message identity is one of this plugin's imported facts.
  *
- * The identity, not the plugin name, is the discriminator: the same plugin also
- * delivers worker-report notices as model-visible input, and those must not be
- * mistaken for facts that are already in the native thread.
+ * The identity, not the plugin name, is the discriminator: the plugin writes
+ * other messages into the same log, and those must not be mistaken for facts
+ * that are already in the native thread.
  * @param id - the message identity under test.
  * @returns whether the message is an imported executed fact.
  */

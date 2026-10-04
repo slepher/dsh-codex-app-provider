@@ -375,20 +375,18 @@ test("a disposed DSH Session releases the record that backed it", async t => {
   const servers = [];
   const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
   t.after(() => backend.close());
-  const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
   const work = mkdtempSync(join(tmpdir(), "dsh-codex-disposed-cwd-"));
   t.after(() => rmSync(work, { recursive: true, force: true }));
-  const worker = await backend.createWorker(caller, { name: "worker", cwd: work });
   await backend.createSession("owner", "codex:conversation", work);
-  assert.equal((await backend.listWorkers(caller)).length, 1);
-  assert.equal((await backend.listSessions("owner")).some(session => session.sessionId === "codex:conversation"), true);
+  await backend.createSession("owner", "codex:other", work);
+  assert.equal((await backend.listSessions("owner")).length, 2);
 
   // The Host owns the Session lifecycle and reports the disposal as a fact.
   backend.releaseDisposed("codex:conversation");
-  backend.releaseDisposed(worker.id);
   assert.equal((await backend.listSessions("owner")).some(session => session.sessionId === "codex:conversation"), false,
     "the released conversation is no longer owned");
-  assert.equal((await backend.listWorkers(caller)).length, 0, "a released worker is detached from its parent");
+  assert.equal((await backend.listSessions("owner")).some(session => session.sessionId === "codex:other"), true,
+    "a sibling Session is untouched");
   // A second disposal is a no-op rather than an error.
   backend.releaseDisposed("codex:conversation");
   backend.releaseDisposed("codex:never-existed");
@@ -479,34 +477,6 @@ test("resume refuses a thread that reports active work instead of claiming it", 
   const second = new CodexSessionBackend(stateDir, () => new ActiveThreadServer());
   t.after(() => second.close());
   await assert.rejects(second.resumeSession("owner", "codex:child"), /appears active/);
-});
-
-test("an agent-owned worker is not closed while its thread has a command open", async t => {
-  const stateDir = mkdtempSync(join(tmpdir(), "dsh-codex-command-open-"));
-  const work = mkdtempSync(join(tmpdir(), "dsh-codex-command-open-cwd-"));
-  t.after(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(work, { recursive: true, force: true }); });
-  const servers = [];
-  const backend = new CodexSessionBackend(stateDir, () => { const server = new FakeServer(); servers.push(server); return server; });
-  t.after(() => backend.close());
-  const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "parent-agent", nativeSessionId: "parent" } };
-  const worker = await backend.createWorker(caller, { name: "worker", cwd: work });
-  assert.equal(worker.owner, "agent", "the command guard applies to agent-owned workers");
-  const turn = await backend.startTurn(caller, worker.id, "run it");
-  const server = servers.at(-1);
-  server.emit("notification", { method: "item/started", params: { threadId: server.threadId, turnId: turn.turnId,
-    item: { id: "cmd-1", type: "commandExecution", command: "sleep 20", status: "inProgress" } } });
-  server.emit("notification", { method: "item/completed", params: { threadId: server.threadId, turnId: turn.turnId,
-    item: { type: "agentMessage", phase: "final_answer", text: "done" } } });
-  server.emit("notification", { method: "turn/completed", params: { threadId: server.threadId, turn: { id: turn.turnId, status: "completed" } } });
-  // The turn ended, so the record is idle and its report is decided first.
-  await backend.acknowledgeReport(caller, worker.id, turn.turnId);
-
-  await assert.rejects(backend.closeSession(caller, worker.id), /command still running/,
-    "a command the thread reported as running is not abandoned by closing the Session");
-  server.emit("notification", { method: "item/completed", params: { threadId: server.threadId, turnId: turn.turnId,
-    item: { id: "cmd-1", type: "commandExecution", command: "sleep 20", status: "completed", exitCode: 0 } } });
-  await backend.closeSession(caller, worker.id);
-  assert.equal((await backend.listWorkers(caller)).length, 0, "the closed worker is released from its parent");
 });
 
 test("a terminal turn the thread reports twice is applied once", async t => {

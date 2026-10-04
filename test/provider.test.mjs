@@ -286,7 +286,7 @@ test("imports cross-provider and tool history once and fails closed on images wi
   const adapter = adapterFor(fixture, { sessions });
   const history = [
     system("prompt"), user("u0", "old question"), assistant("a0", "old answer"),
-    toolCall("a1", "call_1", "codex_workers", "{}"), toolResult("t1", "call_1", "worker done"), user("u1", "continue"),
+    toolCall("a1", "call_1", "shell_exec", "{}"), toolResult("t1", "call_1", "worker done"), user("u1", "continue"),
   ];
   const chunks = await liveTurn(adapter, fixture, "s1", options("s1", history), async server => {
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "imported" } });
@@ -298,7 +298,7 @@ test("imports cross-provider and tool history once and fails closed on images wi
   assert.match(input[0].text, /^\[DSH history import/);
   assert.match(input[0].text, /user: old question/);
   assert.match(input[0].text, /assistant: old answer/);
-  assert.match(input[0].text, /tool\(codex_workers\): \[tool result\] worker done/);
+  assert.match(input[0].text, /tool\(shell_exec\): \[tool result\] worker done/);
   assert.equal(input[1].text, "continue");
 
   const images = setup("dsh-provider-image-");
@@ -403,7 +403,7 @@ test("imports tool history for a forked DSH Session without a native checkpoint"
     system("prompt"),
     user("u0", "old question"),
     assistant("a0", "old answer", "deepseek"),
-    toolCall("a1", "call_1", "codex_workers", "{}"),
+    toolCall("a1", "call_1", "shell_exec", "{}"),
     toolResult("t1", "call_1", "worker done"),
     assistant("a2", "native answer", "codex", { response: { threadId: origin.threadId, turnId: origin.turnId, input: "u1" } }),
     user("u1", "continue"),
@@ -418,7 +418,7 @@ test("imports tool history for a forked DSH Session without a native checkpoint"
   assert.equal(input.length, 2);
   assert.match(input[0].text, /^\[DSH history import/);
   assert.match(input[0].text, /assistant: old answer/);
-  assert.match(input[0].text, /tool\(codex_workers\): \[tool result\] worker done/);
+  assert.match(input[0].text, /tool\(shell_exec\): \[tool result\] worker done/);
   assert.match(input[0].text, /assistant: native answer/);
   assert.equal(input[1].text, "continue");
 });
@@ -743,7 +743,7 @@ test("fails closed for user input without a seam and for MCP elicitation", async
   ]);
 });
 
-test("isolates the DSH child, the legacy worker, and foreign native-child events", async t => {
+test("isolates each DSH child thread and rejects foreign native-child events", async t => {
   const fixture = setup("dsh-provider-matrix-");
   const childCwd = mkdtempSync(join(tmpdir(), "dsh-provider-matrix-cwd-"));
   t.after(() => { cleanup(fixture); rmSync(childCwd, { recursive: true, force: true }); return fixture.backend.close(); });
@@ -765,22 +765,6 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   assert.deepEqual(await fixture.backend.readFacts(OWNER, "codex:child-a"), [],
     "another thread's executed item never becomes this Session's execution fact");
 
-  const caller = { nativeSessionId: "parent", source: "agent", parentAgent: { id: "agent", nativeSessionId: "parent" } };
-  const changes = [];
-  fixture.backend.subscribeWorkers(caller, event => changes.push(event));
-  const worker = await fixture.backend.createWorker(caller, { name: "legacy", cwd: childCwd });
-  const workerServer = fixture.hub.servers.find(server => server.threadId === worker.threadId);
-  const workerTurn = await fixture.backend.startTurn(caller, worker.id, "legacy work");
-  workerServer.emit("request", { id: "worker-approval", method: "item/commandExecution/requestApproval", params: { threadId: worker.threadId, turnId: workerTurn.turnId, command: "ls" } });
-  const [workerApproval] = await fixture.backend.pendingApprovals(caller, worker.id);
-  await fixture.backend.decideApproval(caller, worker.id, workerApproval.requestId, "accept");
-  workerServer.notify("item/completed", { threadId: worker.threadId, turnId: workerTurn.turnId, item: { type: "agentMessage", phase: "final_answer", text: "worker done" } });
-  workerServer.notify("turn/completed", { threadId: worker.threadId, turn: { id: workerTurn.turnId, status: "completed" } });
-
-  assert.notEqual(worker.threadId, childServer.threadId, "the legacy worker keeps its own Codex thread");
-  assert.equal(changes.some(event => event.workerId === worker.id && event.change === "report"), true, "the parent still receives the worker report notification");
-  assert.equal((await fixture.backend.pendingApprovals(caller, worker.id)).length, 0, "the legacy worker's approval was decided on its own record");
-
   childServer.ask(11, "item/commandExecution/requestApproval", { threadId: childServer.threadId, turnId: childServer.turnId, command: "ls" });
   await waitFor(() => childServer.responded?.length > 0, "child approval response");
   assert.equal(asked, 1, "the Session's own request reaches the user's approval surface");
@@ -791,7 +775,6 @@ test("isolates the DSH child, the legacy worker, and foreign native-child events
   childServer.notify("turn/completed", { threadId: childServer.threadId, turn: { id: childServer.turnId, status: "completed" } });
   const chunks = await child;
   assert.equal(chunks.at(-1).reason.kind, "stop");
-  assert.equal(childStream.includes("report.ready"), false, "the DSH child stays outside the worker report path");
 });
 
 /** One codex reply in the DSH log, carrying the identity that marks the thread's history. */

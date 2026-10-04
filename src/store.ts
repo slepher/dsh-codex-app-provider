@@ -19,17 +19,7 @@ import type {
   RunState,
   SequencedBackendEvent,
   SessionSnapshot,
-  WorkerState,
 } from "./browser-types.js";
-
-export interface StoredWorker {
-  parentSessionId: string;
-  /** `user` is accepted only when loading a legacy UI worker. */
-  owner: "agent" | "user";
-  name: string;
-  detached: boolean;
-  savedState?: WorkerState;
-}
 
 /**
  * One recorded thread handover. The source record keeps its history, reports
@@ -72,7 +62,6 @@ export interface StoredSession extends SessionSnapshot {
   /** Projected execution facts, in transcript order; the raw notifications are not kept. */
   facts: ExecutionFactLine[];
   reports: Report[];
-  worker?: StoredWorker;
 }
 
 export class SessionStore {
@@ -120,24 +109,11 @@ export class SessionStore {
   }
 
   list(ownerId: string): StoredSession[] {
-    return [...this.records.values()].filter(record => record.worker === undefined && record.ownerId === ownerId);
-  }
-
-  listWorkers(parentSessionId: string): StoredSession[] {
-    return [...this.records.values()].filter(record => record.worker?.owner === "agent" && record.worker.parentSessionId === parentSessionId && !record.worker.detached);
-  }
-
-  bound(sessionId: string): StoredSession | undefined {
-    const record = this.records.get(sessionId);
-    return record?.worker === undefined ? undefined : record;
+    return [...this.records.values()].filter(record => record.ownerId === ownerId);
   }
 
   has(sessionId: string): boolean {
     return this.records.has(sessionId);
-  }
-
-  findBoundByThread(threadId: string): StoredSession | undefined {
-    return [...this.records.values()].find(record => record.worker !== undefined && record.threadId === threadId);
   }
 
   findByThread(threadId: string): StoredSession[] {
@@ -162,7 +138,6 @@ export class SessionStore {
 
   get(ownerId: string, sessionId: string): StoredSession | undefined {
     const record = this.records.get(sessionId);
-    if (record?.worker !== undefined) throw new Error("Contextual caller required for bound worker");
     if (record !== undefined && record.ownerId !== ownerId) throw new Error("Session owner mismatch");
     return record;
   }
@@ -361,10 +336,6 @@ function recover(record: LoadedRecord): StoredSession {
   const { events, nextEventSequence: _cursor, ...rest } = record;
   const facts = record.facts ?? projectExecutionFacts(reduceExecutionEvents(events ?? []));
   const current: StoredSession = { ...rest, facts: [...facts] };
-  if (record.worker !== undefined) {
-    const savedState = record.state === "saved" ? record.worker.savedState : record.state;
-    return { ...current, state: "saved", worker: { ...record.worker, savedState }, approvals: [], reports: record.reports ?? [] };
-  }
   const state: RunState = record.state === "running" || record.state === "waiting-approval"
     ? "unknown"
     : record.state;
@@ -383,9 +354,6 @@ function parseRecord(text: string): LoadedRecord {
     || !Array.isArray(record.approvals)
     || !Array.isArray(record.facts) && !Array.isArray(record.events)
   ) throw new Error("Invalid Session record");
-  if (record.worker !== undefined && (!validWorker(record.worker, record.state) || record.worker.parentSessionId !== record.ownerId)) {
-    throw new Error("Invalid Session worker");
-  }
   if (!validReports(record)) {
     throw new Error("Invalid Session reports");
   }
@@ -439,28 +407,7 @@ function claimsThread(record: StoredSession): boolean {
 }
 
 function occupied(record: StoredSession): boolean {
-  if (record.worker === undefined) return !record.released;
-  return !record.worker.detached
-    || !["idle", "saved"].includes(record.state)
-    || record.state === "saved" && record.worker.savedState !== "idle";
-}
-
-function validWorker(value: unknown, state: unknown): value is StoredWorker {
-  if (typeof value !== "object" || value === null) return false;
-  const worker = value as Partial<StoredWorker>;
-  return typeof worker.parentSessionId === "string" && worker.parentSessionId.length > 0
-    && (worker.owner === "user" || worker.owner === "agent")
-    && typeof worker.name === "string"
-    && typeof worker.detached === "boolean"
-    && validWorkerState(state)
-    && (worker.savedState === undefined || validWorkerState(worker.savedState));
-}
-
-function validWorkerState(value: unknown): value is WorkerState {
-  return typeof value === "string" && [
-    "starting", "idle", "running", "interrupt-requested", "waiting-approval",
-    "completed", "failed", "interrupted", "unknown", "saved",
-  ].includes(value);
+  return !record.released;
 }
 
 
@@ -469,19 +416,16 @@ function validReports(record: Partial<StoredSession>): boolean {
   if (!Array.isArray(record.reports)) return false;
   const turnIds = new Set<string>();
   return record.reports.every(report => {
-    if (!validReport(report, record) || turnIds.has(report.turnId)) return false;
+    if (!validReport(report) || turnIds.has(report.turnId)) return false;
     turnIds.add(report.turnId);
     return true;
   });
 }
 
-function validReport(value: unknown, record: Partial<StoredSession>): value is Report {
+function validReport(value: unknown): value is Report {
   if (typeof value !== "object" || value === null) return false;
   const report = value as Partial<Report>;
-  const acknowledged = report.acknowledgedAt === undefined || validTimestamp(report.acknowledgedAt);
-  return typeof report.workerId === "string" && report.workerId.length > 0 && report.workerId === record.sessionId
-    && typeof report.threadId === "string" && report.threadId.length > 0
-    && (record.worker === undefined || report.threadId === record.threadId)
+  return typeof report.threadId === "string" && report.threadId.length > 0
     && typeof report.turnId === "string" && report.turnId.length > 0
     && ["completed", "failed", "interrupted"].includes(report.status ?? "")
     && typeof report.result === "string"
@@ -489,11 +433,7 @@ function validReport(value: unknown, record: Partial<StoredSession>): value is R
     && (report.error === undefined || typeof report.error === "string")
     && (report.usage === null || validUsage(report.usage))
     && (report.turnUsage === undefined || validUsageValues(report.turnUsage))
-    && validTimestamp(report.createdAt)
-    && ["pending", "accepted", "changes-requested"].includes(report.acceptance ?? "")
-    && acknowledged
-    && (report.acceptance === "pending" || report.acknowledgedAt !== undefined)
-    && (report.acceptance !== "accepted" || report.result.trim().length > 0 && report.protocolError === undefined);
+    && validTimestamp(report.createdAt);
 }
 
 function validUsage(value: unknown): boolean {

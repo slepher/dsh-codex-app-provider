@@ -38,8 +38,7 @@ export function isInjectedContext(message: Message): boolean {
   // Executed Codex facts are already in the native thread; re-sending them would
   // duplicate work the thread performed and re-present it as an instruction.
   // The identity is on the message, not its source, so reading it from the
-  // source would silently keep every imported fact in the request. Worker-report
-  // notices from the same plugin are real model input and stay.
+  // source would silently keep every imported fact in the request.
   if (isExecutionFactId(message.id)) return true;
   if (INJECTED_KINDS.has(source.kind)) return true;
   return typeof source.form === "string" && INJECTED_FORMS.has(source.form);
@@ -73,8 +72,8 @@ export function selectedProvider(ctx: Context, agent: Agent): string | undefined
  * Drop DSH-injected context from the messages entering a Codex step. The
  * `agent/pre-step` waterfall is the supported logical-upstream seam: messages
  * removed here are neither committed to the Session surface (so the transcript
- * shows no misleading context-injection rows) nor sent to Codex. Worker report
- * notices, recalls, relays and compaction checkpoints are preserved.
+ * shows no misleading context-injection rows) nor sent to Codex. Recalls,
+ * relays and compaction checkpoints are preserved.
  */
 export function installCodexContextFilter(ctx: Context): () => void {
   return ctx.on("agent/pre-step", async ({ agent, signal }, next) => {

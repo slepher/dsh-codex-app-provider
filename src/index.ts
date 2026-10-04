@@ -8,13 +8,7 @@ import type { AppServerSpawner, AppServerTimer } from "./process.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
-import { defineTool } from "@deepseek-ai/dsh-tools";
-import type { Agent } from "@deepseek-ai/dsh-agent";
 import { SessionId } from "@deepseek-ai/dsh-session";
-import { agentCaller, assertAgentIdentity, captureAgentIdentity } from "./identity.js";
-import { executeWorkerAction, type WorkerAction } from "./worker-actions.js";
-import { installWorkerControl, type WorkerControl } from "./worker-control.js";
-import { installWorkerDelivery, type WorkerDelivery } from "./worker-delivery.js";
 import { CodexGateBridge } from "./tool-gate.js";
 import { fileURLToPath } from "node:url";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
@@ -26,7 +20,7 @@ export type { CodexToolGate, GateBinding, GateDecision, GateEvent, GateHandler, 
 
 export interface Config {
   /**
-   * Where the plugin persists its own records and worker bindings. Omitted
+   * Where the plugin persists its own Session records. Omitted
    * means `defaultStateDir`: the launched profile's state directory, never the
    * directory the process happened to start in.
    */
@@ -167,9 +161,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     let provider: CodexProviderAdapter | undefined;
     let unregister: (() => void) | undefined;
     let unfilter: (() => void) | undefined;
-    let untool: (() => void) | undefined;
-    let delivery: WorkerDelivery | undefined;
-    let control: WorkerControl | undefined;
     // The workflow gate is a Host capability, not a model-facing tool: the
     // workflow plugin registers the one business handler and binds each child it
     // starts, and the provider only carries the binding to its execution points.
@@ -190,9 +181,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       provider?.close();
       unregister?.();
       unfilter?.();
-      untool?.();
-      delivery?.close();
-      control?.close();
       await backend.close();
       await toolGate.close();
     };
@@ -246,64 +234,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     });
     unfilter = installCodexContextFilter(ctx);
-    // Ordinary delegation is a tool surface, so it is registered only where a
-    // tool registry exists; the provider itself stays usable without one.
-    ctx.inject(["tools", "systemPrompt"], tools => {
-      const callerIdentity = (agent: Agent | undefined) => captureAgentIdentity(ctx, agent);
-      // An ordinary worker's turn is started here, not by an adapter stream, so
-      // the bridge that carries its native approvals and questions to the user
-      // is installed around every action.
-      control = installWorkerControl(ctx, {
-        listWorkers: caller => backend.listWorkers(caller),
-        watchWorkerRequests: (caller, workerId, agent) => provider!.watchWorkerRequests(caller, workerId, agent),
-      });
-      untool = tools.tools.register(defineTool({
-        name: "codex_workers",
-        description: "Create, query, and control persistent Codex workers owned by this parent Session. Give a worker its instructions as the prompt. This tool has no role concept: a role-bound child (a reviewer, an evidence runner, a tester) is dispatched by the workflow tool, which owns the role catalogue. Reports are durable; acknowledgement and acceptance are separate. The workers here are the ones this tool created: a child started by the workflow tool is a separate DSH subagent and cannot be reached through these actions.",
-        parameters: {
-          action: { type: "string", required: true, enum: [...WORKER_ACTIONS], description: "The operation to perform. `list` and `reports` read this Session's own workers and take no other field." },
-          workerId: { type: "string", description: "The worker this action targets. Required by every action except `create` (which may name the id to create), `list` and `reports`. The provider tracks only the workers this tool created: a child started by the workflow tool is not one of them and cannot be read here." },
-          name: { type: "string", description: "`create` only: display name for the new worker." },
-          cwd: { type: "string", description: "`create` only: absolute working directory. Defaults to the parent Session's workspace." },
-          model: { type: "string", description: "`create` only: model id for the new worker." },
-          effort: { type: "string", description: "`create` only: reasoning effort for the new worker." },
-          text: { type: "string", description: "`append` and `steer`: the turn's prompt or the guidance to inject into the running turn." },
-          turnId: { type: "string", description: "`steer`, `interrupt`, `ack` and `accept`: the exact turn to act on." },
-          acceptance: { type: "string", enum: ["pending", "accepted", "changes-requested"], description: "`accept` only: the verdict recorded for the report." },
-        },
-        output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
-        async execute(args, execution) {
-          const identity = callerIdentity(execution.agent);
-          // Before the action, so an existing worker's new turn is watched from
-          // its first event; after it, so a worker the action just created is
-          // covered before any later turn starts.
-          await control!.ensure(identity);
-          const value = await executeWorkerAction(backend, agentCaller(identity), String(identity.session.header.cwd),
-            args as WorkerAction, () => assertAgentIdentity(ctx, identity));
-          await control!.ensure(identity);
-          return JSON.stringify(value);
-        },
-        presentCall: args => ({
-          card: "generic",
-          title: `Codex workers: ${String((args as { action?: unknown }).action ?? "")}`,
-          kind: WORKER_READ_ACTIONS.has(String((args as { action?: unknown }).action)) ? "read" : "execute",
-        }),
-      }));
-      delivery = installWorkerDelivery(ctx, backend);
-      tools.systemPrompt.section({
-        name: "tool:codex-workers",
-        order: tools.systemPrompt.getSectionOrder("TOOL_JOBS"),
-        text: "codex_workers manages persistent Codex workers and starts them as plain workers: state the job in the prompt you send. Role names are not this tool's vocabulary; the workflow tool owns them. Process reports independently; acknowledge or accept after handling. Do not poll, repeat unknown work, or treat interrupt acceptance as completion.",
-      });
-    });
   }, "dsh-codex-app-provider: execution lifecycle");
 }
-
-/** Actions that only read worker state; everything else mutates it. */
-const WORKER_READ_ACTIONS = new Set(["list", "get", "reports"]);
-
-/** Every `codex_workers` action, in the order the tool documents them. */
-const WORKER_ACTIONS = ["create", "list", "get", "reports", "append", "steer", "interrupt", "resume", "accept", "ack", "close"] as const;
 
 /**
  * The registered DSH Session's workspace, when it is still readable.

@@ -1,4 +1,4 @@
-/** Read-only native execution facts for Host consumers; no worker management or profile policy. */
+/** Read-only native execution facts for Host consumers; no delegation or profile policy. */
 export interface NativeExecution {
   nativeSessionId: string;
   threadId?: string;

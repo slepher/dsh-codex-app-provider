@@ -17,14 +17,6 @@ export type RunState =
   | "unknown"
   | "saved";
 
-export type WorkerState = RunState;
-
-export interface Caller {
-  nativeSessionId: string;
-  source: "agent";
-  parentAgent: { id: string; nativeSessionId: string };
-}
-
 export interface SessionSnapshot {
   sessionId: SessionId;
   threadId?: ThreadId;
@@ -32,7 +24,7 @@ export interface SessionSnapshot {
   /**
    * The DSH Session's host workspace. This identifies the Session, never the
    * native thread's working directory when the Session declares a task
-   * boundary: a lane worker's host workspace is the parent repository while its
+   * boundary: a lane child's host workspace is the parent repository while its
    * Codex thread runs in the lane.
    */
   cwd: string;
@@ -151,12 +143,6 @@ export interface ThreadOwnership {
   handoffFrom?: string;
 }
 
-export interface CreateWorkerInput extends CreateSessionOptions {
-  id?: SessionId;
-  name: string;
-  cwd: string;
-}
-
 export interface StartTurnOptions extends TurnOptions {
   idempotencyKey?: string;
 }
@@ -203,10 +189,7 @@ export interface Usage {
   remainingContextRatio: number | null;
 }
 
-export type ReportAcceptance = "pending" | "accepted" | "changes-requested";
-
 export interface Report {
-  workerId: SessionId;
   threadId: ThreadId;
   turnId: TurnId;
   status: "completed" | "failed" | "interrupted";
@@ -216,27 +199,6 @@ export interface Report {
   usage: Usage | null;
   turnUsage?: UsageValues;
   createdAt: number;
-  acceptance: ReportAcceptance;
-  acknowledgedAt?: number;
-}
-
-export interface WorkerProjection {
-  id: SessionId;
-  updatedAt?: number;
-  parentSessionId: string;
-  owner: "agent";
-  name: string;
-  detached: boolean;
-  cwd: string;
-  model?: string;
-  effort?: string;
-  threadId?: ThreadId;
-  turnId?: TurnId;
-  state: WorkerState;
-  savedState?: WorkerState;
-  reports: readonly Report[];
-  approvals: readonly ApprovalRequest[];
-  usage?: unknown;
 }
 
 export interface ApprovalRequest {
@@ -284,7 +246,6 @@ export type BackendEvent =
   | { type: "approval.requested"; request: ApprovalRequest }
   | { type: "userInput.requested"; request: UserInputRequest }
   | { type: "usage.updated"; sessionId: SessionId; usage: unknown }
-  | { type: "report.ready"; workerId: SessionId; turnId: TurnId; parentSessionId: string }
   | { type: "thread.notification"; method: string; params: unknown };
 
 /** One projected execution fact line plus the durable identity a reader resolves it by. */
@@ -301,14 +262,6 @@ export interface SequencedBackendEvent {
   event: BackendEvent;
 }
 
-export interface WorkerManagementEvent {
-  type: "worker.changed";
-  parentSessionId: string;
-  workerId: SessionId;
-  change: "created" | "closed" | "report" | "uncertain";
-  invalidated?: true;
-}
-
 /**
  * `interactive: true` marks a subscriber that can answer server-initiated
  * user-input requests (`item/tool/requestUserInput`); without one the backend
@@ -320,36 +273,26 @@ export interface SubscribeOptions {
 
 export interface CodexBackend {
   createSession(ownerId: string, sessionId: SessionId, cwd: string, options?: CreateSessionOptions): Promise<SessionSnapshot>;
-  createWorker(caller: Caller, input: CreateWorkerInput): Promise<WorkerProjection>;
-  listWorkers(caller: Caller): Promise<readonly WorkerProjection[]>;
-  getWorker(caller: Caller, workerId: SessionId): Promise<WorkerProjection>;
-  pendingReports(caller: Caller): Promise<readonly Report[]>;
   listSessions(ownerId: string): Promise<readonly SessionSnapshot[]>;
-  readSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
-  resumeSession(owner: string | Caller, sessionId: SessionId): Promise<SessionSnapshot>;
-  configureSession(owner: string | Caller, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
-  closeSession(owner: string | Caller, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
+  readSession(ownerId: string, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
+  resumeSession(ownerId: string, sessionId: SessionId): Promise<SessionSnapshot>;
+  configureSession(ownerId: string, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
+  closeSession(ownerId: string, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
   occupiedThreads(): Promise<readonly ThreadId[]>;
   /** Read-only thread ownership for trusted-Host reconciliation. */
   threadOwnership(ownerId: string, sessionId: SessionId): Promise<ThreadOwnership | undefined>;
   /** Transfer one stopped record's thread to a reserved successor. */
   handoffThread(ownerId: string, request: ThreadHandoffRequest): Promise<ThreadHandoffResult>;
-  startTurn(owner: string | Caller, sessionId: SessionId, input: string | readonly TurnInput[], options?: StartTurnOptions): Promise<TurnSnapshot>;
+  startTurn(ownerId: string, sessionId: SessionId, input: string | readonly TurnInput[], options?: StartTurnOptions): Promise<TurnSnapshot>;
   steerTurn(ownerId: string, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
-  steerTurn(caller: Caller, workerId: SessionId, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
-  compactSession(owner: string | Caller, sessionId: SessionId): Promise<void>;
+  compactSession(ownerId: string, sessionId: SessionId): Promise<void>;
   interruptTurn(ownerId: string, turnId: TurnId): Promise<void>;
-  interruptTurn(caller: Caller, workerId: SessionId, turnId: TurnId): Promise<void>;
-  pendingApprovals(owner: string | Caller, sessionId: SessionId): Promise<readonly ApprovalRequest[]>;
+  pendingApprovals(ownerId: string, sessionId: SessionId): Promise<readonly ApprovalRequest[]>;
   decideApproval(ownerId: string, requestId: string, decision: ApprovalDecision): Promise<void>;
-  decideApproval(caller: Caller, workerId: SessionId, requestId: string, decision: ApprovalDecision): Promise<void>;
-  pendingUserInputs(owner: string | Caller, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
+  pendingUserInputs(ownerId: string, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
   answerUserInput(ownerId: string, requestId: string, answers: UserInputAnswer): Promise<void>;
-  readFacts(owner: string | Caller, sessionId: SessionId): Promise<readonly ExecutionFactLine[]>;
-  readReports(owner: string | Caller, sessionId: SessionId): Promise<readonly Report[]>;
-  acknowledgeReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId): Promise<Report>;
-  acceptReport(owner: string | Caller, sessionId: SessionId, turnId: TurnId, acceptance: ReportAcceptance): Promise<Report>;
-  subscribe(owner: string | Caller, sessionId: SessionId, listener: (event: BackendEvent, sequence: number) => void, options?: SubscribeOptions): () => void;
-  subscribeWorkers(caller: Caller, listener: (event: WorkerManagementEvent) => void): () => void;
+  readFacts(ownerId: string, sessionId: SessionId): Promise<readonly ExecutionFactLine[]>;
+  readReports(ownerId: string, sessionId: SessionId): Promise<readonly Report[]>;
+  subscribe(ownerId: string, sessionId: SessionId, listener: (event: BackendEvent, sequence: number) => void, options?: SubscribeOptions): () => void;
   modelSettings(cwd: string): Promise<ModelSettings>;
 }

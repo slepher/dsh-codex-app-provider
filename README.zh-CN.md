@@ -2,16 +2,16 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-把 Codex CLI App Server 作为 DSH 原生模型路由运行，并从 DSH Session 管理持久 Codex worker。
+把 Codex CLI App Server 作为 DSH 原生模型路由运行，并把 Codex 自己的执行记录进 DSH Session 日志。
 
-`dsh-codex-app-provider` 是一个 DSH Host 插件。它注册 `codex` LLM adapter，把 Codex 自己的审批与提问接进 DSH 的交互面，把 Codex 实际执行的内容写入 DSH Session 日志，并提供 `codex_workers` 工具。它不含浏览器界面：子会话面板归 `dsh-subagent-ui-sidepanel`，角色/profile 策略归 `dsh-workflow-kit`。
+`dsh-codex-app-provider` 是一个 DSH Host 插件。它注册 `codex` LLM adapter，把 Codex 自己的审批与提问接进 DSH 的交互面，把 Codex 实际执行的内容写入 DSH Session 日志，并发布描述 Codex thread 的 Host 能力。它不含浏览器界面：子会话面板归 `dsh-subagent-ui-sidepanel`，角色/profile 策略归 `dsh-workflow-kit`。
 
 - [提供什么](#提供什么)
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [配置](#配置)
 - [把 Codex 作为模型路由使用](#把-codex-作为模型路由使用)
-- [`codex_workers` 工具](#codex_workers-工具)
+- [委派](#委派)
 - [Host 能力](#host-能力)
 - [Workflow session gate 与 PreToolUse hook](#workflow-session-gate-与-pretooluse-hook)
 - [兼容性](#兼容性)
@@ -37,8 +37,7 @@ DSH 原生 Session / 原生 child Agent
 |---|---|
 | `codex` LLM adapter | 把安装的 Codex 运行时作为 DSH provider：模型目录、请求转换、流式事件、token 用量、取消。 |
 | 上下文过滤器 | 从发给 Codex 的请求里剔除 DSH 注入的上下文（system/developer 消息、runtime context、skill catalog、已导入的执行事实）。 |
-| `codex_workers` 工具 | 创建、查看、引导和关闭由当前父 Session 持有的持久 Codex worker。 |
-| Worker 报告投递 | 先持久化报告，再把唤醒通知投给父 Session；确认与验收始终是显式工具动作。 |
+| 委派 | 归 DSH 核心：`ctx.subagents` 的可续 child；角色与验收归 `dsh-workflow-kit`。这些 child 走 `codex` 路由时，其执行由本插件承载。 |
 | 审批/提问桥接 | 权限判断仍归 Codex；它发出的审批与提问转发到 `ctx.approval` 与 `ctx.userQuestions`，没有应答者时按 fail-closed 拒绝。 |
 | 执行事实 | Codex 自己执行工具，否则 DSH 日志对这段执行是盲的；每个已执行步骤都以带来源的 `user/message` 事件写入 Session，且可重放而不会重复。 |
 | `ctx.codexExecution` | 给受信 Host 消费者的只读原生执行事实；不做 resume，也不发模型请求。 |
@@ -120,31 +119,31 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 - DSH Session 日志能看到 Codex 执行了什么：每个 item 变成一条来源为 `dsh-codex-app-provider` 的消息，身份由 `threadId`/`turnId`/`itemId` 推导，因此重放或冷恢复不会把同一条命令导入两次。
 - 对话历史与压缩检查点归 DSH；当一段 DSH 历史被回放进 Codex thread 时，导入区间会被标记（`[DSH history import`），不会再次喂回 Codex。
 
-## `codex_workers` 工具
+## 委派
 
-`codex_workers` 管理一个父 Session 自己持有的持久 Codex worker。它没有角色概念：带角色的 child 归 `dsh-workflow-kit`，由后者的 `codex_workflow` 工具派发。这里创建的 worker 对 workflow 插件不可见，反之亦然。
+本插件是模型路由与原生执行底座，不是第二套委派系统。早期版本还带有 `codex_workers` 工具、自己的 worker 注册表、
+报告账本与验收流程；这一面与核心 `ctx.subagents` 的生命周期重复，因此已删除。委派现在走核心：
 
-| action | 字段 | 作用 |
+- 一次性与可续 child：`subagent` / `subagent_fork` 工具（`ctx.subagents.startContinuable`），可续的那些配一套
+  发消息 / 中断 / 列举的控制面；
+- 走 `codex` 路由的 child：在 child 的 `agentOptions` 里指定 provider，其逐轮执行事实、用量与报告仍可通过
+  `ctx.codexExecution.read(childSessionId)` 读取。
+
+具体有哪些控制工具取决于 composition —— 若 profile 同时加载 Agent Teams，`send_message`、`list_agents`、
+`interrupt_agent` 这三个名字属于 Team 面，不属于 subagent provider。
+
+删除后接受的语义差异（完整判定见 `REVIEW.zh-CN.md` 附录 A）：
+
+| 被删能力 | 替代 | 需要接受的差异 |
 |---|---|---|
-| `create` | `workerId?`、`name?`、`cwd?`、`model?`、`effort?` | 启动一个 worker，可指定要创建的 id。`cwd` 默认父 Session 工作区。 |
-| `list` | — | 当前 Session 的 worker 列表。 |
-| `get` | `workerId` | 单个 worker 的投影。 |
-| `reports` | — | 当前 Session 各 worker 的持久报告。 |
-| `append` | `workerId`、`text` | 给已有 worker 追加一轮。 |
-| `steer` | `workerId`、`turnId`、`text` | 向运行中的轮次注入引导。 |
-| `interrupt` | `workerId`、`turnId` | 中断指定轮次。 |
-| `resume` | `workerId` | 恢复未运行的 worker。 |
-| `accept` | `workerId`、`turnId`、`acceptance` | 记录结论 `pending` \| `accepted` \| `changes-requested`。 |
-| `ack` | `workerId`、`turnId` | 标记报告已确认。 |
-| `close` | `workerId` | 关闭 worker。 |
+| `create`、`append`、`resume`、`close` | `ctx.subagents` 可续 child | child 是 DSH Session，不是裸的原生 thread |
+| 按 `turnId` 的 `steer` | 按 child session 续话 | 没有逐轮寻址 |
+| `interrupt(workerId, turnId)` | child session 级中断 | 作用域是子会话；已结束目标是静默 no-op |
+| `list` / `get` / `reports` | 子会话投影 | 报告活动状态，不再是一份带 ack 状态的 worker 记录 |
+| `ack` / `accept` | `dsh-workflow-kit` | 验收是 workflow 业务，不是模型路由 |
+| worker 注册表与 store 的 worker 分支 | 本插件自己的 Session 记录 | Codex thread 的身份、用量与报告都在该记录里 |
 
-可以依赖的行为：
-
-- `action` 必填；其余字段只被列出它的 action 读取，多传的字段会被拒绝而不是忽略。
-- 归属按调用方父 Agent 围栏。身份取自活体 Agent，并在每次变更前重新校验，一个父 Session 碰不到另一个父 Session 的 worker。
-- `list`、`get`、`reports` 是只读动作，以只读卡片呈现；其余动作以执行卡片呈现。
-- 报告先落盘再通知，且每条报告对同一个父 Agent 最多被认领一次。空闲父 Agent 用 follow-up 唤醒；忙碌父 Agent 在下一步收到同一条通知。重启与重复事件都不会让父 Agent 重复处理同一份报告。
-- 确认与验收是分开的显式动作。验收不会重跑任何东西。
+模型路由需要的能力没有丢：删掉的是一套并行的生命周期，以及它自带的身份、投递与验收语义。
 
 ## Host 能力
 
@@ -298,10 +297,6 @@ src/
   handoff.ts            thread 移交能力（ctx.codexHandoff）
   tool-gate.ts          gate 桥、hook 传输、hook 前置校验
   pretool-client.ts     安装到 Codex 的 PreToolUse hook 命令
-  worker-actions.ts     codex_workers 动作分发
-  worker-control.ts     worker 轮次的原生审批/提问桥
-  worker-delivery.ts    worker 报告的持久投递
-  identity.ts           调用方身份的捕获与重校验
   models.ts, browser-types.ts
 cordis.patch.yml        唯一的 Host 插件条目
 locale/                 插件目录文案（en、zh）

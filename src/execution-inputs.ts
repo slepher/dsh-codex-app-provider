@@ -95,7 +95,7 @@ export function executionInputsEqual(
  * A declared task boundary names the real working location (a lane, an
  * allocated worktree); without one the thread runs in the Session's own host
  * workspace. The two are deliberately different values and are persisted
- * separately so a lane worker is never mistaken for a workspace change.
+ * separately so a lane child is never mistaken for a workspace change.
  * @param inputs - the declared execution inputs, when any.
  * @param sessionCwd - the DSH Session's host workspace.
  * @returns the absolute directory the Codex thread runs in.
