@@ -30,7 +30,6 @@ import type {
   SessionSnapshot,
   TurnInput,
   TurnSnapshot,
-  Usage,
   UserInputQuestion,
   UserInputRequest,
 } from "./browser-types.js";
@@ -53,6 +52,7 @@ import {
   recoveredThreadId,
   toolCallNames,
 } from "./history.js";
+import { usageChunk, usageContextWindow } from "./usage.js";
 
 /** The provider route this plugin registers with DSH; the vocabulary lives in `browser-types`. */
 export { CODEX_PROVIDER };
@@ -1006,29 +1006,6 @@ function recordedExecution(record: SessionSnapshot | undefined): ProviderExecuti
     ...(options.developerInstructions === undefined ? {} : { developerInstructions: options.developerInstructions }),
     ...(options.boundary === undefined ? {} : { boundary: { cwd: options.boundary.cwd,
       writableRoots: [...options.boundary.writableRoots], network: options.boundary.network } }),
-  };
-}
-
-function usageContextWindow(usage: unknown): number | undefined {
-  if (typeof usage !== "object" || usage === null) return undefined;
-  const value = (usage as { modelContextWindow?: unknown }).modelContextWindow;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
-}
-
-function usageChunk(usage: Usage | null): TokenUsage | undefined {
-  if (usage === null) return undefined;
-  const last = usage.last;
-  const cached = last.cachedInputTokens ?? 0;
-  const input = last.inputTokens === null ? null : Math.max(0, last.inputTokens - cached);
-  if (input === null && last.outputTokens === null) return undefined;
-  const output = last.outputTokens ?? 0;
-  return {
-    inputTokens: input ?? 0,
-    outputTokens: output,
-    ...(last.totalTokens === null ? {} : { totalTokens: last.totalTokens }),
-    ...(cached === 0 ? {} : { cacheReadTokens: cached }),
-    ...(last.cacheWriteInputTokens === null || last.cacheWriteInputTokens === 0 ? {} : { cacheWriteTokens: last.cacheWriteInputTokens }),
-    ...(last.reasoningOutputTokens === null || last.reasoningOutputTokens === 0 ? {} : { reasoningTokens: last.reasoningOutputTokens }),
   };
 }
 

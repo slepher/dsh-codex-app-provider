@@ -21,8 +21,6 @@ import type {
   ThreadOwnership,
   TurnOptions,
   TurnSnapshot,
-  Usage,
-  UsageValues,
   UserInputAnswer,
   UserInputQuestion,
   UserInputRequest,
@@ -32,6 +30,7 @@ import { feedsExecutionFacts, projectExecutionFacts, reduceExecutionEvents } fro
 import { modelSettings } from "./models.js";
 import { AppServer, RpcError, type RpcMessage, UncertainError } from "./rpc.js";
 import { SessionStore, type StoredSession } from "./store.js";
+import { normalizeUsage } from "./usage.js";
 import type { CodexGateBridge, GateRecordFacts, HookRunEvidence } from "./tool-gate.js";
 
 /** Hook runs kept per live runtime as deployment evidence. */
@@ -1157,37 +1156,6 @@ function reconcilePending(record: StoredSession, result: ThreadResult): void {
   if (typeof result.model === "string" && result.model.length > 0) record.model = result.model;
   if (typeof result.reasoningEffort === "string" && result.reasoningEffort.length > 0) record.reasoningEffort = result.reasoningEffort;
   delete record.pending;
-}
-
-function tokenValues(value: any): UsageValues {
-  return {
-    totalTokens: count(value?.totalTokens ?? value?.total_tokens),
-    inputTokens: count(value?.inputTokens ?? value?.input_tokens),
-    cachedInputTokens: count(value?.cachedInputTokens ?? value?.cached_input_tokens),
-    cacheWriteInputTokens: count(value?.cacheWriteInputTokens ?? value?.cache_write_input_tokens),
-    outputTokens: count(value?.outputTokens ?? value?.output_tokens),
-    reasoningOutputTokens: count(value?.reasoningOutputTokens ?? value?.reasoning_output_tokens),
-  };
-}
-
-function count(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null; }
-
-function normalizeUsage(value: unknown): Usage | null {
-  if (typeof value !== "object" || value === null) return null;
-  const usage = value as Record<string, any>;
-  const total = tokenValues(usage.total);
-  const last = tokenValues(usage.last);
-  const modelContextWindow = count(usage.modelContextWindow);
-  const currentContextTokens = count(usage.currentContextTokens ?? usage.last?.totalTokens);
-  return {
-    total,
-    last,
-    modelContextWindow,
-    currentContextTokens,
-    remainingContextRatio: currentContextTokens !== null && modelContextWindow !== null && modelContextWindow > 0
-      ? Math.max(0, 1 - currentContextTokens / modelContextWindow)
-      : null,
-  };
 }
 
 /**
