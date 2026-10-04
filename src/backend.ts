@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute } from "node:path";
 
 import type {
   ApprovalDecision,
@@ -22,7 +22,6 @@ import type {
   TurnOptions,
   TurnSnapshot,
   UserInputAnswer,
-  UserInputQuestion,
   UserInputRequest,
 } from "./browser-types.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
@@ -32,6 +31,20 @@ import { AppServer, RpcError, type RpcMessage, UncertainError } from "./rpc.js";
 import { SessionStore } from "./store.js";
 import type { StoredSession } from "./records.js";
 import { normalizeUsage } from "./usage.js";
+import {
+  approvalResponse,
+  normalizedBoundary,
+  objectValue,
+  snapshot,
+  statusState,
+  terminalState,
+  threadParams,
+  turnInput,
+  turnSnapshot,
+  userInputQuestions,
+  type ThreadResult,
+  type TurnResult,
+} from "./wire.js";
 import type { CodexGateBridge, GateRecordFacts, HookRunEvidence } from "./tool-gate.js";
 
 /** Hook runs kept per live runtime as deployment evidence. */
@@ -56,25 +69,6 @@ interface Runtime {
   facts: SequencedBackendEvent[];
   /** Hook runs Codex reported for this runtime, oldest first. */
   hooks: HookRunEvidence[];
-}
-
-interface ThreadResult {
-  cwd?: string;
-  thread?: { id?: string; cwd?: string; name?: string | null; preview?: string; updatedAt?: number; status?: { type?: string }; turns?: { id?: string; status?: string }[] };
-  model?: string;
-  reasoningEffort?: string;
-  approvalPolicy?: string;
-  sandbox?: {
-    type?: string;
-    writableRoots?: string[];
-    excludeSlashTmp?: boolean;
-    excludeTmpdirEnvVar?: boolean;
-    networkAccess?: boolean;
-  };
-}
-
-interface TurnResult {
-  turn?: { id?: string; status?: string; error?: unknown };
 }
 
 export class CodexSessionBackend implements CodexBackend {
@@ -950,137 +944,6 @@ export class CodexSessionBackend implements CodexBackend {
       await rpc.close();
     }
   }
-}
-
-function turnInput(input: string | readonly TurnInput[]): Record<string, unknown>[] {
-  const values = typeof input === "string" ? [{ type: "text" as const, text: input }] : [...input];
-  if (!values.length) throw new Error("Input must not be empty");
-  return values.map(value => {
-    if (value.type === "text") {
-      if (!value.text.trim()) throw new Error("Input must not be empty");
-      return { type: "text", text: value.text, text_elements: [] };
-    }
-    if (value.type === "image") {
-      if (!value.url.trim()) throw new Error("Image URL must not be empty");
-      return { type: "image", url: value.url };
-    }
-    if (value.type === "localImage") {
-      if (!isAbsolute(value.path)) throw new Error("Local image path must be absolute");
-      return { type: "localImage", path: value.path };
-    }
-    if (!value.name || !isAbsolute(value.path)) throw new Error("Skill name and absolute path are required");
-    return { type: "skill", name: value.name, path: value.path };
-  });
-}
-
-function snapshot(record: StoredSession): SessionSnapshot {
-  const { sessionId, threadId, turnId, cwd, model, reasoningEffort, pending, usage, state, options, reports } = record;
-  return { sessionId, threadId, turnId, cwd, executionCwd: record.executionCwd ?? options?.boundary?.cwd ?? cwd,
-    model, reasoningEffort, ...(pending === undefined ? {} : { pending: structuredClone(pending) }),
-    ...(record.applied === undefined ? {} : { applied: structuredClone(record.applied) }),
-    usage, state, options: structuredClone(options), reports: structuredClone(reports) };
-}
-
-function turnSnapshot(record: StoredSession, state: TurnSnapshot["state"]): TurnSnapshot {
-  if (record.threadId === undefined || record.turnId === undefined) throw new UncertainError("Turn identity unavailable");
-  return { sessionId: record.sessionId, threadId: record.threadId, turnId: record.turnId, state };
-}
-
-function statusState(status: unknown): TurnSnapshot["state"] | undefined {
-  if (status === "inProgress") return "running";
-  return terminalState(status);
-}
-
-function terminalState(status: unknown): Report["status"] | undefined {
-  return status === "completed" || status === "failed" || status === "interrupted" ? status : undefined;
-}
-
-function objectValue(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
-}
-
-function approvalResponse(request: ApprovalRequest, decision: ApprovalDecision): Record<string, unknown> {
-  if (request.method !== "item/permissions/requestApproval") return { decision };
-  if (decision !== "accept") return { permissions: {}, scope: "turn" };
-  const permissions = objectValue(objectValue(request.params).permissions);
-  return { permissions, scope: "turn" };
-}
-
-function userInputQuestions(value: unknown): UserInputQuestion[] {
-  if (!Array.isArray(value)) return [];
-  const questions: UserInputQuestion[] = [];
-  for (const raw of value) {
-    const question = objectValue(raw);
-    if (typeof question.id !== "string" || typeof question.question !== "string") continue;
-    const options = Array.isArray(question.options) ? question.options.flatMap(item => {
-      const option = objectValue(item);
-      return typeof option.label === "string"
-        ? [{ label: option.label, description: typeof option.description === "string" ? option.description : "" }]
-        : [];
-    }) : [];
-    questions.push({
-      id: question.id,
-      header: typeof question.header === "string" ? question.header : "",
-      question: question.question,
-      isOther: question.isOther === true,
-      isSecret: question.isSecret === true,
-      ...(options.length === 0 ? {} : { options }),
-    });
-  }
-  return questions;
-}
-
-/**
- * Validate one explicitly declared task boundary.
- *
- * The boundary names the Codex execution location and the exact writable roots
- * the task declares. It is forwarded verbatim: the plugin neither rewrites its
- * cwd to the Session workspace nor widens its writable roots. A boundary that
- * does not name absolute directories fails closed.
- * @param boundary - the declared boundary, when the caller declared one.
- * @returns the normalized declared boundary, or undefined for an unscoped Session.
- */
-function normalizedBoundary(boundary: CreateSessionOptions["boundary"]) {
-  if (boundary === undefined) return undefined;
-  if (!isAbsolute(boundary.cwd) || !boundary.writableRoots.every(isAbsolute)) {
-    throw new Error("Boundary cwd and writable roots must be absolute");
-  }
-  return {
-    cwd: resolve(boundary.cwd),
-    writableRoots: [...new Set(boundary.writableRoots.map(path => resolve(path)))],
-    network: boundary.network,
-  } as const;
-}
-
-/**
- * Build the native thread request for one record.
- *
- * Only what the record actually declares is sent. `approvalPolicy`,
- * `approvalsReviewer` and `sandbox` travel when the caller declared them, and
- * Codex resolves everything else from its own configuration layers and cwd:
- * permissions are Codex's own subject, so the plugin injects no permission
- * profile and couples no feature flag to a task boundary. A declared boundary
- * contributes only the directory the task runs in.
- * @param record - the record whose thread is being started or resumed.
- * @returns the `thread/start` / `thread/resume` parameters.
- */
-function threadParams(record: StoredSession): Record<string, unknown> {
-  const options = record.options ?? {};
-  const boundary = options.boundary;
-  return {
-    // The native thread runs where the task runs, which is the Session workspace
-    // only when the Session declares no task boundary.
-    cwd: boundary?.cwd ?? record.cwd,
-    model: record.model,
-    ...(options.developerInstructions === undefined ? {} : { developerInstructions: options.developerInstructions }),
-    ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
-    ...(options.approvalsReviewer === undefined ? {} : { approvalsReviewer: options.approvalsReviewer }),
-    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
-    config: {
-      ...(record.reasoningEffort === undefined ? {} : { model_reasoning_effort: record.reasoningEffort }),
-    },
-    ephemeral: false,
-  };
 }
 
 /**
