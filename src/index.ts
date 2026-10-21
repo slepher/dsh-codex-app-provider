@@ -15,6 +15,7 @@ import { CodexGateBridge } from "./tool-gate.js";
 import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
 import type {} from "@deepseek-ai/dsh-tools";
 import { DEFAULT_BRIDGED_TOOLS, ToolBridge } from "./tool-bridge.js";
+import { resolveCodexCommand } from "./command.js";
 import { fileURLToPath } from "node:url";
 // Type-only: the Loader's `loader/volatile-update` instance event.
 import type {} from "@deepseek-ai/cordis-plugin-loader";
@@ -35,8 +36,11 @@ export interface Config {
   /**
    * Executable run as the App Server (`<command> app-server --stdio`).
    *
-   * Live-editable: a new runtime reads the current value, so pointing it at a
-   * native `codex.exe` on Windows needs no plugin remount.
+   * Blank (the default) means "detect": the plugin searches this system's `PATH`
+   * for a spawnable Codex and resolves a Windows npm shim to the JavaScript entry
+   * it launches. Configure it only to override the detected program.
+   *
+   * Live-editable: a new runtime reads the current value.
    */
   command: Volatile<string>;
   requestTimeoutMs?: number;
@@ -71,7 +75,7 @@ export interface ToolBridgeConfig {
 
 export const Config = z.object({
   stateDir: z.string().required(false),
-  command: z.string().default("codex").volatile(),
+  command: z.string().default("").volatile(),
   requestTimeoutMs: z.number().min(1).max(2_147_483_647).default(30_000),
   providerCwd: z.string().required(false),
   allowMainSession: z.boolean().default(false).volatile(),
@@ -179,6 +183,11 @@ export function apply(ctx: Context, config?: Config): void {
   // fields from their defaults; a direct mount with no config is normalized the
   // same way instead of dereferencing an absent Volatile reference.
   const entry: Config = config ?? new Config({});
+  // Report a system with no usable Codex once at startup; a configured command is
+  // never second-guessed, and resolution runs again for every new runtime.
+  if (resolveCodexCommand({ configured: entry.command.get() }).source === "fallback") {
+    ctx.logger.warn("dsh-codex-app-provider: no spawnable Codex CLI was found on PATH; set the provider's `command` to override detection");
+  }
   ctx.effect(function* () {
     // Process ownership and timers are deployment capabilities, not plugin
     // policy: `ctx.subprocess` terminates a whole managed range and joins it on

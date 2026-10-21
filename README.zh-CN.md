@@ -49,7 +49,7 @@ DSH 原生 Session / 原生 child Agent
 ## 环境要求
 
 - Node.js >= 22.19.0。
-- 提供 `app-server` 的 Codex CLI（插件执行 `<command> app-server --stdio`，`command` 默认 `codex`）。
+- 提供 `app-server` 的 Codex CLI（插件执行 `<command> app-server --stdio`）。`command` 默认留空并自动探测本机 CLI：`PATH` 上的 `codex`/`codex.exe`，或 npm `.cmd`/`.bat` shim 所启动的 JS 入口（用 Node 运行）。只有需要覆盖探测结果时才填写。
 - `dsh.compatibility.dshReleases` 中列出的 DSH 版本（见[兼容性](#兼容性)）。
 - 仅对启用 gate 的 Session：Codex PreToolUse hook 走 Unix domain socket，因此 hook IPC 限 Linux/macOS。其余能力与 DSH 平台一致。
 
@@ -101,7 +101,7 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 | 键 | 类型 | 默认值 | 含义 |
 |---|---|---|---|
 | `stateDir` | 绝对路径字符串 | `<DSH_HOME>/state/<profile>/codex` | 插件自有记录的存放目录。没有 launcher profile 时回落到 `$DSH_HOME`（再回落 `~/.dsh`）下的 `default` profile 名，绝不用进程当前目录。 |
-| `command` | 字符串 | `codex` | 作为 App Server 执行的程序（`<command> app-server --stdio`）。 |
+| `command` | 字符串 | 自动探测 | 作为 App Server 执行的程序（`<command> app-server --stdio`）。留空时在本机 `PATH` 上查找可用的 Codex；Windows 的 npm shim 会被解析成它启动的 JS 入口。仅用于覆盖探测结果。 |
 | `requestTimeoutMs` | 整数，1–2147483647 | `30000` | 单次 App Server 请求超时。 |
 | `providerCwd` | 字符串 | DSH 启动目录 | 模型设置的工作目录，也是 Session 未记录工作目录时 Codex thread 的回落目录。 |
 | `allowMainSession` | 布尔 | `false` | 顶层主会话是否可以选择并使用本路由。为 `false` 时路由从模型菜单隐藏、主会话请求被拒，只有受管 workflow child 在这里运行。 |

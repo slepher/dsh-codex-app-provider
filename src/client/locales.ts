@@ -10,8 +10,8 @@
 export const zh = {
   nav: "Codex 应用",
   summary: "Codex 可执行文件、主会话门禁与原生工具桥。",
-  commandLabel: "Codex 可执行文件（command）",
-  commandHint: "以 <command> app-server --stdio 运行。Windows 上 npm 的 shim 无法被直接 spawn，请指向原生 codex.exe；新的 App Server 运行时会读取该值。",
+  commandLabel: "Codex 可执行文件（command，留空自动探测）",
+  commandHint: "留空即自动探测：在当前系统 PATH 中查找可用的 Codex；Windows 上 npm 的 .cmd shim 会被解析成它启动的 JS 入口再交给 Node 运行。只有探测失败、或需要覆盖已安装版本时才填写。",
   allowMainLabel: "允许主会话使用（allowMainSession）",
   allowMainHint: "默认关闭：只有工作流子会话使用该路由。打开后 codex-app 也会出现在主会话的模型菜单；关闭时会把已保存的选择迁移到其它可用路由。",
   bridgeLabel: "原生 DSH 工具桥（toolBridge.enabled）",
@@ -35,8 +35,8 @@ export type CodexAppCopy = typeof zh;
 export const en: CodexAppCopy = {
   nav: "Codex app",
   summary: "Codex executable, main-session gate and native tool bridge.",
-  commandLabel: "Codex executable (command)",
-  commandHint: "Run as <command> app-server --stdio. On Windows the npm shim cannot be spawned directly; point this at the native codex.exe. A new App Server runtime reads it immediately.",
+  commandLabel: "Codex executable (command, blank auto-detects)",
+  commandHint: "Leave it blank to detect: the plugin searches this system's PATH for a usable Codex, and on Windows resolves an npm .cmd shim to the JavaScript entry it launches, run with Node. Set it only when detection fails or you need to override the installed version.",
   allowMainLabel: "Allow main Sessions (allowMainSession)",
   allowMainHint: "Off by default: only workflow child Sessions use the route. On, codex-app also appears in the main-Session model menu. Turning it off retires a saved selection onto another route.",
   bridgeLabel: "Native DSH tool bridge (toolBridge.enabled)",

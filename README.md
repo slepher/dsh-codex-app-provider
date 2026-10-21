@@ -49,7 +49,7 @@ The plugin applies no role, profile or permission policy of its own. It owns exe
 ## Requirements
 
 - Node.js >= 22.19.0.
-- A Codex CLI that provides `app-server` (the plugin spawns `<command> app-server --stdio`; `command` defaults to `codex`).
+- A Codex CLI that provides `app-server` (the plugin spawns `<command> app-server --stdio`). `command` is blank by default, which auto-detects the CLI on this system: `codex`/`codex.exe` on `PATH`, or the JavaScript entry an npm `.cmd`/`.bat` shim launches (run with Node). Set `command` only to override detection.
 - A DSH release listed in `dsh.compatibility.dshReleases` (see [Compatibility](#compatibility)).
 - For gated Sessions only: the Codex PreToolUse hook transport uses a Unix domain socket, so hook IPC is Linux/macOS. Everything else works where DSH works.
 
@@ -101,7 +101,7 @@ Add one entry to the profile's `cordis.patch.yml`. A deployment loads exactly on
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `stateDir` | string (absolute) | `<DSH_HOME>/state/<profile>/codex` | Where the plugin keeps its own records. A boot without a launcher profile falls back to `$DSH_HOME` (then `~/.dsh`) under the `default` profile name, never to the process's current directory. |
-| `command` | string | `codex` | Executable run as the App Server (`<command> app-server --stdio`). |
+| `command` | string | auto-detect | Executable run as the App Server (`<command> app-server --stdio`). Blank searches this system's `PATH` for a spawnable Codex and resolves a Windows npm shim to the JavaScript entry it launches; set it only to override detection. |
 | `requestTimeoutMs` | integer, 1–2147483647 | `30000` | Per-request App Server timeout. |
 | `providerCwd` | string | the directory DSH was launched in | Working directory for model settings, and the fallback working directory for a Codex thread whose Session records none. |
 | `allowMainSession` | boolean | `false` | Whether a top-level Session may select and use this route. When `false`, the route is hidden from the model menu and refused for main-Session streams, and only managed workflow children run here. |

@@ -10,6 +10,7 @@ import {
   type AppServerSpawnSpec,
   type AppServerTimer,
 } from "./process.js";
+import { resolveCodexCommand } from "./command.js";
 
 /**
  * The version this plugin reports to the App Server.
@@ -102,8 +103,11 @@ export class AppServer extends EventEmitter {
 
   async connect(): Promise<void> {
     if (this.child !== undefined) throw new Error("App server already started");
-    const program = this.options.command ?? "codex";
-    const args = this.options.args ?? ["app-server", "--stdio"];
+    // An explicit command wins; otherwise the local system is searched for a
+    // spawnable Codex. A Windows npm shim is resolved to the JavaScript entry it
+    // launches, because Node cannot spawn the `.cmd` itself.
+    const resolved = resolveCodexCommand({ configured: this.options.command });
+    const args = [...resolved.prefixArgs, ...(this.options.args ?? ["app-server", "--stdio"])];
     // Codex is the user's own CLI and owns its own authentication, so it starts
     // from this process's environment; only the gate's per-runtime injection is
     // layered on top. The platform subprocess service scrubs credentials and
@@ -111,7 +115,7 @@ export class AppServer extends EventEmitter {
     // over as an explicit override rather than left ambient.
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries({ ...process.env, ...this.options.env })) if (value !== undefined) env[key] = value;
-    const executable = await this.resolveProgram(program, env);
+    const executable = await this.resolveProgram(resolved.program, env);
     const child = this.spawn({ argv: [executable, ...args], cwd: process.cwd(), stdio: { stdin: "pipe", stdout: "pipe", stderr: "pipe" }, graceMs: TERMINATION_GRACE_MS, env });
     this.child = child;
     const stdout = child.stdout, stdin = child.stdin;
