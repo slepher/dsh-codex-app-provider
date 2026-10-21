@@ -1,4 +1,4 @@
-import type { Context } from "@deepseek-ai/cordis";
+import type { Context, Volatile } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -16,6 +16,8 @@ import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
 import type {} from "@deepseek-ai/dsh-tools";
 import { DEFAULT_BRIDGED_TOOLS, ToolBridge } from "./tool-bridge.js";
 import { fileURLToPath } from "node:url";
+// Type-only: the Loader's `loader/volatile-update` instance event.
+import type {} from "@deepseek-ai/cordis-plugin-loader";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
   CodexThreadHandoffRequest, CodexThreadHandoffResult, CodexThreadHandoffService, CodexThreadOwnership,
@@ -30,7 +32,13 @@ export interface Config {
    * directory the process happened to start in.
    */
   stateDir?: string;
-  command?: string;
+  /**
+   * Executable run as the App Server (`<command> app-server --stdio`).
+   *
+   * Live-editable: a new runtime reads the current value, so pointing it at a
+   * native `codex.exe` on Windows needs no plugin remount.
+   */
+  command: Volatile<string>;
   requestTimeoutMs?: number;
   /**
    * Model-settings working directory, and the working directory a Codex thread
@@ -42,32 +50,35 @@ export interface Config {
    * Whether top-level main Sessions may select this route. Default `false`:
    * `codex-app` stays available to managed workflow children only, so the
    * composer, `/model`, titles and `/compact` never start an external process
-   * unless the deployment opts in.
+   * unless the deployment opts in. Live-editable through the Plugins row.
    */
-  allowMainSession?: boolean;
+  allowMainSession: Volatile<boolean>;
   /**
    * The native DSH tool bridge: when enabled, the Codex route exposes the
    * configured DSH tools as dynamic tools on the native thread and executes
-   * their callbacks through DSH's own tool pipeline.
+   * their callbacks through DSH's own tool pipeline. Live-editable.
    */
-  toolBridge?: {
-    /** Whether the bridge is on for this deployment; default `false`. */
-    enabled?: boolean;
-    /** DSH tool names the bridge may expose; the intersection is what ships. */
-    allow?: string[];
-  };
+  toolBridge: Volatile<ToolBridgeConfig>;
 }
 
-export const Config: z<Config> = z.object({
+/** The tool bridge's editable fields. */
+export interface ToolBridgeConfig {
+  /** Whether the bridge is on for this deployment; default `false`. */
+  enabled: boolean;
+  /** DSH tool names the bridge may expose; the intersection is what ships. */
+  allow: string[];
+}
+
+export const Config = z.object({
   stateDir: z.string().required(false),
-  command: z.string().default("codex"),
+  command: z.string().default("codex").volatile(),
   requestTimeoutMs: z.number().min(1).max(2_147_483_647).default(30_000),
   providerCwd: z.string().required(false),
-  allowMainSession: z.boolean().default(false),
+  allowMainSession: z.boolean().default(false).volatile(),
   toolBridge: z.object({
     enabled: z.boolean().default(false),
     allow: z.array(z.string()).default([...DEFAULT_BRIDGED_TOOLS]),
-  }).default({ enabled: false, allow: [...DEFAULT_BRIDGED_TOOLS] }),
+  }).default({ enabled: false, allow: [...DEFAULT_BRIDGED_TOOLS] }).volatile(),
 });
 
 export const inject = ["agents", "sessions", "llm", "workingDirectory", "tools"];
@@ -163,7 +174,11 @@ function timerSeam(ctx: Context): AppServerTimer | undefined {
 }
 
 /** Install one Codex execution owner and its native DSH route. */
-export function apply(ctx: Context, config: Config = {}): void {
+export function apply(ctx: Context, config?: Config): void {
+  // The Loader parses every entry through `Config`, which fills the volatile
+  // fields from their defaults; a direct mount with no config is normalized the
+  // same way instead of dereferencing an absent Volatile reference.
+  const entry: Config = config ?? new Config({});
   ctx.effect(function* () {
     // Process ownership and timers are deployment capabilities, not plugin
     // policy: `ctx.subprocess` terminates a whole managed range and joins it on
@@ -178,10 +193,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.logger.warn("dsh-codex-app-provider: ctx.%s unavailable; the Codex App Server runs as an unmanaged child of this process", unmanaged.join(", ctx."));
     }
     const backend = new CodexSessionBackend(
-      resolve(config.stateDir ?? defaultStateDir(ctx)),
+      resolve(entry.stateDir ?? defaultStateDir(ctx)),
       // The transport factory carries a gated runtime's gate environment and
-      // leaves an ungated one with exactly the environment it had before.
-      options => new AppServer({ command: config.command, timeoutMs: config.requestTimeoutMs,
+      // leaves an ungated one with exactly the environment it had before. The
+      // executable is read at spawn time, so a live configuration edit applies
+      // to the next runtime rather than requiring a plugin remount.
+      options => new AppServer({ command: entry.command.get(), timeoutMs: entry.requestTimeoutMs,
         ...(spawner === undefined ? {} : { spawner }),
         ...(timer === undefined ? {} : { timer }),
         ...(options?.env === undefined ? {} : { env: options.env }) }),
@@ -212,8 +229,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         }),
       },
       options: {
-        enabled: config.toolBridge?.enabled === true,
-        allow: config.toolBridge?.allow ?? DEFAULT_BRIDGED_TOOLS,
+        // Getters: the bridge reads the live entry config on every decision, so
+        // a form edit takes effect without remounting this plugin.
+        get enabled(): boolean { return entry.toolBridge.get().enabled === true; },
+        get allow(): readonly string[] { return entry.toolBridge.get().allow; },
         log: message => ctx.logger.warn("dsh-codex-app-provider: %s", message),
       },
     });
@@ -224,7 +243,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Returning the close lets a host that awaits this seam wait for the process
     // to exit; the backend also awaits it during teardown.
     const onDisposed = ctx.on("session/disposed", session => backend.releaseDisposed(backendSessionId(String(session.id))));
+    // A live form edit can withdraw the route from main Sessions; the saved
+    // selection has to move off it then, exactly as at startup.
+    const retireIfWithdrawn = (): void => {
+      if (entry.allowMainSession.get() === true) return;
+      void retireMainSessionSelection(retirementDeps(ctx)).then(
+        changed => { if (changed) ctx.logger.warn("dsh-codex-app-provider: main-Session model selections were moved off the codex-app route"); },
+        error => { ctx.logger.warn("dsh-codex-app-provider: the saved main-Session selection was not retired: %s", messageOf(error)); },
+      );
+    };
+    const offVolatile = ctx.on("loader/volatile-update", retireIfWithdrawn);
     yield async () => {
+      offVolatile();
       onDisposed();
       provider?.close();
       unregister?.();
@@ -246,8 +276,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       questions: ctx.get("userQuestions") as ProviderQuestionSeam | undefined,
       attachments: ctx.get("attachments") as ProviderAttachmentSeam | undefined,
       logger: ctx.logger,
-      providerCwd: resolve(config.providerCwd ?? defaultProviderCwd(ctx)),
-      allowMainSession: config.allowMainSession === true,
+      providerCwd: resolve(entry.providerCwd ?? defaultProviderCwd(ctx)),
+      allowMainSession: () => entry.allowMainSession.get() === true,
       toolBridge,
     });
     backend.attachToolBridge({ call: request => provider!.handleToolCall(request) });
@@ -299,12 +329,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     unfilter = installCodexContextFilter(ctx);
     // Withdrawing the route from main Sessions must release the selections that
     // still point at it, or the Host blocks input with "Select model".
-    if (config.allowMainSession !== true) {
-      void retireMainSessionSelection(retirementDeps(ctx)).then(
-        changed => { if (changed) ctx.logger.warn("dsh-codex-app-provider: main-Session model selections were moved off the codex-app route"); },
-        error => { ctx.logger.warn("dsh-codex-app-provider: the saved main-Session selection was not retired: %s", messageOf(error)); },
-      );
-    }
+    retireIfWithdrawn();
   }, "dsh-codex-app-provider: execution lifecycle");
 }
 

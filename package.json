@@ -9,6 +9,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -19,9 +23,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "prepare": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "node --test test/*.test.mjs",
     "test:integration:handoff": "node --test test/integration-handoff.test.mjs",
     "test:live": "node scripts/test-live.mjs",
@@ -38,27 +42,44 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-client-ui-slots": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/dsh-working-directory": "*"
+    "@deepseek-ai/dsh-working-directory": "*",
+    "react": "^18.3.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
-    "@types/node": "24.13.3",
-    "typescript": "5.9.3",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.6",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@deepseek-ai/dsh-user-approval": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-working-directory": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-working-directory": "0.2.1-rc.2",
+    "@types/node": "24.13.3",
+    "@types/react": "18.3.1",
+    "esbuild": "0.25.12",
+    "react": "18.3.1",
+    "typescript": "5.9.3"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
     },
     "compatibility": {
       "dshReleases": {}
@@ -74,6 +95,9 @@
     "@deepseek-ai/dsh-agent": {
       "optional": true
     },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-llm": {
       "optional": true
     },
@@ -84,6 +108,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-working-directory": {
+      "optional": true
+    },
+    "react": {
       "optional": true
     }
   }

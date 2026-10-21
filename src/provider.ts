@@ -167,10 +167,11 @@ export interface CodexProviderDeps {
    * `false` is the plugin's configured default: only managed workflow children
    * (requests carrying native execution inputs) run here, so the composer,
    * `/model`, titles and `/compact` never start an external process by accident.
-   * Omitted means allowed, which keeps direct adapter constructions (tests,
+   * A function reads the live configuration, so a form edit applies without a
+   * remount; a plain boolean keeps direct adapter constructions (tests,
    * embeddings) behaving as before.
    */
-  allowMainSession?: boolean;
+  allowMainSession?: boolean | (() => boolean);
   /** The native tool bridge, when the deployment configured it. */
   toolBridge?: ToolBridge;
 }
@@ -366,7 +367,8 @@ export class CodexProviderAdapter extends LlmAdapter {
 
   /** Whether the configured route may serve a top-level Session. Omitted means yes. */
   private mainSessionAllowed(): boolean {
-    return this.deps.allowMainSession !== false;
+    const configured = this.deps.allowMainSession;
+    return typeof configured === "function" ? configured() : configured !== false;
   }
 
   /**

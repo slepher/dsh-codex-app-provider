@@ -108,6 +108,14 @@ Add one entry to the profile's `cordis.patch.yml`. A deployment loads exactly on
 | `toolBridge.enabled` | boolean | `false` | Expose allow-listed DSH tools to Codex as native dynamic tools and execute their callbacks through DSH's tool pipeline. The declaration is frozen on a new thread, so enabling or changing it needs a new DSH Session. |
 | `toolBridge.allow` | string[] | `cordis_inspect_list`, `cordis_inspect_query`, `plugin_manager`, `plugin_market`, `skill`, `read` | Exposure ceiling. The shipped set is `allow` ∩ the tools the main request presented ∩ the scoped `ctx.tools.schemas(agent)`; it never grants permission by itself. |
 
+The editable fields above (`command`, `allowMainSession`, `toolBridge.*`) are
+live: the package ships a browser half that registers the row configuration
+page, so they can be changed from **Plugins → dsh-codex-app-provider →
+Configure** without editing the profile patch. Writes go to the Loader entry
+config; a new App Server runtime picks up `command`, and the main-session gate
+and bridge settings are read per decision. `stateDir`, `providerCwd` and
+`requestTimeoutMs` stay deployment inputs and need a plugin reload.
+
 Persistence layout under `stateDir`:
 
 - `sessions/<encoded-session-id>.json` — one record per Codex-backed Session: thread/turn identity, execution cwd, last confirmed model/effort, projected facts, reports and gate binding. Written atomically, mode `0600`.

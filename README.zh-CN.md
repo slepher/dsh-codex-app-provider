@@ -108,6 +108,8 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 | `toolBridge.enabled` | 布尔 | `false` | 把 allow 内的 DSH 工具作为原生 dynamic tool 暴露给 Codex，并经由 DSH 工具管线执行回调。声明冻结在新线程上，启用或更改选择需要新建 DSH 会话。 |
 | `toolBridge.allow` | 字符串数组 | `cordis_inspect_list`、`cordis_inspect_query`、`plugin_manager`、`plugin_market`、`skill`、`read` | 暴露上限。实际集合是 `allow` ∩ 主请求已呈现的工具 ∩ 当前作用域的 `ctx.tools.schemas(agent)`；配置本身不授予权限。 |
 
+以上可编辑字段（`command`、`allowMainSession`、`toolBridge.*`）都是 live 的：包内带有浏览器半，注册了行配置页，因此可以在 **插件 → dsh-codex-app-provider → 配置** 里直接修改，无需手改 profile patch。写入落到 Loader entry 配置；新的 App Server 运行时会读取新的 `command`，主会话门禁与工具桥在每次判定时读取当前值。`stateDir`、`providerCwd`、`requestTimeoutMs` 仍属部署输入，改动需要重载插件。
+
 `stateDir` 下的持久化布局：
 
 - `sessions/<url编码后的session-id>.json` —— 每个 Codex Session 一条记录：thread/turn 身份、执行 cwd、最近确认的 model/effort、投影后的事实、报告与 gate 绑定。原子写入，权限 `0600`。
