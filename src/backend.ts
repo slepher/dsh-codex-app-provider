@@ -365,6 +365,12 @@ export class CodexSessionBackend implements CodexBackend {
     if (request.fromSessionId === request.toSessionId) throw new Error("A handoff successor must differ from its source");
     const from = this.required(ownerId, request.fromSessionId);
     if (from.threadId === undefined) throw new Error("Source Session has no Codex thread to hand over");
+    // A bridged thread froze a dynamic tool declaration that a successor would
+    // inherit without the provider having verified its capabilities, so the
+    // first bridge version refuses to move it.
+    if (from.options?.toolBridge !== undefined) {
+      throw new Error("A Codex thread with a frozen tool-bridge declaration cannot be handed over; create a new Session instead");
+    }
     const recorded = from.handedOff;
     if (recorded !== undefined
       && (recorded.requestId !== request.requestId || recorded.toSessionId !== request.toSessionId)) {

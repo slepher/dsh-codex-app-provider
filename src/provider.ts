@@ -36,7 +36,7 @@ import type {
 import { CODEX_APP_PROVIDER } from "./browser-types.js";
 import type { ApprovalOutcome } from "@deepseek-ai/dsh-user-approval/types";
 import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
-import { factMessage, factMessages, importedFactIds } from "./facts.js";
+import { factMessage, factMessages, importedFactIds, bridgeMessage, committedBridgeIds } from "./facts.js";
 import {
   executionCwd,
   executionInputsEqual,
@@ -402,7 +402,48 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (sessionId === undefined) return refuse("tool bridge: the calling thread is not owned by this provider");
     const agent = this.deps.agents.get(sessionId);
     const signal = this.turnSignals.get(sessionId) ?? new AbortController().signal;
-    return bridge.call(request, agent, sessionId, signal);
+    const response = await bridge.call(request, agent, sessionId, signal);
+    return this.recordBridgeCall(sessionId, request, response);
+  }
+
+  /**
+   * Commit one bridged call to the Session log before Codex is answered.
+   *
+   * The DSH log is the conversation's source of truth: a call that ran must be
+   * readable there, and its identity must be stable so a repeated request is
+   * recognized instead of recorded twice. A Session whose log cannot be written
+   * or read is refused rather than answered with a success the log cannot
+   * account for.
+   * @param sessionId - the DSH Session owning the call.
+   * @param request - the native call identity.
+   * @param response - the answer about to be returned.
+   * @returns the answer to return; a failure when the record cannot be committed.
+   */
+  private recordBridgeCall(sessionId: string, request: BridgeCallRequest, response: BridgeResponse): BridgeResponse {
+    const refuse = (text: string): BridgeResponse => ({ contentItems: [{ type: "inputText", text }], success: false });
+    const session = this.deps.sessions.get(sessionId);
+    if (session === undefined || session.append === undefined || session.snapshotEvents === undefined) {
+      this.noteFactImportFailure(sessionId, "the Session log is not readable and appendable in this composition");
+      return refuse("tool bridge: the DSH Session log cannot record this call, so the call is not answered as a success");
+    }
+    try {
+      const id = `codex-bridge:${request.threadId}:${request.turnId}:${request.callId}`;
+      if (!committedBridgeIds(session.snapshotEvents()).has(id)) {
+        session.append("user/message", bridgeMessage({
+          threadId: request.threadId,
+          turnId: request.turnId,
+          callId: request.callId,
+          tool: request.tool,
+          argumentsText: truncate(plainText(request.arguments), 2_000),
+          resultText: truncate(response.contentItems.map(item => item.text).join("\n"), 2_000),
+          success: response.success,
+        }), { surfaceOp: "append" });
+      }
+      return response;
+    } catch (error) {
+      this.deps.logger.warn(`Codex tool bridge could not record a call for ${sessionId}: ${messageOf(error)}`);
+      return refuse(`tool bridge: the DSH Session log could not record this call (${messageOf(error)})`);
+    }
   }
 
   /**
@@ -1227,6 +1268,26 @@ export const backendSessionId = nativeSessionId;
 function providerError(error: unknown): Error {
   if (error instanceof LlmError) return error;
   return new LlmError(error instanceof Error ? error.message : String(error), "CODEX_ERROR");
+}
+
+/** A message from any thrown value. */
+function messageOf(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
+
+/** Stable textual form of one bridged call's arguments, for the durable record. */
+function plainText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** Shorten one durable record field; the native call itself keeps the full value. */
+function truncate(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit)}…[truncated]`;
 }
 
 /** Order the selectable Codex reasoning levels independently of the configured default. */

@@ -45,6 +45,8 @@ declare module "@deepseek-ai/dsh-llm" {
 export const FACT_PLUGIN = "dsh-codex-app-provider";
 /** Prefix that makes an imported fact message recognizable in the session log. */
 const FACT_ID_PREFIX = "codex-executed:";
+/** Prefix that makes a bridged tool-call record recognizable in the session log. */
+const BRIDGE_ID_PREFIX = "codex-bridge:";
 
 /**
  * True when a message identity is one of this plugin's imported facts.
@@ -57,6 +59,15 @@ const FACT_ID_PREFIX = "codex-executed:";
  */
 export function isExecutionFactId(id: unknown): boolean {
   return typeof id === "string" && id.startsWith(FACT_ID_PREFIX);
+}
+
+/**
+ * True when a message identity is one of this plugin's bridged tool-call records.
+ * @param id - the message identity under test.
+ * @returns whether the message records a bridged call.
+ */
+export function isBridgeCallId(id: unknown): boolean {
+  return typeof id === "string" && id.startsWith(BRIDGE_ID_PREFIX);
 }
 
 /** One native item's rendered facts, ready to persist as one DSH message. */
@@ -138,4 +149,56 @@ export function importedFactIds(events: readonly { type: string; data: unknown }
 function firstLine(text: string): string {
   const line = text.split("\n").find(value => value.trim() !== "");
   return line?.trim() ?? "executed item";
+}
+
+/** One bridged native call as it is recorded in the DSH session log. */
+export interface BridgeCallRecord {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  tool: string;
+  argumentsText: string;
+  resultText: string;
+  success: boolean;
+}
+
+/**
+ * Build the DSH message for one bridged tool call.
+ *
+ * The native call already exists in the Codex thread; this row is the DSH log's
+ * own record of which DSH tool ran, with which arguments and with which answer.
+ * Its identity is a function of the native call, so a replayed call is recognized
+ * instead of recorded twice, and the request filter keeps it out of the history
+ * sent back to Codex.
+ * @param record - the call identity and its outcome.
+ * @returns the immutable message to append before answering Codex.
+ */
+export function bridgeMessage(record: BridgeCallRecord): UserMessage {
+  const id = `${BRIDGE_ID_PREFIX}${record.threadId}:${record.turnId}:${record.callId}`;
+  const outcome = record.success ? "ok" : "failed";
+  return freezeMessage({
+    id: MessageId(id),
+    role: "user",
+    content: [{ type: "text", text: `Codex tool call ${record.tool} ${outcome}\narguments: ${record.argumentsText}\nresult: ${record.resultText}` }],
+    source: {
+      kind: FACT_PLUGIN,
+      form: "notice",
+      summary: boundContextSummary(`Codex tool: ${record.tool} ${outcome}`),
+    },
+  });
+}
+
+/**
+ * The bridged-call identities already present in a Session's event snapshot.
+ * @param events - the Session's current event snapshot, when readable.
+ * @returns the set of committed bridge record identities.
+ */
+export function committedBridgeIds(events: readonly { type: string; data: unknown }[] | undefined): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const event of events ?? []) {
+    if (event.type !== "user/message") continue;
+    const id = (event.data as { id?: unknown } | undefined)?.id;
+    if (isBridgeCallId(id)) ids.add(id as string);
+  }
+  return ids;
 }

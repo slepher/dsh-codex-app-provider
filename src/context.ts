@@ -3,7 +3,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Message } from "@deepseek-ai/dsh-llm";
 
 import { CODEX_APP_PROVIDER } from "./browser-types.js";
-import { isExecutionFactId } from "./facts.js";
+import { isBridgeCallId, isExecutionFactId } from "./facts.js";
 
 const INJECTED_FORMS = new Set(["instructions", "catalog", "snapshot"]);
 /** Producer-owned kinds carrying DSH context that Codex must not receive. */
@@ -41,6 +41,9 @@ export function isInjectedContext(message: Message): boolean {
   // The identity is on the message, not its source, so reading it from the
   // source would silently keep every imported fact in the request.
   if (isExecutionFactId(message.id)) return true;
+  // A bridged tool call was executed inside the native thread already; replaying
+  // the DSH record would present it to Codex as a fresh user instruction.
+  if (isBridgeCallId(message.id)) return true;
   if (INJECTED_KINDS.has(source.kind)) return true;
   return typeof source.form === "string" && INJECTED_FORMS.has(source.form);
 }

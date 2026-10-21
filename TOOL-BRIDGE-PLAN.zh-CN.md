@@ -255,14 +255,14 @@ workflow 的 PreToolUse hook 可能看到 `dsh_` 前缀后的名称，DSH guard 
 - `thread/start` 携带 `dynamicTools`，`thread/resume` 不携带；已有线程的声明与当前选择不一致时以 `EXECUTION_MISMATCH` 拒绝并要求新建会话。关闭或移除 allow 后旧线程同样被拦截。
 - `item/tool/call` 由 backend 校验 thread/turn/活 runtime 后转给 provider；provider 解析 DSH Session 与活 Agent，经 `ctx.tools.execute` 执行，文本结果回包。非文本内容显式失败而不是丢弃后报成功。
 - 同一 `(threadId,turnId,callId)` 重放返回已结算结果、不同参数视为冲突；同一 Session 的调用串行。
-- fake App Server 可脚本化一次动态工具回调；新增 7 项工具桥测试与 7 项主会话门禁测试，provider 全量 162 项、零新增失败，另有一份 backend+AppServer 的真实进程内闭环测试。
+- 每次调用在回包前写入 DSH Session 日志：一条 `codex-bridge:<thread>/<turn>/<call>` 身份的带来源 `user/message`，记录工具名、参数与结果；该身份在请求过滤中被排除，不会作为历史再次喂给 Codex，重放时也不会重复落盘。日志不可读/不可写时拒绝应答成功。
+- 关闭/更改桥接选择在已有线程上被拒绝；携带冻结声明的线程拒绝 handoff。
+- fake App Server 可脚本化动态工具回调；新增 12 项工具桥测试（含 backend 进程内闭环、provider 级“先落盘再回包”、冷重启后 resume 仍回调、handoff 拒绝、PTC 诊断），provider 全量 167 项、零新增失败。
 
 ### 仍未完成（相对本文验收，不得当作已验证）
 
-- 真实 DSH 创造模式端到端：关闭该运行时 MCP 后的 Host/Client 连接、技能加载与桌面资源读取；
-- 桥接调用尚未写入 DSH Session 的带来源持久记录（当前只有 provider 日志）；§4.2 的“记录先于回包、落盘失败停止、跨重启重放”只做到进程内；
-- PTC 呈现尚未显式报不支持（当前仅不暴露 `run_code`）；
-- handoff 携带桥接线程的拒绝路径未实现、未验证；
-- 冷恢复（新进程）后真实回调未实测；
-- workflow gate 对 `dsh_` 前缀名称的解析未实测；
+- 真实 DSH 创造模式端到端：关闭该运行时 MCP 后的 Host/Client 连接、技能加载与桌面资源读取。当前运行的 DSH 未安装本插件，live 验收仍不可做。
+- 跨重启的“已结算结果重放”：日志里的调用记录可去重，但结算答案只保存在进程内缓存；重启后同一调用键不会重新执行（原生 turn 已不存在），但也不会返回此前记录的答案。
+- `skill`/`read` 在真实会话中的目录注入与 asar 资源读取实测。
+- workflow gate 与 `dsh_` 名称：桥接调用经 `ctx.tools.execute` 执行，不经过 Codex 的 PreToolUse hook，因此按设计不会进入 workflow gate；仍需在真实会话中确认无旁路。
 - 原生工具卡片与 SDK 投影未实现。

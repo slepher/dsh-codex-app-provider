@@ -141,11 +141,15 @@ workflow children — requests that carry native execution inputs. In that mode:
 `toolBridge.enabled` exposes selected DSH tools to Codex as native dynamic
 tools. Codex calls them back through `item/tool/call`; the provider binds each
 call to the live Agent and executes it with `ctx.tools.execute`, so DSH scoped
-policy, guards, approvals and cancellation apply unchanged. The first version
-carries text results only, does not cover PTC presentation, and needs no MCP
-server, port or second approval store. The declaration is written only on
-`thread/start` — a new or changed selection is refused on an existing thread,
-because the protocol has no field for adding tools to a resumed thread.
+policy, guards, approvals and cancellation apply unchanged. Every call is
+recorded in the DSH Session log as a sourced `user/message`
+(`codex-bridge:<thread>:<turn>:<call>`) before Codex is answered; that identity
+is filtered from the history sent back to Codex, so a replay is never presented
+as a new instruction. The first version carries text results only, does not
+cover PTC presentation, and needs no MCP server, port or second approval store.
+The declaration is written only on `thread/start` — a new or changed selection
+is refused on an existing thread, because the protocol has no field for adding
+tools to a resumed thread.
 
 ## Delegation
 

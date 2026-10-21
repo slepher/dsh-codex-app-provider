@@ -197,7 +197,14 @@ export class ToolBridge {
     }
     const tools = selectBridgeTools(this.deps.options.allow, presented, scoped);
     if (tools.length === 0) {
-      this.deps.options.log("tool bridge: the request presented no tool the bridge may expose");
+      // PTC presents only the `run_code` transport to the model, so there is no
+      // native function to declare. This is a configuration mismatch to report,
+      // not a silently empty bridge.
+      if (presented.every(schema => schema.name === "run_code")) {
+        this.deps.options.log("tool bridge: PTC presentation exposes only run_code; the bridge supports native tool presentation only");
+      } else {
+        this.deps.options.log("tool bridge: the request presented no tool the bridge may expose");
+      }
       return undefined;
     }
     return declarationOf(tools);

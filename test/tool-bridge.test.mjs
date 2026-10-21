@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import { CodexSessionBackend } from "../lib/backend.js";
 import { AppServer } from "../lib/rpc.js";
+import { isCodexVisible } from "../lib/context.js";
+import { bridgeMessage, committedBridgeIds, isBridgeCallId } from "../lib/facts.js";
+import { CodexProviderAdapter } from "../lib/provider.js";
 import { declarationOf, responseOf, selectBridgeTools, ToolBridge } from "../lib/tool-bridge.js";
 
 const fakeServer = fileURLToPath(new URL("./fake-codex-app-server.mjs", import.meta.url));
@@ -105,6 +108,130 @@ test("the declaration is withheld when disabled or when nothing may be exposed",
   assert.equal(empty.declaration(AGENT, [schema("read")]), undefined);
   const selected = new ToolBridge({ seam: registry, options: { enabled: true, allow: ["read"], log() {} } });
   assert.deepEqual(selected.declaration(AGENT, [schema("read")]).tools.map(tool => tool.name), ["dsh_read"]);
+});
+
+test("a bridged call is recorded once, kept out of the Codex history, and recognized on replay", () => {
+  const message = bridgeMessage({ threadId: "t1", turnId: "u1", callId: "c1", tool: "dsh_read",
+    argumentsText: '{"path":"/work/a"}', resultText: "file contents", success: true });
+  assert.equal(isBridgeCallId(message.id), true);
+  assert.equal(isCodexVisible(message), false, "the record is not replayed to Codex as an instruction");
+  const events = [{ type: "user/message", data: { id: message.id } }, { type: "user/message", data: { id: "user-1" } }];
+  assert.deepEqual([...committedBridgeIds(events)], [message.id]);
+});
+
+test("a PTC-only request reports the unsupported presentation instead of an empty bridge", () => {
+  const messages = [];
+  const bridge = new ToolBridge({ seam: seam(), options: { enabled: true, allow: ["read"], log: message => messages.push(message) } });
+  assert.equal(bridge.declaration(AGENT, [{ name: "run_code", description: "ptc", parameters: { type: "object" } }]), undefined);
+  assert.match(messages.join("\n"), /PTC presentation exposes only run_code/);
+});
+
+test("a bridged thread cannot be handed over", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-tool-bridge-handoff-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const backend = new CodexSessionBackend(join(dir, "records"), () => new AppServer({
+    command: process.execPath, args: [fakeServer],
+    env: { DSH_FAKE_CODEX_LOG: join(dir, "calls.jsonl"), DSH_FAKE_CODEX_STATE: join(dir, "fake-state") },
+  }));
+  t.after(() => backend.close());
+  const declaration = declarationOf([{ name: "dsh_read", description: "read", inputSchema: { type: "object" } }]);
+  await backend.createSession("owner", "codex:bridged", process.cwd(), { model: "luna", toolBridge: declaration });
+  await assert.rejects(
+    backend.handoffThread("owner", { requestId: "r1", fromSessionId: "codex:bridged", toSessionId: "codex:next", model: "luna" }),
+    /tool-bridge declaration cannot be handed over/,
+  );
+});
+
+test("a resumed thread keeps its frozen declaration across a process restart", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-tool-bridge-cold-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const logPath = join(dir, "calls.jsonl"), stateDir = join(dir, "fake-state"), records = join(dir, "records");
+  const open = () => new CodexSessionBackend(records, () => new AppServer({
+    command: process.execPath, args: [fakeServer],
+    env: { DSH_FAKE_CODEX_LOG: logPath, DSH_FAKE_CODEX_STATE: stateDir, DSH_FAKE_CODEX_DYNAMIC: "1" },
+  }));
+  const calls = [];
+  const handler = { call: async request => { calls.push(request.tool); return { contentItems: [{ type: "inputText", text: "ok" }], success: true }; } };
+  const declaration = declarationOf([{ name: "dsh_cordis_inspect_list", description: "list", inputSchema: { type: "object", properties: {} } }]);
+
+  const first = open();
+  first.attachToolBridge(handler);
+  await first.createSession("owner", "codex:cold", process.cwd(), { model: "luna", toolBridge: declaration });
+  const firstEvents = [];
+  first.subscribe("owner", "codex:cold", event => { firstEvents.push(event); }, { interactive: true });
+  await first.startTurn("owner", "codex:cold", "first");
+  await waitFor(() => firstEvents.some(event => event.type === "turn.state" && event.turn.state === "completed"));
+  await first.close();
+  assert.equal(calls.length, 1);
+
+  // A new backend process over the same records and the same native state: the
+  // thread is resumed, not started, and the declaration it froze still calls back.
+  const second = open();
+  t.after(() => second.close());
+  second.attachToolBridge(handler);
+  const events = [];
+  second.subscribe("owner", "codex:cold", event => { events.push(event); }, { interactive: true });
+  await second.resumeSession("owner", "codex:cold");
+  await second.startTurn("owner", "codex:cold", "second");
+  await waitFor(() => events.some(event => event.type === "turn.state" && event.turn.state === "completed"));
+  assert.equal(calls.length, 2, "the resumed thread called the frozen tool again");
+  const log = readFileSync(logPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const resumed = log.filter(entry => entry.method === "thread/resume");
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0].params.dynamicTools, undefined, "resume never carries the declaration field");
+  assert.equal(log.filter(entry => entry.method === "thread/start").length, 1, "the restart did not fork a new thread");
+});
+
+test("the provider executes and records a bridged call before answering", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-tool-bridge-provider-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const logPath = join(dir, "calls.jsonl");
+  const backend = new CodexSessionBackend(join(dir, "records"), () => new AppServer({
+    command: process.execPath, args: [fakeServer],
+    env: { DSH_FAKE_CODEX_LOG: logPath, DSH_FAKE_CODEX_STATE: join(dir, "fake-state"), DSH_FAKE_CODEX_DYNAMIC: "1" },
+  }));
+  t.after(() => backend.close());
+  const appends = [];
+  const logged = [];
+  const session = { header: { cwd: "/work" }, append: (type, data) => appends.push({ type, data }), snapshotEvents: () => logged };
+  const agent = { id: "s1", session: { id: "s1" }, options: { provider: "codex-app", model: "luna" } };
+  const bridge = new ToolBridge({
+    seam: {
+      schemas: () => [schema("cordis_inspect_list")],
+      execute: async () => ({ isError: false, value: null, content: [{ type: "text", text: "listed" }] }),
+    },
+    options: { enabled: true, allow: ["cordis_inspect_list"], log() {} },
+  });
+  const adapter = new CodexProviderAdapter({
+    backend,
+    sessions: { get: () => session },
+    agents: { get: () => agent },
+    currentCwd: () => "/work",
+    logger: { warn() {} },
+    providerCwd: "/work",
+    allowMainSession: true,
+    toolBridge: bridge,
+  });
+  backend.attachToolBridge({ call: request => adapter.handleToolCall(request) });
+  const chunks = [];
+  const input = {
+    provider: "codex-app", model: "luna", sessionId: "s1",
+    messages: [{ id: "u1", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "hi" }] }],
+    tools: [schema("cordis_inspect_list")],
+  };
+  for await (const chunk of adapter.stream(input)) {
+    chunks.push(chunk);
+    // The durable record has to exist before the native answer is sent; the
+    // fake turn only completes after that answer, so the check is stable.
+  }
+  const bridgeRecords = appends.filter(entry => entry.type === "user/message" && isBridgeCallId(entry.data.id));
+  assert.equal(bridgeRecords.length, 1, "one record for the one bridged call");
+  assert.match(bridgeRecords[0].data.content[0].text, /dsh_cordis_inspect_list ok/);
+  assert.match(bridgeRecords[0].data.content[0].text, /listed/);
+  const log = readFileSync(logPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const answer = log.find(entry => entry.response?.result?.contentItems !== undefined);
+  assert.deepEqual(answer.response.result, { contentItems: [{ type: "inputText", text: "listed" }], success: true });
+  assert.ok(chunks.some(chunk => chunk.type === "finish" || chunk.type === "text-delta"), "the turn streamed to completion");
 });
 
 test("a frozen declaration travels on thread/start and its callback is answered", async t => {

@@ -131,7 +131,7 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 - 插件仍发布 `ctx.codexExecution.catalog()`，`dsh-workflow-kit` 设置页因此能为 child 角色提供被 composer 菜单隐藏的 `codex-app` 模型；
 - 关闭路由时会把全局默认模型与已打开 Session 的选择迁移到其它可用路由，UI 不会卡在「Select model」。
 
-`toolBridge.enabled` 把选定的 DSH 工具作为原生 dynamic tool 暴露给 Codex。Codex 通过 `item/tool/call` 回调，provider 把每次调用绑定到活的 Agent，并用 `ctx.tools.execute` 执行，因此 DSH 的作用域策略、guard、审批与取消原样生效。首版只承载文本结果、不覆盖 PTC 呈现，也不需要新增 MCP 服务、端口或第二套审批存储。声明只写在 `thread/start` 上——线程已存在时新增或更改选择会被拒绝，因为协议没有为 resume 提供注入工具的字段。
+`toolBridge.enabled` 把选定的 DSH 工具作为原生 dynamic tool 暴露给 Codex。Codex 通过 `item/tool/call` 回调，provider 把每次调用绑定到活的 Agent，并用 `ctx.tools.execute` 执行，因此 DSH 的作用域策略、guard、审批与取消原样生效。每次调用都在回包前写入 DSH Session 日志（带来源的 `user/message`，身份为 `codex-bridge:<thread>:<turn>:<call>`）；该身份会被发送给 Codex 的历史过滤掉，重放时不会当成新的用户指令。首版只承载文本结果、不覆盖 PTC 呈现，也不需要新增 MCP 服务、端口或第二套审批存储。声明只写在 `thread/start` 上——线程已存在时新增或更改选择会被拒绝，因为协议没有为 resume 提供注入工具的字段。
 
 ## 委派
 
