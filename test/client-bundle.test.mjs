@@ -29,19 +29,26 @@ function loadBundle() {
   const window = { __ModuleLoader__: { load: value => { loaded = value; } } };
   runInNewContext(source, { window, require: name => { throw new Error(`unexpected require ${name}`); } });
   const registrations = [];
+  const localeRegistrations = [];
   const form = formStub();
   const slots = {
     inject(_name, factory) { factory(); return () => {}; },
     register(options, component) { registrations.push({ options, component }); return () => {}; },
   };
   const configForms = { get: ns => { assert.equal(ns, "dsh-codex-app-provider"); return form; } };
+  const locale = {
+    register(ns, copies) { localeRegistrations.push({ ns, copies }); return () => {}; },
+    bind: ns => key => `[${ns}:${key}]`,
+  };
   const ctx = {
+    effect(fn) { const dispose = fn(); return () => {}; },
     inject(services, factory) {
       assert.deepEqual([...services].sort(), ["configForms", "slots"]);
-      factory({ ...ctx, slots, configForms });
+      factory({ ...ctx, slots, configForms, locale });
     },
     slots,
     configForms,
+    locale,
   };
   const plugin = loaded.factory(name => {
     if (name === "react") return { useState: () => [undefined, () => {}], useSyncExternalStore: (_subscribe, get) => get() };
@@ -51,13 +58,17 @@ function loadBundle() {
     }
     throw new Error(`unexpected module ${name}`);
   });
-  return { plugin, ctx, registrations, form };
+  return { plugin, ctx, registrations, localeRegistrations, form };
 }
 
-test("the browser half registers every configuration surface", () => {
-  const { plugin, ctx, registrations } = loadBundle();
-  assert.deepEqual([...plugin.inject].sort(), ["configForms", "slots"]);
+test("the browser half registers its copy and every configuration surface", () => {
+  const { plugin, ctx, registrations, localeRegistrations } = loadBundle();
+  assert.deepEqual([...plugin.inject].sort(), ["configForms", "locale", "slots"]);
   plugin.apply(ctx);
+  assert.equal(localeRegistrations.length, 1);
+  assert.equal(localeRegistrations[0].ns, "dsh-codex-app-provider");
+  assert.equal(typeof localeRegistrations[0].copies.zh.nav, "string");
+  assert.equal(localeRegistrations[0].copies.en.nav, "Codex app");
   assert.equal(registrations.length, 3);
   const bundle = registrations.find(entry => entry.options.name === "plugins.bundle.config");
   assert.equal(bundle.options.key, "dsh-codex-app-provider");
@@ -65,8 +76,11 @@ test("the browser half registers every configuration surface", () => {
   assert.equal(row.options.key, "dsh-codex-app-provider#dsh-codex-app-provider");
   const section = registrations.find(entry => entry.options.name === "settings.section");
   assert.equal(section.options.id, "codex-app-provider");
-  assert.equal(section.options.label(), "Codex app");
-  for (const entry of registrations) assert.equal(typeof entry.component, "function");
+  assert.equal(section.options.label(), "[dsh-codex-app-provider:nav]");
+  for (const entry of registrations) {
+    assert.equal(entry.options.locale, "dsh-codex-app-provider");
+    assert.equal(typeof entry.component, "function");
+  }
 });
 
 test("the component renders the Host form's accepted value", () => {
