@@ -12,6 +12,9 @@ import { CODEX_OWNER_ID, CODEX_APP_PROVIDER, CodexProviderAdapter, backendSessio
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-working-directory";
 import { CodexGateBridge } from "./tool-gate.js";
+import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
+import type {} from "@deepseek-ai/dsh-tools";
+import { DEFAULT_BRIDGED_TOOLS, ToolBridge } from "./tool-bridge.js";
 import { fileURLToPath } from "node:url";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
 export type {
@@ -42,6 +45,17 @@ export interface Config {
    * unless the deployment opts in.
    */
   allowMainSession?: boolean;
+  /**
+   * The native DSH tool bridge: when enabled, the Codex route exposes the
+   * configured DSH tools as dynamic tools on the native thread and executes
+   * their callbacks through DSH's own tool pipeline.
+   */
+  toolBridge?: {
+    /** Whether the bridge is on for this deployment; default `false`. */
+    enabled?: boolean;
+    /** DSH tool names the bridge may expose; the intersection is what ships. */
+    allow?: string[];
+  };
 }
 
 export const Config: z<Config> = z.object({
@@ -50,9 +64,13 @@ export const Config: z<Config> = z.object({
   requestTimeoutMs: z.number().min(1).max(2_147_483_647).default(30_000),
   providerCwd: z.string().required(false),
   allowMainSession: z.boolean().default(false),
+  toolBridge: z.object({
+    enabled: z.boolean().default(false),
+    allow: z.array(z.string()).default([...DEFAULT_BRIDGED_TOOLS]),
+  }).default({ enabled: false, allow: [...DEFAULT_BRIDGED_TOOLS] }),
 });
 
-export const inject = ["agents", "sessions", "llm", "workingDirectory"];
+export const inject = ["agents", "sessions", "llm", "workingDirectory", "tools"];
 
 /**
  * Launcher-provided profile facts, read defensively.
@@ -179,6 +197,26 @@ export function apply(ctx: Context, config: Config = {}): void {
     // one entry the provider will accept as its own PreToolUse hook.
     toolGate.useClient(fileURLToPath(new URL("./pretool-client.js", import.meta.url)));
     backend.attachGate(toolGate);
+    // The native tool bridge executes through DSH's own tool pipeline, so the
+    // deployment's scoped policy, guards, approvals and cancellation apply
+    // unchanged; the provider only carries the binding.
+    const toolBridge = new ToolBridge({
+      seam: {
+        schemas: agent => ctx.tools.schemas(agent),
+        execute: call => ctx.tools.execute({
+          callId: ToolCallId(call.callId),
+          name: call.name,
+          arguments: call.arguments,
+          agent: call.agent,
+          signal: call.signal,
+        }),
+      },
+      options: {
+        enabled: config.toolBridge?.enabled === true,
+        allow: config.toolBridge?.allow ?? DEFAULT_BRIDGED_TOOLS,
+        log: message => ctx.logger.warn("dsh-codex-app-provider: %s", message),
+      },
+    });
     // The Host owns a Session's lifecycle and reports disposal as a fact. The
     // Codex record that backed the Session is this plugin's to release, so the
     // two are joined here rather than by asking the core for a teardown
@@ -210,7 +248,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       logger: ctx.logger,
       providerCwd: resolve(config.providerCwd ?? defaultProviderCwd(ctx)),
       allowMainSession: config.allowMainSession === true,
+      toolBridge,
     });
+    backend.attachToolBridge({ call: request => provider!.handleToolCall(request) });
     unregister = ctx.llm.registerAdapter([CODEX_APP_PROVIDER], provider);
     ctx.provide("codexToolGate", toolGate);
     ctx.provide("codexExecution", {

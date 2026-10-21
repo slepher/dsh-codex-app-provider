@@ -192,11 +192,24 @@ export function normalizedBoundary(boundary: CreateSessionOptions["boundary"]) {
  * profile and couples no feature flag to a task boundary. A declared boundary
  * contributes only the directory the task runs in.
  * @param record - the record whose thread is being started or resumed.
+ * @param includeDynamicTools - whether this is a `thread/start`: the protocol
+ *   carries `dynamicTools` only there, so a resume never sends the field.
  * @returns the `thread/start` / `thread/resume` parameters.
  */
-export function threadParams(record: StoredSession): Record<string, unknown> {
+export function threadParams(record: StoredSession, includeDynamicTools = false): Record<string, unknown> {
   const options = record.options ?? {};
   const boundary = options.boundary;
+  // The declaration travels only on `thread/start`; the protocol has no field
+  // for adding tools to a resumed thread, which is why the record freezes it.
+  const dynamicTools = includeDynamicTools
+    ? options.toolBridge?.tools.map(tool => ({
+      type: "function" as const,
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      deferLoading: false,
+    }))
+    : undefined;
   return {
     // The native thread runs where the task runs, which is the Session workspace
     // only when the Session declares no task boundary.
@@ -206,6 +219,7 @@ export function threadParams(record: StoredSession): Record<string, unknown> {
     ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
     ...(options.approvalsReviewer === undefined ? {} : { approvalsReviewer: options.approvalsReviewer }),
     ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+    ...(dynamicTools === undefined ? {} : { dynamicTools }),
     config: {
       ...(record.reasoningEffort === undefined ? {} : { model_reasoning_effort: record.reasoningEffort }),
     },

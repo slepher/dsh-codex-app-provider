@@ -54,6 +54,7 @@ import {
 } from "./history.js";
 import { usageChunk, usageContextWindow } from "./usage.js";
 import type { NativeCatalogGroup } from "./execution.js";
+import type { BridgeCallRequest, BridgeDeclaration, BridgeResponse, ToolBridge } from "./tool-bridge.js";
 
 /** The provider route this plugin registers with DSH; the vocabulary lives in `browser-types`. */
 export { CODEX_APP_PROVIDER };
@@ -169,6 +170,8 @@ export interface CodexProviderDeps {
    * embeddings) behaving as before.
    */
   allowMainSession?: boolean;
+  /** The native tool bridge, when the deployment configured it. */
+  toolBridge?: ToolBridge;
 }
 
 interface TurnOutcome {
@@ -187,6 +190,10 @@ export class CodexProviderAdapter extends LlmAdapter {
   /** Sessions whose fact import already reported a failure. */
   private readonly factImportFailures = new Set<string>();
   private catalogFlight: Promise<ModelSettings> | undefined;
+  /** Native thread identity → DSH Session identity, for server-initiated tool calls. */
+  private readonly sessionByThread = new Map<string, string>();
+  /** The cancellation signal of each Session's turn in flight, for tool calls. */
+  private readonly turnSignals = new Map<string, AbortSignal>();
 
   constructor(private readonly deps: CodexProviderDeps) {
     super();
@@ -315,9 +322,14 @@ export class CodexProviderAdapter extends LlmAdapter {
     const onAbort = (): void => controller.abort();
     options.signal?.addEventListener("abort", onAbort, { once: true });
     this.active.add(controller);
+    // A server-initiated tool call belongs to the turn in flight, so its
+    // cancellation signal is the one this Session's stream owns.
+    const sessionKey = options.sessionId === undefined ? undefined : String(options.sessionId);
+    if (sessionKey !== undefined && options.purpose === undefined) this.turnSignals.set(sessionKey, controller.signal);
     try {
       yield* this.streamInternal(options, controller.signal);
     } finally {
+      if (sessionKey !== undefined) this.turnSignals.delete(sessionKey);
       this.active.delete(controller);
       options.signal?.removeEventListener("abort", onAbort);
       controller.abort();
@@ -354,6 +366,42 @@ export class CodexProviderAdapter extends LlmAdapter {
   /** Whether the configured route may serve a top-level Session. Omitted means yes. */
   private mainSessionAllowed(): boolean {
     return this.deps.allowMainSession !== false;
+  }
+
+  /**
+   * Refuse a thread whose frozen dynamic-tool declaration no longer matches.
+   *
+   * The protocol carries `dynamicTools` only on `thread/start`: a resumed thread
+   * keeps the declaration it froze. Enabling, disabling or reselecting the
+   * bridge after a thread exists therefore cannot take effect there, and the
+   * request must start a new DSH Session instead of running with a stale
+   * declaration (or with tools the deployment withdrew).
+   */
+  private assertBridgeUnchanged(record: SessionSnapshot, declaration: BridgeDeclaration | undefined): void {
+    const frozen = record.options?.toolBridge;
+    if (frozen === undefined && declaration === undefined) return;
+    if (frozen !== undefined && declaration !== undefined && frozen.fingerprint === declaration.fingerprint) return;
+    throw new LlmError("The tool bridge selection changed; start a new DSH Session for the new declaration", "EXECUTION_MISMATCH");
+  }
+
+  /**
+   * Answer one `item/tool/call` forwarded by the backend.
+   *
+   * The backend already proved the call belongs to the live thread and turn;
+   * this resolves the DSH Session that thread serves and executes on its live
+   * Agent, so scoped policy, guards, approvals and cancellation all apply.
+   * @param request - the native call.
+   * @returns the native answer; an unowned thread fails explicitly.
+   */
+  async handleToolCall(request: BridgeCallRequest): Promise<BridgeResponse> {
+    const refuse = (text: string): BridgeResponse => ({ contentItems: [{ type: "inputText", text }], success: false });
+    const bridge = this.deps.toolBridge;
+    if (bridge === undefined) return refuse("tool bridge: this deployment has no bridge installed");
+    const sessionId = this.sessionByThread.get(request.threadId);
+    if (sessionId === undefined) return refuse("tool bridge: the calling thread is not owned by this provider");
+    const agent = this.deps.agents.get(sessionId);
+    const signal = this.turnSignals.get(sessionId) ?? new AbortController().signal;
+    return bridge.call(request, agent, sessionId, signal);
   }
 
   /**
@@ -634,7 +682,11 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (record !== undefined && record.cwd !== cwd) {
       throw new LlmError("This Session's workspace changed; start a new DSH Session for the new workspace", "WORKSPACE_CHANGED");
     }
-    const execution = this.requestedExecution(options, this.deps.agents.get(sessionId));
+    const agent = this.deps.agents.get(sessionId);
+    const execution = this.requestedExecution(options, agent);
+    // The bridge only exists for a request with a live Agent: the declaration is
+    // frozen on the thread and every callback executes on that same Agent.
+    const bridgeDeclaration = this.deps.toolBridge?.declaration(agent, options.tools);
     const recorded = recordedExecution(record);
     if (recorded !== undefined && execution !== undefined && !executionInputsEqual(recorded, execution)) {
       throw new LlmError("Native execution instructions or boundary changed; create a new child", "EXECUTION_MISMATCH");
@@ -672,7 +724,10 @@ export class CodexProviderAdapter extends LlmAdapter {
     const plan = await planInput(durableMessages(options.messages), threadId, this.cursors.get(sessionId), this.imageResolver, events);
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
-      record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective, executionCwd: targetExecutionCwd });
+      record = await backend.createSession(owner, backendId, cwd, {
+        ...turnOptions(options), ...effective, executionCwd: targetExecutionCwd,
+        ...(bridgeDeclaration === undefined ? {} : { toolBridge: bridgeDeclaration }),
+      });
     } else if (record.threadId === undefined && logThreadId !== undefined) {
       // The cache is gone and the log still names the thread: resume that exact
       // thread. `thread/start` would silently fork the conversation.
@@ -684,6 +739,10 @@ export class CodexProviderAdapter extends LlmAdapter {
       // closed through `resumeSession`.
       record = await backend.resumeSession(owner, backendId).catch(error => { throw providerError(error); });
     }
+    // The declaration cannot change on an existing thread: `thread/resume` has
+    // no field for it, so a different selection is a new-Session decision.
+    this.assertBridgeUnchanged(record, bridgeDeclaration);
+    if (record.threadId !== undefined) this.sessionByThread.set(record.threadId, sessionId);
     // A workflow-managed child authorizes its target through the live Agent's
     // effective configuration, which may differ from the last confirmed value
     // until the App Server reports the applied settings, so its switch is

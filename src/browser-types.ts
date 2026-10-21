@@ -1,4 +1,5 @@
 import type { GateBinding } from "./tool-gate.js";
+import type { BridgeDeclaration } from "./tool-bridge.js";
 
 /**
  * The provider route this plugin registers with DSH, and the marker every
@@ -108,6 +109,14 @@ export interface CreateSessionOptions extends TurnOptions {
   approvalsReviewer?: ApprovalsReviewer;
   sandbox?: SandboxMode;
   boundary?: ExecutionBoundary;
+  /**
+   * The dynamic tool declaration this thread froze at creation.
+   *
+   * The protocol only carries `dynamicTools` on `thread/start`, so the snapshot
+   * is persisted with the record: a later request compares the selection it
+   * would expose against it and refuses the thread when they differ.
+   */
+  toolBridge?: BridgeDeclaration;
 }
 
 /**

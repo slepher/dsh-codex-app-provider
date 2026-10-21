@@ -46,6 +46,7 @@ import {
   type TurnResult,
 } from "./wire.js";
 import type { CodexGateBridge, GateRecordFacts, HookRunEvidence } from "./tool-gate.js";
+import type { BridgeCallRequest, BridgeResponse } from "./tool-bridge.js";
 
 /** Hook runs kept per live runtime as deployment evidence. */
 const HOOK_RUN_LIMIT = 50;
@@ -82,6 +83,8 @@ export class CodexSessionBackend implements CodexBackend {
   private closed = false;
   /** The workflow gate registry, once the Host capability is installed. */
   private gate?: CodexGateBridge;
+  /** The native tool bridge, once the provider installs it. */
+  private toolBridge?: { call(request: BridgeCallRequest, sessionId: string): Promise<BridgeResponse> };
 
   constructor(
     stateDir: string,
@@ -100,6 +103,18 @@ export class CodexSessionBackend implements CodexBackend {
   attachGate(gate: CodexGateBridge): void {
     this.gate = gate;
     gate.useRecordReader(sessionId => this.gateFacts(sessionId));
+  }
+
+  /**
+   * Attach the native tool bridge.
+   *
+   * The backend validates that one `item/tool/call` belongs to the live thread
+   * and turn before forwarding it; binding the call to a DSH Agent is the
+   * provider's part, because only it knows the live Agent for a Session.
+   * @param bridge - the installed bridge.
+   */
+  attachToolBridge(bridge: { call(request: BridgeCallRequest, sessionId: string): Promise<BridgeResponse> }): void {
+    this.toolBridge = bridge;
   }
 
   /**
@@ -181,7 +196,7 @@ export class CodexSessionBackend implements CodexBackend {
       // A gated Session is refused before its thread exists when Codex would
       // silently skip the hook: present-but-untrusted is not a gate.
       if (gate !== undefined) await this.gate!.preflight((method, params) => runtime.rpc.request(method, params), record.executionCwd ?? cwd);
-      const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record));
+      const result = await runtime.rpc.request<ThreadResult>("thread/start", threadParams(record, true));
       if (typeof result.thread?.id !== "string") throw new Error("Missing thread identity");
       record.threadId = result.thread.id;
       reconcileBoundary(record, result);
@@ -823,6 +838,10 @@ export class CodexSessionBackend implements CodexBackend {
       return;
     }
     const method = message.method ?? "";
+    if (method === "item/tool/call") {
+      this.toolCall(record, runtime, message.id, params);
+      return;
+    }
     if (method === "item/tool/requestUserInput") {
       this.userInputRequest(record, runtime, message.id, params);
       return;
@@ -895,8 +914,56 @@ export class CodexSessionBackend implements CodexBackend {
     this.publish(record, { type: "userInput.requested", request });
   }
 
-  private publish(record: StoredSession, event: BackendEvent): void {
-    this.commitEvents(record, [event]);
+  /**
+   * Forward one native dynamic-tool call to the installed bridge.
+   *
+   * The call must belong to the live runtime's current thread and turn, exactly
+   * like an approval: a stale generation or a finished turn cannot execute a
+   * tool on a Session it no longer owns.
+   * @param record - the Session the call names.
+   * @param runtime - the live runtime that sent it.
+   * @param id - the native request identity.
+   * @param params - the `item/tool/call` parameters.
+   */
+  private toolCall(record: StoredSession, runtime: Runtime, id: number | string, params: Record<string, unknown>): void {
+    const reply = (response: BridgeResponse): void => { runtime.rpc.respond(id, response); };
+    const refuse = (text: string): void => reply({ contentItems: [{ type: "inputText", text }], success: false });
+    const callId = typeof params.callId === "string" ? params.callId : undefined;
+    const tool = typeof params.tool === "string" ? params.tool : undefined;
+    const turnId = typeof params.turnId === "string" ? params.turnId : record.turnId;
+    if (record.threadId === undefined || turnId === undefined || params.threadId !== record.threadId || turnId !== record.turnId) {
+      refuse("tool bridge: the call does not belong to the active thread and turn");
+      return;
+    }
+    if (callId === undefined || tool === undefined) {
+      refuse("tool bridge: the call carries no call id or tool name");
+      return;
+    }
+    if (this.live.get(record.sessionId) !== runtime
+      || !["running", "waiting-approval", "interrupt-requested"].includes(record.state)) {
+      refuse("tool bridge: the Session has no active turn");
+      return;
+    }
+    const bridge = this.toolBridge;
+    if (bridge === undefined) {
+      refuse("tool bridge: this deployment has no bridge installed");
+      return;
+    }
+    const request: BridgeCallRequest = {
+      threadId: record.threadId,
+      turnId,
+      callId,
+      tool,
+      arguments: params.arguments,
+      ...(params.namespace === undefined ? {} : { namespace: params.namespace as string | null }),
+    };
+    void bridge.call(request, dshSessionId(record.sessionId)).then(
+      response => reply(response),
+      error => refuse(`tool bridge: the call failed: ${error instanceof Error ? error.message : String(error)}`),
+    );
+  }
+
+  private publish(record: StoredSession, event: BackendEvent): void {    this.commitEvents(record, [event]);
   }
 
   /**

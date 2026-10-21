@@ -15,6 +15,9 @@ test("headless Host registers one route, releases ownership on unload, and reloa
   new LlmRuntime(ctx);
   ctx.provide("agents", { get() {} });
   ctx.provide("sessions", { get() {} });
+  // The plugin injects the DSH tool registry for the native tool bridge; this
+  // headless composition provides an empty one.
+  ctx.provide("tools", { schemas: () => [], execute: async () => ({ isError: false, value: null, content: [] }) });
   t.after(async () => { await ctx.fiber.dispose(); rmSync(stateDir, { recursive: true, force: true }); });
   const first = await ctx.plugin(plugin, { stateDir });
   assert.equal(ctx.llm.listProviders().some(p => p.id === "codex-app"), true);
@@ -47,6 +50,9 @@ test("a disposed Session releases the Codex record that backed it", async t => {
   new LlmRuntime(ctx);
   ctx.provide("agents", { get() {} });
   ctx.provide("sessions", { get() {} });
+  // The plugin injects the DSH tool registry for the native tool bridge; this
+  // headless composition provides an empty one.
+  ctx.provide("tools", { schemas: () => [], execute: async () => ({ isError: false, value: null, content: [] }) });
   t.after(async () => { await ctx.fiber.dispose(); });
   const instance = await ctx.plugin(plugin, { stateDir });
   assert.equal(JSON.parse(readFileSync(path, "utf8")).released, undefined, "the record starts owned");
@@ -71,6 +77,9 @@ test("an omitted stateDir lands in the launched profile's state tree", async t =
   new LlmRuntime(ctx);
   ctx.provide("agents", { get() {} });
   ctx.provide("sessions", { get() {} });
+  // The plugin injects the DSH tool registry for the native tool bridge; this
+  // headless composition provides an empty one.
+  ctx.provide("tools", { schemas: () => [], execute: async () => ({ isError: false, value: null, content: [] }) });
   // The launcher provides this in a profile-launched process; the plugin reads
   // it instead of resolving a path against the directory `dsh` started in.
   ctx.provide("profileContext", { name: "probe-profile", home });

@@ -34,6 +34,8 @@ const finalText = process.env.DSH_FAKE_CODEX_FINAL ?? "fake-final-answer";
 const commandOutput = process.env.DSH_FAKE_CODEX_COMMAND_OUTPUT ?? "fake-command-output";
 const approvalTurns = Number(process.env.DSH_FAKE_CODEX_APPROVALS ?? 0);
 const questionTurns = Number(process.env.DSH_FAKE_CODEX_QUESTIONS ?? 0);
+/** How many turns call the first dynamic tool a thread froze, before completing. */
+const dynamicTurns = Number(process.env.DSH_FAKE_CODEX_DYNAMIC ?? 0);
 
 mkdirSync(stateDir, { recursive: true });
 
@@ -51,6 +53,7 @@ const blocking = new Map();
 let requestCounter = 0;
 let approvalsSent = 0;
 let questionsSent = 0;
+let dynamicCallsSent = 0;
 
 /**
  * The configuration the App Server reports it applied for one thread request.
@@ -71,6 +74,9 @@ function applied(params) {
     model: params.model ?? "luna",
     reasoningEffort: params.config?.model_reasoning_effort,
     developerInstructions: params.developerInstructions,
+    // Persisted with the thread so a later turn can call what it froze. Only a
+    // thread/start carries it, so a resume keeps the recalled value.
+    ...(params.dynamicTools === undefined ? {} : { dynamicTools: params.dynamicTools }),
     ...(params.approvalPolicy === undefined ? {} : { approvalPolicy: params.approvalPolicy }),
     sandbox: permissions !== undefined ? {
       type: "workspaceWrite",
@@ -145,6 +151,14 @@ function completeTurn(threadId, id) {
     scripted.push({ method: "item/tool/requestUserInput", params: { threadId, turnId: id, itemId: `item-${id}`,
       isBlocking: true, autoResolutionMs: null,
       questions: [{ id: "q1", header: "Fake", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }] }] } });
+  }
+  // A thread that froze dynamic tools can be asked to call the first one, so a
+  // test exercises the whole declaration -> callback -> answer path hermetically.
+  const frozen = recall(threadId)?.dynamicTools;
+  if (Array.isArray(frozen) && frozen.length > 0 && dynamicTurns > dynamicCallsSent) {
+    dynamicCallsSent += 1;
+    scripted.push({ method: "item/tool/call", params: { threadId, turnId: id, callId: `call-${id}`,
+      tool: frozen[0].name, arguments: { probe: id }, namespace: null } });
   }
   if (scripted.length === 0) return finish();
   let outstanding = scripted.length;
