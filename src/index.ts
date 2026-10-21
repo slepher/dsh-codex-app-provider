@@ -7,6 +7,7 @@ import { AppServer } from "./rpc.js";
 import type { AppServerSpawner, AppServerTimer } from "./process.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
+import { retireMainSessionSelection, type DefaultModelFace, type MainSessionRetirementDeps, type ProjectionsFace } from "./main-session.js";
 import { CODEX_OWNER_ID, CODEX_APP_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-working-directory";
@@ -34,6 +35,13 @@ export interface Config {
    * directory the Harness was launched in.
    */
   providerCwd?: string;
+  /**
+   * Whether top-level main Sessions may select this route. Default `false`:
+   * `codex-app` stays available to managed workflow children only, so the
+   * composer, `/model`, titles and `/compact` never start an external process
+   * unless the deployment opts in.
+   */
+  allowMainSession?: boolean;
 }
 
 export const Config: z<Config> = z.object({
@@ -41,6 +49,7 @@ export const Config: z<Config> = z.object({
   command: z.string().default("codex"),
   requestTimeoutMs: z.number().min(1).max(2_147_483_647).default(30_000),
   providerCwd: z.string().required(false),
+  allowMainSession: z.boolean().default(false),
 });
 
 export const inject = ["agents", "sessions", "llm", "workingDirectory"];
@@ -200,12 +209,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       attachments: ctx.get("attachments") as ProviderAttachmentSeam | undefined,
       logger: ctx.logger,
       providerCwd: resolve(config.providerCwd ?? defaultProviderCwd(ctx)),
+      allowMainSession: config.allowMainSession === true,
     });
     unregister = ctx.llm.registerAdapter([CODEX_APP_PROVIDER], provider);
     ctx.provide("codexToolGate", toolGate);
     ctx.provide("codexExecution", {
       read: nativeSessionId => provider!.readExecution(nativeSessionId),
       facts: nativeSessionId => provider!.facts(nativeSessionId),
+      // The workflow settings page keeps offering this route for child roles,
+      // so a Host consumer reads the catalog here even while the composer menu
+      // hides it behind `allowMainSession: false`.
+      catalog: () => provider!.catalogGroup(),
     });
     // The controlled thread handover stays a trusted-Host capability: ordinary
     // children receive neither this service nor arbitrary thread authority.
@@ -243,7 +257,44 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
     });
     unfilter = installCodexContextFilter(ctx);
+    // Withdrawing the route from main Sessions must release the selections that
+    // still point at it, or the Host blocks input with "Select model".
+    if (config.allowMainSession !== true) {
+      void retireMainSessionSelection(retirementDeps(ctx)).then(
+        changed => { if (changed) ctx.logger.warn("dsh-codex-app-provider: main-Session model selections were moved off the codex-app route"); },
+        error => { ctx.logger.warn("dsh-codex-app-provider: the saved main-Session selection was not retired: %s", messageOf(error)); },
+      );
+    }
   }, "dsh-codex-app-provider: execution lifecycle");
+}
+
+/**
+ * The optional Host capabilities one retirement pass reads.
+ *
+ * `agentDefaultModel` and `sessionProjections` are separate plugins in some
+ * compositions, so both are read structurally through `ctx.get` and skipped
+ * when absent instead of blocking this plugin's startup.
+ * @param ctx - the Host context carrying the optional services.
+ * @returns the retirement inputs, with every absent seam left undefined.
+ */
+function retirementDeps(ctx: Context): MainSessionRetirementDeps {
+  const defaultModel = ctx.get("agentDefaultModel") as Partial<DefaultModelFace> | undefined;
+  const projections = ctx.get("sessionProjections") as Partial<ProjectionsFace> | undefined;
+  return {
+    llm: ctx.llm,
+    sessions: ctx.sessions,
+    agents: ctx.agents,
+    defaultModel: typeof defaultModel?.currentSelection === "function" && typeof defaultModel.saveSelection === "function"
+      ? defaultModel as DefaultModelFace
+      : undefined,
+    projections: typeof projections?.stateOf === "function" ? projections as ProjectionsFace : undefined,
+    log: message => ctx.logger.warn("dsh-codex-app-provider: %s", message),
+  };
+}
+
+/** A message from any thrown value. */
+function messageOf(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }
 
 /**

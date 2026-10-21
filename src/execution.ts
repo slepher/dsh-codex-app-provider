@@ -45,6 +45,25 @@ export interface NativeExecutionUsage {
   reasoningOutputTokens: number | null;
 }
 
+/**
+ * One model this route's own catalog advertises, in the shape the workflow
+ * settings page renders. Host consumers read it to keep offering the route when
+ * the main-Session model menu hides it (`allowMainSession: false`).
+ */
+export interface NativeCatalogModel {
+  id: string;
+  name: string;
+  efforts: readonly { id: string; name: string }[];
+  defaultEffort?: string;
+}
+
+/** One provider group this route advertises for Host consumers. */
+export interface NativeCatalogGroup {
+  provider: string;
+  name: string;
+  models: readonly NativeCatalogModel[];
+}
+
 export interface NativeExecutionReader {
   /** Trusted Host access by exact native Session id; performs no resume or model request. */
   read(nativeSessionId: string): Promise<NativeExecution | undefined>;
@@ -54,6 +73,12 @@ export interface NativeExecutionReader {
    * this build cannot project them; performs no resume or model request.
    */
   facts?(nativeSessionId: string): Promise<readonly string[]>;
+  /**
+   * This route's own model catalog, independent of whether the main-Session
+   * menu offers it. Absent when this build cannot project it; performs no
+   * resume and no model request.
+   */
+  catalog?(): Promise<NativeCatalogGroup | undefined>;
 }
 
 declare module "@deepseek-ai/cordis" {

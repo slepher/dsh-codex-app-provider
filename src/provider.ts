@@ -53,6 +53,7 @@ import {
   toolCallNames,
 } from "./history.js";
 import { usageChunk, usageContextWindow } from "./usage.js";
+import type { NativeCatalogGroup } from "./execution.js";
 
 /** The provider route this plugin registers with DSH; the vocabulary lives in `browser-types`. */
 export { CODEX_APP_PROVIDER };
@@ -158,6 +159,16 @@ export interface CodexProviderDeps {
   logger: { warn(message: string): void };
   /** Deployment default cwd for the model catalog when no Session workspace applies. */
   providerCwd: string;
+  /**
+   * Whether the main-Session menu and request path may use this route.
+   *
+   * `false` is the plugin's configured default: only managed workflow children
+   * (requests carrying native execution inputs) run here, so the composer,
+   * `/model`, titles and `/compact` never start an external process by accident.
+   * Omitted means allowed, which keeps direct adapter constructions (tests,
+   * embeddings) behaving as before.
+   */
+  allowMainSession?: boolean;
 }
 
 interface TurnOutcome {
@@ -205,6 +216,10 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    // Hiding the catalog is also what removes the route from the composer model
+    // menu and from `modelAvailable`; managed children resolve models through
+    // `resolveModel`, which does not consult this method.
+    if (!this.mainSessionAllowed()) return [];
     const settings = await this.catalog();
     return settings.models.map(model => ({
       provider,
@@ -314,12 +329,65 @@ export class CodexProviderAdapter extends LlmAdapter {
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId);
     if (sessionId === undefined) throw new LlmError("Codex provider requires a DSH Session identity", "INVALID_REQUEST");
     if (this.closed) throw new LlmError("Codex provider is shutting down", "DISPOSED");
+    // The configured default reserves this route for managed workflow children:
+    // a top-level request never starts an external process, and an auxiliary or
+    // compaction call for a top-level Session stays inside DSH.
+    if (!this.mainSessionAllowed() && !this.managedRequest(options, sessionId)) {
+      if (options.purpose === undefined) {
+        throw new LlmError("The codex-app route is reserved for workflow child Sessions; enable allowMainSession to use it as a main-Session model", "MAIN_SESSION_DISABLED");
+      }
+      if (options.purpose === "compaction") {
+        throw new LlmError("The codex-app route cannot compact a main Session while allowMainSession is disabled", "MAIN_SESSION_DISABLED");
+      }
+      // A title/summary request degrades to the Host's own behaviour rather
+      // than paying for a `codex-aux:` process.
+      return;
+    }
     if (options.purpose !== undefined) {
       if (options.purpose === "compaction") await this.compactNativeThread(sessionId, signal);
       yield* this.streamAuxiliary(options, sessionId, signal);
       return;
     }
     yield* this.streamMain(options, sessionId, signal);
+  }
+
+  /** Whether the configured route may serve a top-level Session. Omitted means yes. */
+  private mainSessionAllowed(): boolean {
+    return this.deps.allowMainSession !== false;
+  }
+
+  /**
+   * Whether one request belongs to a managed child rather than a top-level
+   * Session, using the same authorized execution inputs the request path
+   * verifies. A malformed declaration is not a managed child.
+   */
+  private managedRequest(options: GenerateOptions, sessionId: string): boolean {
+    try {
+      return this.requestedExecution(options, this.deps.agents.get(sessionId)) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * This route's own model catalog for trusted Host consumers.
+   *
+   * Independent of the main-Session gate: the workflow settings page still has
+   * to offer `codex-app` models for child roles while the composer menu hides
+   * the route. Reads the same cached App Server catalog `resolveModel` uses.
+   */
+  async catalogGroup(): Promise<NativeCatalogGroup> {
+    const settings = await this.catalog();
+    return {
+      provider: CODEX_APP_PROVIDER,
+      name: "codex app",
+      models: settings.models.map(model => ({
+        id: model.model,
+        name: model.displayName,
+        efforts: model.supportedReasoningEfforts.map(effort => ({ id: effort.reasoningEffort, name: effort.reasoningEffort })),
+        ...(model.defaultReasoningEffort === undefined ? {} : { defaultEffort: model.defaultReasoningEffort }),
+      })),
+    };
   }
 
   /**
