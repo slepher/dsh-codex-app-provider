@@ -101,7 +101,7 @@ Add one entry to the profile's `cordis.patch.yml`. A deployment loads exactly on
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `stateDir` | string (absolute) | `<DSH_HOME>/state/<profile>/codex` | Where the plugin keeps its own records. A boot without a launcher profile falls back to `$DSH_HOME` (then `~/.dsh`) under the `default` profile name, never to the process's current directory. |
-| `command` | string | auto-detect | Executable run as the App Server (`<command> app-server --stdio`). Blank searches this system's `PATH` for a spawnable Codex and resolves a Windows npm shim to the JavaScript entry it launches; set it only to override detection. |
+| `command` | string | auto-detect | Executable run as the App Server (`<command> app-server --stdio`). Blank searches this system's `PATH` for a spawnable Codex; a Windows npm shim prefers the native `codex.exe` its package ships (hidden window, faster start) and only falls back to the JavaScript entry when no native binary exists. Set it only to override detection. |
 | `requestTimeoutMs` | integer, 1–2147483647 | `30000` | Per-request App Server timeout. |
 | `providerCwd` | string | the directory DSH was launched in | Working directory for model settings, and the fallback working directory for a Codex thread whose Session records none. |
 | `allowMainSession` | boolean | `false` | Whether a top-level Session may select and use this route. When `false`, the route is hidden from the model menu and refused for main-Session streams, and only managed workflow children run here. |
@@ -109,9 +109,12 @@ Add one entry to the profile's `cordis.patch.yml`. A deployment loads exactly on
 | `toolBridge.allow` | string[] | `cordis_inspect_list`, `cordis_inspect_query`, `plugin_manager`, `plugin_market`, `skill`, `read` | Exposure ceiling. The shipped set is `allow` ∩ the tools the main request presented ∩ the scoped `ctx.tools.schemas(agent)`; it never grants permission by itself. |
 
 The editable fields above (`command`, `allowMainSession`, `toolBridge.*`) are
-live: the package ships a browser half that registers the row configuration
-page, so they can be changed from **Plugins → dsh-codex-app-provider →
-Configure** without editing the profile patch. Writes go to the Loader entry
+live: the package ships a browser half that registers the configuration surfaces,
+so they can be changed from **Settings → Codex app** (or the plugin's Configure
+page) without editing the profile patch. The same page shows a **Check now**
+button: the Host resolves the executable, runs its `--version`, reads the App
+Server's model catalog and caches the answer; reopening the page reuses that
+cached answer, and only the button re-runs detection. Writes go to the Loader entry
 config; a new App Server runtime picks up `command`, and the main-session gate
 and bridge settings are read per decision. `stateDir`, `providerCwd` and
 `requestTimeoutMs` stay deployment inputs and need a plugin reload.

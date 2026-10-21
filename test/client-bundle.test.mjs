@@ -30,6 +30,7 @@ function loadBundle() {
   runInNewContext(source, { window, require: name => { throw new Error(`unexpected require ${name}`); } });
   const registrations = [];
   const localeRegistrations = [];
+  const rpcCalls = [];
   const form = formStub();
   const slots = {
     inject(_name, factory) { factory(); return () => {}; },
@@ -40,30 +41,49 @@ function loadBundle() {
     register(ns, copies) { localeRegistrations.push({ ns, copies }); return () => {}; },
     bind: ns => key => `[${ns}:${key}]`,
   };
+  const connection = {
+    rpc: {
+      call(path, method, payload) {
+        rpcCalls.push({ path, method, payload });
+        return Promise.resolve({
+          ok: true,
+          value: { checkedAt: 42, command: { program: "C:\\codex.exe", prefixArgs: [], source: "native" }, version: "codex-cli 9.9.9", models: ["m1"] },
+        });
+      },
+    },
+  };
   const ctx = {
-    effect(fn) { const dispose = fn(); return () => {}; },
+    effect(fn) { fn(); return () => {}; },
+    get(name) { assert.equal(name, "connection"); return connection; },
     inject(services, factory) {
       assert.deepEqual([...services].sort(), ["configForms", "slots"]);
-      factory({ ...ctx, slots, configForms, locale });
+      factory({ ...ctx, slots, configForms, locale, connection });
     },
     slots,
     configForms,
     locale,
+    connection,
   };
   const plugin = loaded.factory(name => {
-    if (name === "react") return { useState: () => [undefined, () => {}], useSyncExternalStore: (_subscribe, get) => get() };
+    if (name === "react") {
+      return {
+        useState: () => [undefined, () => {}],
+        useEffect: fn => { fn(); },
+        useSyncExternalStore: (_subscribe, get) => get(),
+      };
+    }
     if (name === "react/jsx-runtime") {
       const element = (type, props) => ({ type, props });
       return { jsx: element, jsxs: element, Fragment: null };
     }
     throw new Error(`unexpected module ${name}`);
   });
-  return { plugin, ctx, registrations, localeRegistrations, form };
+  return { plugin, ctx, registrations, localeRegistrations, form, rpcCalls };
 }
 
 test("the browser half registers its copy and every configuration surface", () => {
   const { plugin, ctx, registrations, localeRegistrations } = loadBundle();
-  assert.deepEqual([...plugin.inject].sort(), ["configForms", "locale", "slots"]);
+  assert.deepEqual([...plugin.inject].sort(), ["configForms", "connection", "locale", "slots"]);
   plugin.apply(ctx);
   assert.equal(localeRegistrations.length, 1);
   assert.equal(localeRegistrations[0].ns, "dsh-codex-app-provider");
@@ -83,14 +103,15 @@ test("the browser half registers its copy and every configuration surface", () =
   }
 });
 
-test("the component renders the Host form's accepted value", () => {
-  const { ctx, plugin, registrations } = loadBundle();
+test("the component renders the Host form and asks the Host to check availability", () => {
+  const { ctx, plugin, registrations, rpcCalls } = loadBundle();
   plugin.apply(ctx);
   const bundle = registrations.find(entry => entry.options.name === "plugins.bundle.config");
   const rendered = bundle.component({ view: "page" });
   assert.notEqual(rendered, undefined, "the page body renders");
   assert.equal(rendered.props.view, "page");
   assert.equal(bundle.component({ view: "summary" }).props.view, "summary");
+  assert.deepEqual(rpcCalls, [], "no check runs until the page body mounts");
 });
 
 test("the bundle and manifest present the client half to the shell", () => {
@@ -100,5 +121,6 @@ test("the bundle and manifest present the client half to the shell", () => {
   assert.equal(manifest.dsh.client.platform, "web");
   assert.ok(manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-ui-renderer"));
   assert.ok(manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-ui-settings"));
+  assert.ok(manifest.dsh.client.inject.includes("@deepseek-ai/dsh-client-connection"));
   assert.equal(manifest.exports["./client"].default, "./lib/client.js");
 });

@@ -101,14 +101,14 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 | 键 | 类型 | 默认值 | 含义 |
 |---|---|---|---|
 | `stateDir` | 绝对路径字符串 | `<DSH_HOME>/state/<profile>/codex` | 插件自有记录的存放目录。没有 launcher profile 时回落到 `$DSH_HOME`（再回落 `~/.dsh`）下的 `default` profile 名，绝不用进程当前目录。 |
-| `command` | 字符串 | 自动探测 | 作为 App Server 执行的程序（`<command> app-server --stdio`）。留空时在本机 `PATH` 上查找可用的 Codex；Windows 的 npm shim 会被解析成它启动的 JS 入口。仅用于覆盖探测结果。 |
+| `command` | 字符串 | 自动探测 | 作为 App Server 执行的程序（`<command> app-server --stdio`）。留空时在本机 `PATH` 上查找可用的 Codex；Windows 的 npm shim 优先解析到随包自带的原生 `codex.exe`（隐藏窗口、启动更快），没有原生二进制时才退回 JS 入口。仅用于覆盖探测结果。 |
 | `requestTimeoutMs` | 整数，1–2147483647 | `30000` | 单次 App Server 请求超时。 |
 | `providerCwd` | 字符串 | DSH 启动目录 | 模型设置的工作目录，也是 Session 未记录工作目录时 Codex thread 的回落目录。 |
 | `allowMainSession` | 布尔 | `false` | 顶层主会话是否可以选择并使用本路由。为 `false` 时路由从模型菜单隐藏、主会话请求被拒，只有受管 workflow child 在这里运行。 |
 | `toolBridge.enabled` | 布尔 | `false` | 把 allow 内的 DSH 工具作为原生 dynamic tool 暴露给 Codex，并经由 DSH 工具管线执行回调。声明冻结在新线程上，启用或更改选择需要新建 DSH 会话。 |
 | `toolBridge.allow` | 字符串数组 | `cordis_inspect_list`、`cordis_inspect_query`、`plugin_manager`、`plugin_market`、`skill`、`read` | 暴露上限。实际集合是 `allow` ∩ 主请求已呈现的工具 ∩ 当前作用域的 `ctx.tools.schemas(agent)`；配置本身不授予权限。 |
 
-以上可编辑字段（`command`、`allowMainSession`、`toolBridge.*`）都是 live 的：包内带有浏览器半，注册了行配置页，因此可以在 **插件 → dsh-codex-app-provider → 配置** 里直接修改，无需手改 profile patch。写入落到 Loader entry 配置；新的 App Server 运行时会读取新的 `command`，主会话门禁与工具桥在每次判定时读取当前值。`stateDir`、`providerCwd`、`requestTimeoutMs` 仍属部署输入，改动需要重载插件。
+以上可编辑字段（`command`、`allowMainSession`、`toolBridge.*`）都是 live 的：包内带有浏览器半，注册了配置界面，因此可以在 **设置 → Codex 应用**（或插件的 Configure 页）里直接修改，无需手改 profile patch。同一页面还有 **主动检测** 按钮：Host 会解析可执行文件、运行 `--version`、读取 App Server 模型目录并缓存结果；再次打开页面复用缓存，只有按钮会强制重新检测。写入落到 Loader entry 配置；新的 App Server 运行时会读取新的 `command`，主会话门禁与工具桥在每次判定时读取当前值。`stateDir`、`providerCwd`、`requestTimeoutMs` 仍属部署输入，改动需要重载插件。
 
 `stateDir` 下的持久化布局：
 

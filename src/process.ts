@@ -82,7 +82,7 @@ export function nodeSpawner(): AppServerSpawner {
     spawn(spec) {
       const [program, ...args] = spec.argv;
       if (program === undefined || program === "") throw new Error("App Server command must not be empty");
-      const child = spawn(program, args, { cwd: spec.cwd, stdio: ["pipe", "pipe", "pipe"], env: spec.env });
+      const child = spawn(program, args, { cwd: spec.cwd, stdio: ["pipe", "pipe", "pipe"], env: spec.env, windowsHide: true });
       let exited = false;
       let terminated = false;
       let killTimer: NodeJS.Timeout | undefined;

@@ -10,11 +10,12 @@
  * @module dsh-codex-app-provider/client/ProviderConfigForm
  */
 
-import { useSyncExternalStore, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useSyncExternalStore, useState, type CSSProperties, type ReactNode } from "react";
 
 import type { PropsLocale } from "@deepseek-ai/dsh-client-ui-slots";
 import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-settings/client";
 import type { PluginConfigViewProps } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
+import type { CodexAvailability } from "../check-types.js";
 import { en, type CodexAppCopy } from "./locales.js";
 
 /** The provider's editable entry fields, as the Host resolves them. */
@@ -23,6 +24,9 @@ export interface ProviderConfigFields {
   allowMainSession?: boolean;
   toolBridge?: { enabled?: boolean; allow?: readonly string[] };
 }
+
+/** The Host check action: `force` re-runs detection instead of returning the cache. */
+export type CheckAvailability = (force: boolean) => Promise<CodexAvailability>;
 
 /** Locale-bound translate function for this package's copy keys. */
 export type Translate = (key: keyof CodexAppCopy) => string;
@@ -60,6 +64,11 @@ const saveButton: CSSProperties = {
   border: "0.5px solid transparent", background: "var(--dsw-alias-state-business-primary)",
   color: "var(--dsw-alias-label-primary-foreground)",
 };
+const secondaryButton: CSSProperties = {
+  height: 28, padding: "0 12px", borderRadius: 8, cursor: "pointer", fontSize: 12,
+  border: "0.5px solid var(--dsw-alias-border-l3)", background: "transparent",
+  color: "var(--dsw-alias-label-primary)",
+};
 
 /** Resolve one copy key, falling back to English when no locale is bound. */
 function copy(t: Translate | undefined): Translate {
@@ -74,7 +83,7 @@ function copy(t: Translate | undefined): Translate {
  * @param form - the Host form for this entry.
  * @returns the slot component.
  */
-export function withForm(form: ConfigForm<ProviderConfigFields>): (props: SurfaceProps) => ReactNode {
+export function withForm(form: ConfigForm<ProviderConfigFields>, check?: CheckAvailability): (props: SurfaceProps) => ReactNode {
   return function ProviderConfigBound(props: SurfaceProps): ReactNode {
     const t = copy(props.t);
     const snapshot = useSyncExternalStore(
@@ -85,7 +94,7 @@ export function withForm(form: ConfigForm<ProviderConfigFields>): (props: Surfac
     const provided = props.form === undefined
       ? bound
       : { state: props.form.state as FormLike["state"], mutate: props.form.mutate as FormLike["mutate"] };
-    return <ProviderConfigForm view={props.view} form={provided} t={t} />;
+    return <ProviderConfigForm view={props.view} form={provided} t={t} check={check} />;
   };
 }
 
@@ -95,10 +104,11 @@ export function withForm(form: ConfigForm<ProviderConfigFields>): (props: Surfac
  * A settings page receives the section owner props rather than a form, so this
  * wrapper ignores them and renders the page body.
  * @param form - the Host form for this entry.
+ * @param check - the Host availability check.
  * @returns the settings-section component.
  */
-export function withFormAsPage(form: ConfigForm<ProviderConfigFields>): (props: Partial<PropsLocale<"dsh-codex-app-provider">>) => ReactNode {
-  const Bound = withForm(form);
+export function withFormAsPage(form: ConfigForm<ProviderConfigFields>, check?: CheckAvailability): (props: Partial<PropsLocale<"dsh-codex-app-provider">>) => ReactNode {
+  const Bound = withForm(form, check);
   return function ProviderConfigSettingsPage(props: Partial<PropsLocale<"dsh-codex-app-provider">>): ReactNode {
     return <Bound view="page" t={props.t} />;
   };
@@ -106,33 +116,34 @@ export function withFormAsPage(form: ConfigForm<ProviderConfigFields>): (props: 
 
 /**
  * The entry component: a one-liner in the summary view, the form in the page view.
- * @param props - the view the page asks for, its Host form and copy.
+ * @param props - the view the page asks for, its Host form, copy and check action.
  */
-export function ProviderConfigForm(props: { view?: "summary" | "page"; form?: FormLike; t?: Translate }): ReactNode {
+export function ProviderConfigForm(props: { view?: "summary" | "page"; form?: FormLike; t?: Translate; check?: CheckAvailability }): ReactNode {
   const t = copy(props.t);
   if (props.view === "summary") return t("summary");
-  return <ProviderConfigPage form={props.form} t={t} />;
+  return <ProviderConfigPage form={props.form} t={t} check={props.check} />;
 }
 
 /**
  * The editable page body.
- * @param props - the Host form for this entry and the copy.
+ * @param props - the Host form for this entry, the copy and the check action.
  */
-function ProviderConfigPage({ form, t }: { form?: FormLike; t: Translate }): ReactNode {
+function ProviderConfigPage({ form, t, check }: { form?: FormLike; t: Translate; check?: CheckAvailability }): ReactNode {
   if (form === undefined) return <p style={hint}>{t("missing")}</p>;
   if (form.state.status === "loading") return <p style={hint}>{t("loading")}</p>;
   if (form.state.status === "unavailable") return <p style={hint}>{t("unavailable")}</p>;
   const value = (form.state.value ?? {}) as ProviderConfigFields;
   const initialAllow = (value.toolBridge?.allow ?? []).join(", ");
-  return <ProviderConfigFieldsForm key={`${form.state.revision ?? "none"}:${initialAllow}`} form={form} value={value} initialAllow={initialAllow} t={t} />;
+  return <ProviderConfigFieldsForm key={`${form.state.revision ?? "none"}:${initialAllow}`} form={form} value={value} initialAllow={initialAllow} t={t} check={check} />;
 }
 
 /** The staged editor; remounted when the accepted revision or tool list changes. */
-function ProviderConfigFieldsForm({ form, value, initialAllow, t }: {
+function ProviderConfigFieldsForm({ form, value, initialAllow, t, check }: {
   form: FormLike;
   value: ProviderConfigFields;
   initialAllow: string;
   t: Translate;
+  check?: CheckAvailability;
 }): ReactNode {
   const [command, setCommand] = useState(value.command ?? "");
   const [allowMainSession, setAllowMainSession] = useState(value.allowMainSession === true);
@@ -140,8 +151,27 @@ function ProviderConfigFieldsForm({ form, value, initialAllow, t }: {
   const [allowText, setAllowText] = useState(initialAllow);
   const [status, setStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [availability, setAvailability] = useState<CodexAvailability | undefined>(undefined);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
   const writable = form.state.writable;
   const disabled = !writable || saving;
+
+  /** Ask the Host for the cached availability answer, or force a fresh one. */
+  const runCheck = async (force: boolean): Promise<void> => {
+    if (check === undefined) return;
+    setChecking(true);
+    setCheckError(null);
+    try {
+      setAvailability(await check(force));
+    } catch (error) {
+      setCheckError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChecking(false);
+    }
+  };
+  // The Host caches, so this costs a process only on the first page open.
+  useEffect(() => { void runCheck(false); }, []);
 
   /** Stage every changed field as one atomic mutation. */
   const save = async (): Promise<void> => {
@@ -182,7 +212,7 @@ function ProviderConfigFieldsForm({ form, value, initialAllow, t }: {
         <label style={label} htmlFor="dsh-codex-app-command">{t("commandLabel")}</label>
         <input
           id="dsh-codex-app-command" style={input} value={command} disabled={disabled}
-          placeholder="codex" onChange={event => setCommand(event.target.value)}
+          placeholder={t("commandPlaceholder")} onChange={event => setCommand(event.target.value)}
         />
         <span style={hint}>{t("commandHint")}</span>
       </div>
@@ -221,6 +251,35 @@ function ProviderConfigFieldsForm({ form, value, initialAllow, t }: {
           onChange={event => setAllowText(event.target.value)}
         />
         <span style={hint}>{t("allowHint")}</span>
+      </div>
+
+      <div style={field}>
+        <div style={{ ...toggleRow, justifyContent: "space-between" }}>
+          <label style={{ ...label, marginBottom: 0 }}>{t("checkTitle")}</label>
+          <button
+            type="button"
+            style={{ ...secondaryButton, opacity: checking ? 0.6 : 1 }}
+            disabled={checking || check === undefined}
+            onClick={() => { void runCheck(true); }}
+          >
+            {checking ? t("checkRunning") : t("checkRun")}
+          </button>
+        </div>
+        {availability === undefined ? <span style={hint}>{t("checkNever")}</span> : (
+          <div style={{ ...hint, marginTop: 8 }}>
+            <div>{t("checkSource")}: <code>{availability.command.source}</code></div>
+            <div>{t("checkProgram")}: <code>{[availability.command.program, ...availability.command.prefixArgs].join(" ")}</code></div>
+            {availability.version === undefined ? null : <div>{t("checkVersion")}: <code>{availability.version}</code></div>}
+            {availability.models === undefined ? null : <div>{t("checkModels")}: <code>{availability.models.join(", ")}</code></div>}
+            {availability.error === undefined ? null : (
+              <div style={{ color: "var(--dsw-alias-state-error-primary)" }}>{availability.error}</div>
+            )}
+            <div>{t("checkAt")}: {new Date(availability.checkedAt).toLocaleString()}</div>
+          </div>
+        )}
+        {checkError === null ? null : (
+          <div style={{ ...hint, color: "var(--dsw-alias-state-error-primary)" }}>{checkError}</div>
+        )}
       </div>
 
       <div style={saveRow}>

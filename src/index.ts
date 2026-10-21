@@ -16,6 +16,8 @@ import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
 import type {} from "@deepseek-ai/dsh-tools";
 import { DEFAULT_BRIDGED_TOOLS, ToolBridge } from "./tool-bridge.js";
 import { resolveCodexCommand } from "./command.js";
+import { createAvailabilityProbe } from "./check.js";
+import { installCodexAppRpc } from "./check-rpc.js";
 import { fileURLToPath } from "node:url";
 // Type-only: the Loader's `loader/volatile-update` instance event.
 import type {} from "@deepseek-ai/cordis-plugin-loader";
@@ -290,6 +292,13 @@ export function apply(ctx: Context, config?: Config): void {
       toolBridge,
     });
     backend.attachToolBridge({ call: request => provider!.handleToolCall(request) });
+    // The settings page asks the Host whether Codex is usable here; the answer is
+    // cached after the first check, and the catalog read reuses the provider's own
+    // App Server transport (hidden by the deployment's process service).
+    installCodexAppRpc(ctx, createAvailabilityProbe({
+      configured: () => entry.command.get(),
+      listModels: async () => (await provider!.catalogGroup()).models.map(model => model.id),
+    }));
     unregister = ctx.llm.registerAdapter([CODEX_APP_PROVIDER], provider);
     ctx.provide("codexToolGate", toolGate);
     ctx.provide("codexExecution", {

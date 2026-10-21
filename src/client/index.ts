@@ -22,7 +22,10 @@ import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
 import type { ConfigForm } from "@deepseek-ai/dsh-client-ui-settings/client";
 // Type-only: the plugin manager declares the slots and the props they receive.
 import type {} from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
-import { withForm, withFormAsPage, type ProviderConfigFields } from "./ProviderConfigForm.js";
+// Type-only: the authenticated browser channel the check action rides.
+import type { ConnectionHandle } from "@deepseek-ai/dsh-client-connection/client";
+import { withForm, withFormAsPage, type ProviderConfigFields, type CheckAvailability } from "./ProviderConfigForm.js";
+import type { CodexAvailability } from "../check-types.js";
 import { en, zh } from "./locales.js";
 
 declare module "@deepseek-ai/dsh-client-ui-slots" {
@@ -31,8 +34,8 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
   }
 }
 
-/** Services this half reads: slot registration, copy and the Host config form. */
-export const inject = ["slots", "configForms", "locale"];
+/** Services this half reads: slot registration, copy, the config form and the channel. */
+export const inject = ["slots", "configForms", "locale", "connection"];
 
 /** The locale namespace and package name; the bundle page keys itself by the name. */
 const NAMESPACE = "dsh-codex-app-provider";
@@ -40,17 +43,31 @@ const NAMESPACE = "dsh-codex-app-provider";
 const ROW_ID = "dsh-codex-app-provider";
 /** The Settings page id; unique among settings sections. */
 const SECTION_ID = "codex-app-provider";
+/** The Host's one check channel. */
+const CHANNEL = "/codex-app";
 
 /** Register the copy, the bundle section, the row page and a Settings page. */
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NAMESPACE, { zh, en }), "dsh-codex-app-provider: locales");
   const t = ctx.locale.bind(NAMESPACE);
+  const connection = ctx.get("connection") as ConnectionHandle;
+  // The Host caches its answer, so the page's first read is the only one that may
+  // start a process; the explicit button passes force to refresh it.
+  const check: CheckAvailability = async force => {
+    // The channel is typed by this plugin's own envelope; the shared client call
+    // carries the response facts without knowing this action's value type.
+    const result = await connection.rpc.call(CHANNEL, "check", { force }) as
+      | { ok: true; value: CodexAvailability }
+      | { ok: false; error: { message: string } };
+    if (!result.ok) throw new Error(result.error.message);
+    return result.value;
+  };
   ctx.inject(["configForms", "slots"], scope => {
     // The settings service keys a form by the profile entry id, which is the row
     // id this package's patch declares.
     const form = scope.configForms.get<ProviderConfigFields>(ROW_ID);
-    const bound = withForm(form as ConfigForm<ProviderConfigFields>);
-    const asPage = withFormAsPage(form as ConfigForm<ProviderConfigFields>);
+    const bound = withForm(form as ConfigForm<ProviderConfigFields>, check);
+    const asPage = withFormAsPage(form as ConfigForm<ProviderConfigFields>, check);
     scope.slots.inject("plugins.bundle.config", () => scope.slots.register({
       name: "plugins.bundle.config",
       key: NAMESPACE,
