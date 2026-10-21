@@ -275,4 +275,6 @@ allowMainSession: z.boolean().default(false),
 
 **补充（2026-10-21 晚）：配置入口与 live 字段。** DSH 插件页不会从 Loader Config schema 自动生成配置表单：行配置必须由插件自己的浏览器半注册 `plugins.row.config`（键 `<包名>#<row id>`），且 settings 服务只收录含 `.volatile()` 字段的 entry（`volatileForm` 为空即跳过）。因此本轮把 `command`、`allowMainSession`、`toolBridge` 四个字段改为 volatile，并新增浏览器半（`src/client/`、`lib/client.js`、`dsh.client` 清单）注册行配置页；宿主在每次判定时读取当前值（`command` 在创建新运行时读取），主会话关闭时通过 `loader/volatile-update` 重新执行选择回退。`stateDir`/`providerCwd`/`requestTimeoutMs` 保持部署输入、需要重载。provider 测试增至 169 项（新增 client bundle 2 项），仍零新增失败。
 
+**补充（2026-10-22）：`command` 改为自动探测。** 新增 `src/command.ts` 的 `resolveCodexCommand()`：显式配置优先；否则在本机 `PATH` 上查找 `codex`/`codex.exe`，Windows 上若只找到 npm 的 `.cmd`/`.bat` shim，则读取其启动行、用当前 Node 运行它指向的 `codex.js`（Node 无法直接 spawn `.cmd`）。都找不到时回退到裸 `codex` 并在启动时告警，只有这种情况（或需要覆盖已安装版本）才需要用户填写 `command`。本机实测解析结果：`node.exe + ...\@openai\codex\bin\codex.js`（source=npm-shim）。新增 6 项解析测试；provider 全量 176 项、零新增失败。
+
 **仍未覆盖**：真实 DSH 文件夹安装与 live 验收，`dsh.compatibility.dshReleases` 未标记 compatible（阻塞见 `DSH-UPGRADE-PLAN.zh-CN.md` §7）；重命名未写迁移器；Handoff 类型的 `approvalsReviewer` 漂移未修。
