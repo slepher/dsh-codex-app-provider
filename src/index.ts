@@ -7,7 +7,7 @@ import { AppServer } from "./rpc.js";
 import type { AppServerSpawner, AppServerTimer } from "./process.js";
 import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
-import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
+import { CODEX_OWNER_ID, CODEX_APP_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-working-directory";
 import { CodexGateBridge } from "./tool-gate.js";
@@ -201,7 +201,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       logger: ctx.logger,
       providerCwd: resolve(config.providerCwd ?? defaultProviderCwd(ctx)),
     });
-    unregister = ctx.llm.registerAdapter([CODEX_PROVIDER], provider);
+    unregister = ctx.llm.registerAdapter([CODEX_APP_PROVIDER], provider);
     ctx.provide("codexToolGate", toolGate);
     ctx.provide("codexExecution", {
       read: nativeSessionId => provider!.readExecution(nativeSessionId),

@@ -76,7 +76,7 @@ const methods = (fixture, method) => fixture.hub.servers.flatMap(server => serve
 
 const user = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
 const codexAssistant = (id, text, threadId) => ({ id, role: "assistant", content: [{ type: "text", text }],
-  source: { kind: "model", provider: "codex", model: "sup-model", replayState: { response: { threadId, turnId: "turn-old", input: "u0" } } } });
+  source: { kind: "model", provider: "codex-app", model: "sup-model", replayState: { response: { threadId, turnId: "turn-old", input: "u0" } } } });
 
 /** Create the opening record and hand its thread to the reserved successor. */
 async function handedOver(fixture, request = {}) {
@@ -100,7 +100,7 @@ function adapterFor(fixture, { execution, model = "def-model", reasoningEffort =
   return { adapter, agent };
 }
 
-const options = (messages, extra = {}) => ({ provider: "codex", model: "def-model", reasoningEffort: "medium", sessionId: "continue", messages, ...extra });
+const options = (messages, extra = {}) => ({ provider: "codex-app", model: "def-model", reasoningEffort: "medium", sessionId: "continue", messages, ...extra });
 
 async function waitFor(condition, label) {
   for (let attempt = 0; attempt < 5_000; attempt++) {

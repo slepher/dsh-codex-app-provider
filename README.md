@@ -4,7 +4,7 @@
 
 Run the Codex CLI App Server as a native DSH model route, with its own executions recorded in the DSH Session log.
 
-`dsh-codex-app-provider` is a single DSH Host plugin. It registers the `codex` LLM adapter, carries Codex's own approvals and questions into the DSH conversation surfaces, persists what Codex executed into the DSH Session log, and publishes the Host capabilities that describe a Codex thread. It ships no browser UI: child-session panels belong to `dsh-subagent-ui-sidepanel`, and role/profile policy belongs to `dsh-workflow-kit`.
+`dsh-codex-app-provider` is a single DSH Host plugin. It registers the `codex-app` LLM adapter, carries Codex's own approvals and questions into the DSH conversation surfaces, persists what Codex executed into the DSH Session log, and publishes the Host capabilities that describe a Codex thread. It ships no browser UI: child-session panels belong to `dsh-subagent-ui-sidepanel`, and role/profile policy belongs to `dsh-workflow-kit`.
 
 - [What it provides](#what-it-provides)
 - [Requirements](#requirements)
@@ -25,7 +25,7 @@ Run the Codex CLI App Server as a native DSH model route, with its own execution
 
 ```
 DSH native Session / native child Agent
-  → LLM route: codex
+  → LLM route: codex-app
   → dsh-codex-app-provider (Host plugin)
     → provider adapter (models, requests, events, approvals, questions)
     → internal backend (App Server RPC, thread/turn state, store, recovery)
@@ -35,9 +35,9 @@ DSH native Session / native child Agent
 
 | Surface | What it is |
 |---|---|
-| `codex` LLM adapter | The installed Codex runtime as a DSH provider: model catalog, request conversion, streamed events, token usage, cancellation. |
+| `codex-app` LLM adapter | The installed Codex runtime as a DSH provider: model catalog, request conversion, streamed events, token usage, cancellation. |
 | Context filter | Removes DSH-injected context (system/developer messages, runtime context, skill catalog, already-imported execution facts) from requests sent to Codex. |
-| Delegation | Owned by DSH core: `ctx.subagents` continuable children, with `dsh-workflow-kit` owning roles and acceptance. This plugin carries their execution when they run on the `codex` route. |
+| Delegation | Owned by DSH core: `ctx.subagents` continuable children, with `dsh-workflow-kit` owning roles and acceptance. This plugin carries their execution when they run on the `codex-app` route. |
 | Approval / question bridge | Codex keeps its own permission judgment; its approval and question requests are forwarded to `ctx.approval` and `ctx.userQuestions`, and decline fail-closed when no answerer is composed. |
 | Execution facts | Codex executes its own tools, so the DSH log would otherwise be blind to it. Each executed step is committed to the Session as a sourced `user/message` event, idempotently. |
 | `ctx.codexExecution` | Read-only native execution facts for trusted Host consumers; performs no resume and no model request. |
@@ -112,7 +112,7 @@ Persistence layout under `stateDir`:
 
 ## Using Codex as a model route
 
-- The plugin registers the provider id `codex`. Select it per Session in DSH as usual; the main Session may switch model and effort freely, while a child created with fixed execution inputs keeps them.
+- The plugin registers the provider id `codex-app`. Select it per Session in DSH as usual; the main Session may switch model and effort freely, while a child created with fixed execution inputs keeps them.
 - The model catalog is read from the installed Codex runtime (`config/read` plus a paged `model/list`, cached for 30 seconds), so the models and reasoning efforts you can pick are exactly what that Codex build advertises. There is no model list in this repository.
 - Images and mentions travel with the request when the Codex model advertises the input modality.
 - Approval requests raised by Codex are forwarded to the DSH approval surface (`allowed-once` → accept, `cancelled` → cancel, everything else including no answerer → decline). Structured questions go to `ctx.userQuestions`. Missing services fail closed; the plugin never fabricates consent.
@@ -130,7 +130,7 @@ through the core:
 - one-shot and continuable children: the `subagent` / `subagent_fork` tools
   (`ctx.subagents.startActivation`), with a message/interrupt/list control
   surface for the continuable ones;
-- a child that runs on the `codex` route: name the provider in the child's
+- a child that runs on the `codex-app` route: name the provider in the child's
   `agentOptions`, and its per-turn execution facts, usage and reports stay
   readable through `ctx.codexExecution.read(childSessionId)`.
 

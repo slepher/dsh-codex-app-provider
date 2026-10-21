@@ -19,7 +19,7 @@ import * as plugin from "../lib/index.js";
  */
 const FAKE = fileURLToPath(new URL("./fake-codex-app-server.mjs", import.meta.url));
 const vehicle = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
-const options = (sessionId, messages, extra = {}) => ({ provider: "codex", model: "luna", reasoningEffort: "medium", sessionId, messages, ...extra });
+const options = (sessionId, messages, extra = {}) => ({ provider: "codex-app", model: "luna", reasoningEffort: "medium", sessionId, messages, ...extra });
 
 async function collect(iterable) {
   const chunks = [];

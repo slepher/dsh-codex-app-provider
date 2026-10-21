@@ -41,7 +41,7 @@ export function apply(ctx) {
     // The shipped layer is synthetic: one reviewer role per profile, and a
     // resolver that composes the role instructions captured at dispatch time.
     const builtin = Object.fromEntries(Object.entries(efforts).map(([role, reasoningEffort]) => [role.toLowerCase(), {
-      roles: { reviewer: { provider: "codex", model, reasoningEffort } },
+      roles: { reviewer: { provider: "codex-app", model, reasoningEffort } },
     }]));
     const catalog = new WorkflowConfiguration(builtin,
       () => `Your role marker is ${marker}. Reply with only this marker when asked. Do not run tools.`);

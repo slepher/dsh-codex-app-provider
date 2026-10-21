@@ -2,6 +2,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Message } from "@deepseek-ai/dsh-llm";
 
+import { CODEX_APP_PROVIDER } from "./browser-types.js";
 import { isExecutionFactId } from "./facts.js";
 
 const INJECTED_FORMS = new Set(["instructions", "catalog", "snapshot"]);
@@ -78,7 +79,7 @@ export function installCodexContextFilter(ctx: Context): () => void {
   return ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
     const decision = await next();
     if (decision.kind !== "enter" || signal.aborted) return decision;
-    if (selectedProvider(ctx, agent) !== "codex") return decision;
+    if (selectedProvider(ctx, agent) !== CODEX_APP_PROVIDER) return decision;
     const messages = decision.messages.filter(isCodexVisible);
     return messages.length === decision.messages.length ? decision : { ...decision, messages };
   });

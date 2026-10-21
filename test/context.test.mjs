@@ -30,7 +30,7 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
     { id: "checkpoint", role: "user", content: [{ type: "text", text: "summary" }], source: { kind: "compact-checkpoint", compactionId: "c1" } },
     { id: "invoked-skill", role: "user", content: [{ type: "text", text: "skill body" }], source: { kind: "skill-invocation", name: "demo", form: "instructions" } },
   ];
-  const codex = { id: "codex", options: { provider: "codex" }, session: { id: "s1" } };
+  const codex = { id: "codex", options: { provider: "codex-app" }, session: { id: "s1" } };
   const decision = await preStep({ agent: codex, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [...injected, ...kept] }));
   assert.deepEqual(decision.messages.map(message => message.id), ["user", "notice", "checkpoint", "invoked-skill"]);
 
@@ -39,7 +39,7 @@ test("drops DSH-injected context from Codex steps only and keeps task input", as
   assert.equal(untouched.messages.length, 10, "other providers keep their injected context");
   const sameArray = untouched.messages;
 
-  projections.stateOf = () => ({ lastUsed: null, pending: { provider: "codex", model: "x" } });
+  projections.stateOf = () => ({ lastUsed: null, pending: { provider: "codex-app", model: "x" } });
   const pending = await preStep({ agent: other, signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [...injected, ...kept] }));
   assert.deepEqual(pending.messages.map(message => message.id), ["user", "notice", "checkpoint", "invoked-skill"], "a pending Codex selection wins over the configured route");
 

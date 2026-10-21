@@ -4,7 +4,7 @@
 
 把 Codex CLI App Server 作为 DSH 原生模型路由运行，并把 Codex 自己的执行记录进 DSH Session 日志。
 
-`dsh-codex-app-provider` 是一个 DSH Host 插件。它注册 `codex` LLM adapter，把 Codex 自己的审批与提问接进 DSH 的交互面，把 Codex 实际执行的内容写入 DSH Session 日志，并发布描述 Codex thread 的 Host 能力。它不含浏览器界面：子会话面板归 `dsh-subagent-ui-sidepanel`，角色/profile 策略归 `dsh-workflow-kit`。
+`dsh-codex-app-provider` 是一个 DSH Host 插件。它注册 `codex-app` LLM adapter，把 Codex 自己的审批与提问接进 DSH 的交互面，把 Codex 实际执行的内容写入 DSH Session 日志，并发布描述 Codex thread 的 Host 能力。它不含浏览器界面：子会话面板归 `dsh-subagent-ui-sidepanel`，角色/profile 策略归 `dsh-workflow-kit`。
 
 - [提供什么](#提供什么)
 - [环境要求](#环境要求)
@@ -25,7 +25,7 @@
 
 ```
 DSH 原生 Session / 原生 child Agent
-  → LLM 路由：codex
+  → LLM 路由：codex-app
   → dsh-codex-app-provider（Host 插件）
     → provider adapter（模型、请求、事件、审批、提问）
     → 内部 backend（App Server RPC、thread/turn 状态、存储、恢复）
@@ -35,9 +35,9 @@ DSH 原生 Session / 原生 child Agent
 
 | 能力面 | 说明 |
 |---|---|
-| `codex` LLM adapter | 把安装的 Codex 运行时作为 DSH provider：模型目录、请求转换、流式事件、token 用量、取消。 |
+| `codex-app` LLM adapter | 把安装的 Codex 运行时作为 DSH provider：模型目录、请求转换、流式事件、token 用量、取消。 |
 | 上下文过滤器 | 从发给 Codex 的请求里剔除 DSH 注入的上下文（system/developer 消息、runtime context、skill catalog、已导入的执行事实）。 |
-| 委派 | 归 DSH 核心：`ctx.subagents` 的可续 child；角色与验收归 `dsh-workflow-kit`。这些 child 走 `codex` 路由时，其执行由本插件承载。 |
+| 委派 | 归 DSH 核心：`ctx.subagents` 的可续 child；角色与验收归 `dsh-workflow-kit`。这些 child 走 `codex-app` 路由时，其执行由本插件承载。 |
 | 审批/提问桥接 | 权限判断仍归 Codex；它发出的审批与提问转发到 `ctx.approval` 与 `ctx.userQuestions`，没有应答者时按 fail-closed 拒绝。 |
 | 执行事实 | Codex 自己执行工具，否则 DSH 日志对这段执行是盲的；每个已执行步骤都以带来源的 `user/message` 事件写入 Session，且可重放而不会重复。 |
 | `ctx.codexExecution` | 给受信 Host 消费者的只读原生执行事实；不做 resume，也不发模型请求。 |
@@ -112,7 +112,7 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 
 ## 把 Codex 作为模型路由使用
 
-- 插件注册的 provider id 是 `codex`。在 DSH 中按会话选择即可；主 Session 可以自由切换模型与 effort，而以固定执行输入创建的 child 会保持创建时的配置。
+- 插件注册的 provider id 是 `codex-app`。在 DSH 中按会话选择即可；主 Session 可以自由切换模型与 effort，而以固定执行输入创建的 child 会保持创建时的配置。
 - 模型目录来自安装的 Codex 运行时（`config/read` 加分页 `model/list`，缓存 30 秒），因此可选模型与 reasoning effort 就是该 Codex 构建对外声明的那一套。本仓库不维护模型清单。
 - 当 Codex 模型声明支持相应输入模态时，图片与 mention 随请求一起传递。
 - Codex 发出的审批请求转发到 DSH 审批面（`allowed-once` → accept，`cancelled` → cancel，其余情况包含没有应答者 → decline）。结构化提问走 `ctx.userQuestions`。服务缺失时 fail-closed，插件不伪造同意。
@@ -126,7 +126,7 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 
 - 一次性与可续 child：`subagent` / `subagent_fork` 工具（`ctx.subagents.startActivation`），可续的那些配一套
   发消息 / 中断 / 列举的控制面；
-- 走 `codex` 路由的 child：在 child 的 `agentOptions` 里指定 provider，其逐轮执行事实、用量与报告仍可通过
+- 走 `codex-app` 路由的 child：在 child 的 `agentOptions` 里指定 provider，其逐轮执行事实、用量与报告仍可通过
   `ctx.codexExecution.read(childSessionId)` 读取。
 
 具体有哪些控制工具取决于 composition —— 若 profile 同时加载 Agent Teams，`send_message`、`list_agents`、

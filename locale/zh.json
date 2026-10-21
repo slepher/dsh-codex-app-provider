@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Codex 原生提供方",
-    "description": "把 Codex 作为 DSH 原生提供方运行：会话后端、执行事实与 codex_workers 工具。"
+    "description": "把 Codex app-server 作为 codex-app DSH 模型路由运行：会话后端、执行事实与 Host 能力。"
   }
 }

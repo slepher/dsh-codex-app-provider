@@ -33,7 +33,7 @@ import type {
   UserInputQuestion,
   UserInputRequest,
 } from "./browser-types.js";
-import { CODEX_PROVIDER } from "./browser-types.js";
+import { CODEX_APP_PROVIDER } from "./browser-types.js";
 import type { ApprovalOutcome } from "@deepseek-ai/dsh-user-approval/types";
 import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
 import { factMessage, factMessages, importedFactIds } from "./facts.js";
@@ -55,7 +55,7 @@ import {
 import { usageChunk, usageContextWindow } from "./usage.js";
 
 /** The provider route this plugin registers with DSH; the vocabulary lives in `browser-types`. */
-export { CODEX_PROVIDER };
+export { CODEX_APP_PROVIDER };
 /** Owner identity of every native Session this provider records. */
 export const CODEX_OWNER_ID = "dsh-codex-provider";
 const OWNER_ID = CODEX_OWNER_ID;
@@ -189,7 +189,7 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: "Codex" };
+    return { id: provider, name: "codex app" };
   }
 
   /**
@@ -310,7 +310,7 @@ export class CodexProviderAdapter extends LlmAdapter {
   }
 
   private async *streamInternal(options: GenerateOptions, signal: AbortSignal): AsyncIterable<StreamChunk> {
-    if (options.provider !== CODEX_PROVIDER) throw new LlmError(`Unsupported provider route: ${options.provider}`, "NO_ADAPTER");
+    if (options.provider !== CODEX_APP_PROVIDER) throw new LlmError(`Unsupported provider route: ${options.provider}`, "NO_ADAPTER");
     const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId);
     if (sessionId === undefined) throw new LlmError("Codex provider requires a DSH Session identity", "INVALID_REQUEST");
     if (this.closed) throw new LlmError("Codex provider is shutting down", "DISPOSED");

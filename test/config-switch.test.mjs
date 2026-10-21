@@ -74,7 +74,7 @@ async function waitFor(condition, label) {
 }
 
 const user = (id, text) => ({ id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
-const options = (sessionId, messages, extra = {}) => ({ provider: "codex", model: "luna", reasoningEffort: "high", sessionId, messages, ...extra });
+const options = (sessionId, messages, extra = {}) => ({ provider: "codex-app", model: "luna", reasoningEffort: "high", sessionId, messages, ...extra });
 
 /** Start one turn and hand the live server back once its native turn exists. */
 async function liveTurn(adapter, fixture, sessionId, opts, emit) {

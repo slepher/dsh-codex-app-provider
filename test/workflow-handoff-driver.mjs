@@ -171,7 +171,7 @@ export function apply(ctx) {
         }
         assert.match(handoff.prompt, /\[source: codex thread=\S+ turn=\S+ item=\S+\]/, "the successor imported real sourced facts");
       } else {
-        assert.equal(handoff.targetConfig.provider, "codex");
+        assert.equal(handoff.targetConfig.provider, "codex-app");
         assert.notEqual(handoff.targetConfig.model, report.sourceModel, "the target is a different model configuration");
         assert.equal(handoff.threadId, source.threadId, "the successor continues the original thread");
       }

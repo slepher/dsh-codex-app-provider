@@ -13,7 +13,7 @@
 import { LlmError, type ContentBlock, type Message, type RequestMessage } from "@deepseek-ai/dsh-llm";
 
 import type { ProviderImageRef } from "./provider.js";
-import { CODEX_PROVIDER, type TurnInput } from "./browser-types.js";
+import { CODEX_APP_PROVIDER, type TurnInput } from "./browser-types.js";
 import { isCodexVisible, isInjectedContext } from "./context.js";
 
 /** Opening text of one projected DSH history segment (`importedInput`). */
@@ -33,7 +33,7 @@ export function recoveredThreadId(events: readonly { type: string; data: unknown
   if (events === undefined) return undefined;
   for (let index = events.length - 1; index >= 0; index--) {
     const message = eventMessage(events[index]!);
-    if (message?.source.kind !== "model" || message.source.provider !== CODEX_PROVIDER) continue;
+    if (message?.source.kind !== "model" || message.source.provider !== CODEX_APP_PROVIDER) continue;
     const threadId = replayThread(message.source.replayState);
     if (threadId !== undefined) return threadId;
   }
@@ -53,7 +53,7 @@ export async function planInput(
   let start = -1;
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!;
-    if (message.role !== "assistant" || message.source.kind !== "model" || message.source.provider !== CODEX_PROVIDER) continue;
+    if (message.role !== "assistant" || message.source.kind !== "model" || message.source.provider !== CODEX_APP_PROVIDER) continue;
     if (threadId !== undefined && replayThread(message.source.replayState) === threadId) { start = index; break; }
   }
   if (start === -1 && cursor !== undefined) {
@@ -91,7 +91,7 @@ function nativeHistoryCursor(
   for (const [index, event] of events.entries()) {
     if (event.type !== "assistant/message") continue;
     const message = (event.data as { message?: Message }).message;
-    if (message?.source.kind === "model" && message.source.provider === CODEX_PROVIDER
+    if (message?.source.kind === "model" && message.source.provider === CODEX_APP_PROVIDER
       && replayThread(message.source.replayState) === threadId) last = index;
   }
   if (last === -1) return -1;

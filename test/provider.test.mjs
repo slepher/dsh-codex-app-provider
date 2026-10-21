@@ -113,7 +113,7 @@ function adapterFor(fixture, { approval, questions, attachments, agents = new Ma
   });
 }
 
-const options = (sessionId, messages, extra = {}) => ({ provider: "codex", model: "luna", reasoningEffort: "high", sessionId, messages, ...extra });
+const options = (sessionId, messages, extra = {}) => ({ provider: "codex-app", model: "luna", reasoningEffort: "high", sessionId, messages, ...extra });
 
 async function waitFor(condition, label = "condition") {
   for (let attempt = 0; attempt < 5_000; attempt++) {
@@ -156,21 +156,21 @@ test("advertises the Codex catalogue and exact model metadata without starting a
   t.after(() => { cleanup(fixture); return fixture.backend.close(); });
   const adapter = adapterFor(fixture);
   fixture.hub.config = { model: "luna", model_reasoning_effort: "high", model_context_window: 256000 };
-  assert.deepEqual(adapter.providerInfo("codex"), { id: "codex", name: "Codex" });
+  assert.deepEqual(adapter.providerInfo("codex-app"), { id: "codex-app", name: "codex app" });
 
-  const models = await adapter.listModels("codex");
-  assert.deepEqual(models, [{ provider: "codex", id: "luna", name: "Luna", inputModalities: ["text"] }]);
-  const info = await adapter.resolveModel("codex", "luna");
+  const models = await adapter.listModels("codex-app");
+  assert.deepEqual(models, [{ provider: "codex-app", id: "luna", name: "Luna", inputModalities: ["text"] }]);
+  const info = await adapter.resolveModel("codex-app", "luna");
   assert.equal(info.id, "luna");
   assert.equal(info.context.contextWindow, 256000, "configured context window reaches model resolution");
   assert.equal(info.reasoning.defaultEffort, "high", "configured effort wins for the configured model");
   assert.deepEqual(info.reasoning.efforts.map(effort => effort.id), ["low", "high"]);
-  const fallback = await adapter.resolveModel("codex", "unlisted");
+  const fallback = await adapter.resolveModel("codex-app", "unlisted");
   assert.equal(fallback.name, "unlisted");
   assert.equal("reasoning" in fallback, false);
   assert.equal("context" in fallback, false, "the configured window only applies to the configured model");
 
-  await adapter.listModels("codex");
+  await adapter.listModels("codex-app");
   assert.equal(fixture.hub.servers.length, 1, "the catalogue is cached across calls");
   assert.equal(fixture.hub.servers.flatMap(server => server.calls ?? []).some(call => call.method === "thread/start" || call.method === "turn/start"), false);
   await assert.rejects(collect(adapter.stream(options("missing", [user("u1", "hi")]))), /workspace/);
@@ -190,13 +190,13 @@ test("advertises a new model generation and its extra effort tier unchanged", as
     { model: "gpt-6-luna", displayName: "GPT-6-Luna", defaultReasoningEffort: "medium",
       supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"].map(reasoningEffort => ({ reasoningEffort, description: "" })) },
   ];
-  const models = await adapter.listModels("codex");
+  const models = await adapter.listModels("codex-app");
   assert.deepEqual(models.map(model => [model.id, model.name]),
     [["gpt-6-astra", "GPT-6-Astra"], ["gpt-6-luna", "GPT-6-Luna"]], "the whole generation is listed as advertised");
-  const astra = await adapter.resolveModel("codex", "gpt-6-astra");
+  const astra = await adapter.resolveModel("codex-app", "gpt-6-astra");
   assert.deepEqual(astra.reasoning.efforts.map(effort => effort.id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
   assert.equal(astra.reasoning.defaultEffort, "medium");
-  const luna = await adapter.resolveModel("codex", "gpt-6-luna");
+  const luna = await adapter.resolveModel("codex-app", "gpt-6-luna");
   assert.deepEqual(luna.reasoning.efforts.map(effort => effort.id), ["low", "medium", "high", "xhigh", "max"],
     "the cheaper tier of the same generation keeps its own effort set");
 });
@@ -239,11 +239,11 @@ test("streams one native turn into text, usage, and replay state, then resumes t
     { totalTokens: null, inputTokens: 100, cachedInputTokens: 20, cacheWriteInputTokens: null, outputTokens: 5, reasoningOutputTokens: 2 });
   assert.equal("total" in execution.reports[0].usage, false, "the cumulative snapshot is not projected as a turn's usage");
 
-  const learned = await adapter.resolveModel("codex", "luna");
+  const learned = await adapter.resolveModel("codex-app", "luna");
   assert.equal(learned.context.contextWindow, 1000, "runtime usage teaches the context window when config does not set one");
 
   const marker = { response: { threadId: server.threadId, turnId: server.turnId, input: "u1" } };
-  const again = await liveTurn(adapter, fixture, "s1", options("s1", [system("prompt"), user("u1", "first"), assistant("a1", "Hello", "codex", marker), user("u2", "second")]), async server => {
+  const again = await liveTurn(adapter, fixture, "s1", options("s1", [system("prompt"), user("u1", "first"), assistant("a1", "Hello", "codex-app", marker), user("u2", "second")]), async server => {
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "Again" } });
     server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
   });
@@ -275,7 +275,7 @@ test("relearns the context window from persisted provider records after a restar
     logger: { warn() {} },
     providerCwd: fixture.cwd,
   });
-  const info = await second.resolveModel("codex", "luna");
+  const info = await second.resolveModel("codex-app", "luna");
   assert.equal(info.context.contextWindow, 123456, "persisted usage survives provider restarts");
 });
 
@@ -354,7 +354,7 @@ test("imports cross-provider and tool history once and fails closed on images wi
   const images = setup("dsh-provider-image-");
   t.after(() => { cleanup(images); return images.backend.close(); });
   const imageAdapter = adapterFor(images, { sessions: new Map([["s2", { header: { cwd: images.cwd } }]]) });
-  assert.deepEqual((await imageAdapter.listModels("codex"))[0].inputModalities, ["text"], "no seam means no image advertisement");
+  assert.deepEqual((await imageAdapter.listModels("codex-app"))[0].inputModalities, ["text"], "no seam means no image advertisement");
   await assert.rejects(collect(imageAdapter.stream(options("s2", [image("u1", "look at this")]))), /cannot represent this image/);
   const toolImage = {
     id: "u2", role: "tool", toolCallId: "call_2",
@@ -373,9 +373,9 @@ test("advertises image modality and sends user images as localImage inputs", asy
   const attachments = { imageHostPath: ref => `/attachments/${ref.attachmentId}.png` };
   const adapter = adapterFor(fixture, { sessions, attachments });
 
-  assert.deepEqual((await adapter.listModels("codex"))[0].inputModalities, ["text", "image"]);
-  assert.deepEqual((await adapter.resolveModel("codex", "luna")).inputModalities, ["text", "image"]);
-  assert.deepEqual((await adapter.resolveModel("codex", "unlisted")).inputModalities, ["text"], "unknown models stay conservative");
+  assert.deepEqual((await adapter.listModels("codex-app"))[0].inputModalities, ["text", "image"]);
+  assert.deepEqual((await adapter.resolveModel("codex-app", "luna")).inputModalities, ["text", "image"]);
+  assert.deepEqual((await adapter.resolveModel("codex-app", "unlisted")).inputModalities, ["text"], "unknown models stay conservative");
 
   const chunks = await liveTurn(adapter, fixture, "s1", options("s1", [image("u1", "look at this")]), async server => {
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "seen" } });
@@ -455,7 +455,7 @@ test("imports tool history for a forked DSH Session without a native checkpoint"
     assistant("a0", "old answer", "deepseek"),
     toolCall("a1", "call_1", "shell_exec", "{}"),
     toolResult("t1", "call_1", "worker done"),
-    assistant("a2", "native answer", "codex", { response: { threadId: origin.threadId, turnId: origin.turnId, input: "u1" } }),
+    assistant("a2", "native answer", "codex-app", { response: { threadId: origin.threadId, turnId: origin.turnId, input: "u1" } }),
     user("u1", "continue"),
   ]), async server => {
     server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "forked" } });
@@ -830,7 +830,7 @@ test("isolates each DSH child thread and rejects foreign native-child events", a
 /** One codex reply in the DSH log, carrying the identity that marks the thread's history. */
 function appendCodexReply(session, threadId, { id, text, turnId, input }) {
   session.append("assistant/message", { turn: 1, step: 0, stream: [],
-    message: assistant(id, text, "codex", { response: { threadId, turnId, input } }) });
+    message: assistant(id, text, "codex-app", { response: { threadId, turnId, input } }) });
 }
 
 /**
@@ -1266,8 +1266,8 @@ test("registers behind the real DSH LlmRuntime and exposes normalized chunk stre
   const ctx = new Context();
   const runtime = new LlmRuntime(ctx);
   const adapter = adapterFor(fixture, { sessions });
-  runtime.registerAdapter(["codex"], adapter);
-  assert.deepEqual(runtime.listProviders().filter(provider => provider.id === "codex"), [{ id: "codex", name: "Codex" }]);
+  runtime.registerAdapter(["codex-app"], adapter);
+  assert.deepEqual(runtime.listProviders().filter(provider => provider.id === "codex-app"), [{ id: "codex-app", name: "codex app" }]);
 
   const done = collect(runtime.stream(options("s1", [user("u1", "hi")])));
   await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "turn/start")), "runtime turn/start");
@@ -1296,7 +1296,7 @@ test("routes images through the real DSH LlmRuntime when the model advertises th
   const ctx = new Context();
   const runtime = new LlmRuntime(ctx);
   const attachments = { imageHostPath: ref => `/attachments/${ref.attachmentId}.png` };
-  runtime.registerAdapter(["codex"], adapterFor(fixture, { sessions, attachments }));
+  runtime.registerAdapter(["codex-app"], adapterFor(fixture, { sessions, attachments }));
 
   const done = collect(runtime.stream(options("s1", [image("u1", "look")])));
   await waitFor(() => fixture.hub.servers.some(server => server.calls?.some(call => call.method === "turn/start")), "runtime turn/start");
@@ -1353,11 +1353,11 @@ test("the deployment's own workspace supplies the default model and effort", asy
   const adapter = new CodexProviderAdapter({ currentCwd: () => fixture.cwd, backend: fixture.backend, sessions: { get: () => undefined },
     agents: { get: () => undefined }, logger: { warn() {} }, providerCwd: workspace });
 
-  const preferred = await adapter.resolveModel("codex", "sol");
+  const preferred = await adapter.resolveModel("codex-app", "sol");
   assert.equal(preferred.reasoning.defaultEffort, "high",
     "the catalogue's default model keeps its own default effort when the workspace names none");
   assert.deepEqual(preferred.reasoning.efforts.map(effort => effort.id), ["high"]);
-  const other = await adapter.resolveModel("codex", "luna");
+  const other = await adapter.resolveModel("codex-app", "luna");
   assert.equal(other.reasoning.defaultEffort, "low", "every other model keeps its own default effort");
 
   const calls = fixture.hub.servers.flatMap(server => server.calls ?? []);
@@ -1871,7 +1871,7 @@ test("orders reasoning efforts from least to greatest without moving the configu
   f.hub.models[0].supportedReasoningEfforts = ["high", "low", "medium"].map(reasoningEffort => ({ reasoningEffort, description: "" }));
   const adapter = adapterFor(f);
   t.after(async () => { adapter.close(); await f.backend.close(); cleanup(f); });
-  const model = await adapter.resolveModel("codex", "luna");
+  const model = await adapter.resolveModel("codex-app", "luna");
   assert.deepEqual(model.reasoning.efforts.map(effort => effort.id), ["low", "medium", "high"]);
   assert.equal(model.reasoning.defaultEffort, "high");
 });

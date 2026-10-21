@@ -6,7 +6,7 @@ import type { GateBinding } from "./tool-gate.js";
  * registers it, and the history layer reads it back out of the log to tell its
  * own turns from another provider's.
  */
-export const CODEX_PROVIDER = "codex";
+export const CODEX_APP_PROVIDER = "codex-app";
 
 export type SessionId = string;
 export type ThreadId = string;
