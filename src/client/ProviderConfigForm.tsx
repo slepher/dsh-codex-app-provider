@@ -1,22 +1,31 @@
 /**
- * The row configuration page for the Codex app provider.
+ * The configuration page for the Codex app provider.
  *
  * The page edits the Loader entry's own fields, so the values it writes are the
  * ones the Host plugin starts with: the Codex executable, whether top-level
  * Sessions may select the route, and the native tool bridge. Only a save writes;
- * leaving the page drops the staged edits.
+ * leaving the page drops the staged edits. One component serves both surfaces the
+ * Plugin manager offers — the bundle's configuration section, which passes no
+ * form and reads the Host form directly, and the row page, which passes one.
  * @module dsh-codex-app-provider/client/ProviderConfigForm
  */
 
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useSyncExternalStore, useState, type CSSProperties, type ReactNode } from "react";
 
+import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-settings/client";
 import type { PluginConfigViewProps } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 
 /** The provider's editable entry fields, as the Host resolves them. */
-interface ProviderConfig {
+export interface ProviderConfigFields {
   command?: string;
   allowMainSession?: boolean;
   toolBridge?: { enabled?: boolean; allow?: readonly string[] };
+}
+
+/** What the form renders from: accepted values plus the one write operation. */
+interface FormLike {
+  state: ConfigFormSnapshot<ProviderConfigFields>;
+  mutate: ConfigForm<ProviderConfigFields>["mutate"];
 }
 
 /** One field edit in the Host's path-mutation vocabulary. */
@@ -44,29 +53,63 @@ const saveButton: CSSProperties = {
   color: "var(--dsw-alias-label-primary-foreground)",
 };
 
-/** One row-configuration entry: a one-liner in the summary view, the form in the page view. */
-export function ProviderConfigForm(props: PluginConfigViewProps): ReactNode {
+/**
+ * Bind the Host's configuration form to a slot component.
+ *
+ * The bundle configuration slot passes no form, so the component subscribes to
+ * the settings form itself; a row page that does pass one keeps that form.
+ * @param form - the Host form for this entry.
+ * @returns the slot component.
+ */
+export function withForm(form: ConfigForm<ProviderConfigFields>): (props: PluginConfigViewProps) => ReactNode {
+  return function ProviderConfigBound(props: PluginConfigViewProps): ReactNode {
+    const snapshot = useSyncExternalStore(
+      listener => form.subscribe(listener),
+      () => form.getSnapshot(),
+    );
+    const bound: FormLike = { state: snapshot, mutate: form.mutate.bind(form) };
+    return <ProviderConfigForm view={props.view} form={props.form === undefined ? bound : { state: props.form.state as FormLike["state"], mutate: props.form.mutate as FormLike["mutate"] }} />;
+  };
+}
+
+/**
+ * The entry component: a one-liner in the summary view, the form in the page view.
+ * @param props - the view the page asks for and its Host form.
+ */
+export function ProviderConfigForm(props: { view?: "summary" | "page"; form?: FormLike }): ReactNode {
   if (props.view === "summary") return "Codex executable, main-session gate and native tool bridge.";
   return <ProviderConfigPage form={props.form} />;
 }
 
 /**
  * The editable page body.
- * @param props - the Host-owned form for this entry.
+ * @param props - the Host form for this entry.
  */
-function ProviderConfigPage({ form }: Pick<PluginConfigViewProps, "form">): ReactNode {
-  const value = (form?.state.value ?? {}) as ProviderConfig;
+function ProviderConfigPage({ form }: { form?: FormLike }): ReactNode {
+  if (form === undefined) {
+    return <p style={hint}>The Host has not exposed this plugin's configuration form in this composition.</p>;
+  }
+  if (form.state.status === "loading") return <p style={hint}>Loading configuration…</p>;
+  if (form.state.status === "unavailable") {
+    return <p style={hint}>The Host does not expose this plugin's configuration to the browser.</p>;
+  }
+  const value = (form.state.value ?? {}) as ProviderConfigFields;
   const initialAllow = (value.toolBridge?.allow ?? []).join(", ");
+  return <ProviderConfigFieldsForm key={`${form.state.revision ?? "none"}:${initialAllow}`} form={form} value={value} initialAllow={initialAllow} />;
+}
+
+/** The staged editor; remounted when the accepted revision or tool list changes. */
+function ProviderConfigFieldsForm({ form, value, initialAllow }: {
+  form: FormLike;
+  value: ProviderConfigFields;
+  initialAllow: string;
+}): ReactNode {
   const [command, setCommand] = useState(value.command ?? "");
   const [allowMainSession, setAllowMainSession] = useState(value.allowMainSession === true);
   const [bridgeEnabled, setBridgeEnabled] = useState(value.toolBridge?.enabled === true);
   const [allowText, setAllowText] = useState(initialAllow);
   const [status, setStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  if (form === undefined) {
-    return <p style={hint}>This page needs the Host's configuration form, which this deployment did not provide.</p>;
-  }
   const writable = form.state.writable;
   const disabled = !writable || saving;
 
@@ -75,7 +118,9 @@ function ProviderConfigPage({ form }: Pick<PluginConfigViewProps, "form">): Reac
     const ops: FieldOp[] = [];
     const initialCommand = value.command ?? "";
     if (command !== initialCommand) {
-      ops.push(command.trim() === "" ? { op: "unset", path: ["command"] } : { op: "set", path: ["command"], value: command.trim() });
+      ops.push(command.trim() === ""
+        ? { op: "unset", path: ["command"] }
+        : { op: "set", path: ["command"], value: command.trim() });
     }
     if (allowMainSession !== (value.allowMainSession === true)) {
       ops.push({ op: "set", path: ["allowMainSession"], value: allowMainSession });
@@ -84,8 +129,7 @@ function ProviderConfigPage({ form }: Pick<PluginConfigViewProps, "form">): Reac
       ops.push({ op: "set", path: ["toolBridge", "enabled"], value: bridgeEnabled });
     }
     if (allowText.trim() !== initialAllow.trim()) {
-      const allow = allowText.split(/[\s,]+/).filter(name => name !== "");
-      ops.push({ op: "set", path: ["toolBridge", "allow"], value: allow });
+      ops.push({ op: "set", path: ["toolBridge", "allow"], value: allowText.split(/[\s,]+/).filter(name => name !== "") });
     }
     if (ops.length === 0) {
       setStatus("No changes to save.");
@@ -94,7 +138,7 @@ function ProviderConfigPage({ form }: Pick<PluginConfigViewProps, "form">): Reac
     setSaving(true);
     try {
       const accepted = await form.mutate(ops, form.state.revision);
-      setStatus(accepted ? "Saved. A running deployment applies it on the next plugin reload or process start." : "The Host refused this write.");
+      setStatus(accepted ? "Saved. A running deployment applies it immediately or on the next runtime." : "The Host refused this write.");
     } catch (error) {
       setStatus(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -112,7 +156,7 @@ function ProviderConfigPage({ form }: Pick<PluginConfigViewProps, "form">): Reac
         />
         <span style={hint}>
           Run as <code>&lt;command&gt; app-server --stdio</code>. On Windows the npm shim cannot be spawned directly;
-          point this at the native <code>codex.exe</code> (or leave it empty to use the default).
+          point this at the native <code>codex.exe</code>. A new runtime reads it immediately.
         </span>
       </div>
 
@@ -166,7 +210,7 @@ function ProviderConfigPage({ form }: Pick<PluginConfigViewProps, "form">): Reac
           disabled={disabled} onClick={() => { void save(); }}>
           {saving ? "Saving…" : "Save"}
         </button>
-        {writable ? null : <span style={hint}>This profile's configuration document is read-only.</span>}
+        {writable ? null : <span style={{ ...hint, marginTop: 0 }}>This profile's configuration document is read-only.</span>}
         {status === null ? null : <span style={{ ...hint, marginTop: 0 }}>{status}</span>}
       </div>
     </div>
