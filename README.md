@@ -104,6 +104,9 @@ Add one entry to the profile's `cordis.patch.yml`. A deployment loads exactly on
 | `command` | string | `codex` | Executable run as the App Server (`<command> app-server --stdio`). |
 | `requestTimeoutMs` | integer, 1–2147483647 | `30000` | Per-request App Server timeout. |
 | `providerCwd` | string | the directory DSH was launched in | Working directory for model settings, and the fallback working directory for a Codex thread whose Session records none. |
+| `allowMainSession` | boolean | `false` | Whether a top-level Session may select and use this route. When `false`, the route is hidden from the model menu and refused for main-Session streams, and only managed workflow children run here. |
+| `toolBridge.enabled` | boolean | `false` | Expose allow-listed DSH tools to Codex as native dynamic tools and execute their callbacks through DSH's tool pipeline. The declaration is frozen on a new thread, so enabling or changing it needs a new DSH Session. |
+| `toolBridge.allow` | string[] | `cordis_inspect_list`, `cordis_inspect_query`, `plugin_manager`, `plugin_market`, `skill`, `read` | Exposure ceiling. The shipped set is `allow` ∩ the tools the main request presented ∩ the scoped `ctx.tools.schemas(agent)`; it never grants permission by itself. |
 
 Persistence layout under `stateDir`:
 
@@ -118,6 +121,31 @@ Persistence layout under `stateDir`:
 - Approval requests raised by Codex are forwarded to the DSH approval surface (`allowed-once` → accept, `cancelled` → cancel, everything else including no answerer → decline). Structured questions go to `ctx.userQuestions`. Missing services fail closed; the plugin never fabricates consent.
 - The DSH Session log shows what Codex executed: each item becomes a sourced `dsh-codex-app-provider` message whose identity is derived from `threadId`/`turnId`/`itemId`, so replay or cold recovery cannot import the same command twice.
 - Conversation history and compaction checkpoints stay DSH-owned; when a DSH history is replayed into a Codex thread, the imported range is marked (`[DSH history import`) so it is not fed back to Codex again.
+
+## Main-Session gate and the native tool bridge
+
+`allowMainSession` defaults to `false`, which reserves the route for managed
+workflow children — requests that carry native execution inputs. In that mode:
+
+- the model catalog reports no models, so the composer menu and `modelAvailable`
+  stop offering the route;
+- a top-level `stream()` fails with `MAIN_SESSION_DISABLED`; title/summary calls
+  return without starting a process, and a main-Session `/compact` is refused;
+- the plugin still publishes `ctx.codexExecution.catalog()`, so
+  `dsh-workflow-kit`'s settings page can offer `codex-app` models for child
+  roles that the composer menu hides;
+- disabling the route retires a saved global default and open Session
+  selections onto another advertised route, so the UI does not stall on
+  "Select model".
+
+`toolBridge.enabled` exposes selected DSH tools to Codex as native dynamic
+tools. Codex calls them back through `item/tool/call`; the provider binds each
+call to the live Agent and executes it with `ctx.tools.execute`, so DSH scoped
+policy, guards, approvals and cancellation apply unchanged. The first version
+carries text results only, does not cover PTC presentation, and needs no MCP
+server, port or second approval store. The declaration is written only on
+`thread/start` — a new or changed selection is refused on an existing thread,
+because the protocol has no field for adding tools to a resumed thread.
 
 ## Delegation
 

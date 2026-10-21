@@ -104,6 +104,9 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 | `command` | 字符串 | `codex` | 作为 App Server 执行的程序（`<command> app-server --stdio`）。 |
 | `requestTimeoutMs` | 整数，1–2147483647 | `30000` | 单次 App Server 请求超时。 |
 | `providerCwd` | 字符串 | DSH 启动目录 | 模型设置的工作目录，也是 Session 未记录工作目录时 Codex thread 的回落目录。 |
+| `allowMainSession` | 布尔 | `false` | 顶层主会话是否可以选择并使用本路由。为 `false` 时路由从模型菜单隐藏、主会话请求被拒，只有受管 workflow child 在这里运行。 |
+| `toolBridge.enabled` | 布尔 | `false` | 把 allow 内的 DSH 工具作为原生 dynamic tool 暴露给 Codex，并经由 DSH 工具管线执行回调。声明冻结在新线程上，启用或更改选择需要新建 DSH 会话。 |
+| `toolBridge.allow` | 字符串数组 | `cordis_inspect_list`、`cordis_inspect_query`、`plugin_manager`、`plugin_market`、`skill`、`read` | 暴露上限。实际集合是 `allow` ∩ 主请求已呈现的工具 ∩ 当前作用域的 `ctx.tools.schemas(agent)`；配置本身不授予权限。 |
 
 `stateDir` 下的持久化布局：
 
@@ -118,6 +121,17 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 - Codex 发出的审批请求转发到 DSH 审批面（`allowed-once` → accept，`cancelled` → cancel，其余情况包含没有应答者 → decline）。结构化提问走 `ctx.userQuestions`。服务缺失时 fail-closed，插件不伪造同意。
 - DSH Session 日志能看到 Codex 执行了什么：每个 item 变成一条来源为 `dsh-codex-app-provider` 的消息，身份由 `threadId`/`turnId`/`itemId` 推导，因此重放或冷恢复不会把同一条命令导入两次。
 - 对话历史与压缩检查点归 DSH；当一段 DSH 历史被回放进 Codex thread 时，导入区间会被标记（`[DSH history import`），不会再次喂回 Codex。
+
+## 主会话门禁与原生工具桥
+
+`allowMainSession` 默认 `false`，把路由留给携带原生执行输入的受管 workflow child。此时：
+
+- 模型目录不返回模型，composer 菜单与 `modelAvailable` 都不再提供该路由；
+- 顶层 `stream()` 以 `MAIN_SESSION_DISABLED` 拒绝；标题/摘要调用直接返回、不拉起进程，主会话的 `/compact` 也被拒绝；
+- 插件仍发布 `ctx.codexExecution.catalog()`，`dsh-workflow-kit` 设置页因此能为 child 角色提供被 composer 菜单隐藏的 `codex-app` 模型；
+- 关闭路由时会把全局默认模型与已打开 Session 的选择迁移到其它可用路由，UI 不会卡在「Select model」。
+
+`toolBridge.enabled` 把选定的 DSH 工具作为原生 dynamic tool 暴露给 Codex。Codex 通过 `item/tool/call` 回调，provider 把每次调用绑定到活的 Agent，并用 `ctx.tools.execute` 执行，因此 DSH 的作用域策略、guard、审批与取消原样生效。首版只承载文本结果、不覆盖 PTC 呈现，也不需要新增 MCP 服务、端口或第二套审批存储。声明只写在 `thread/start` 上——线程已存在时新增或更改选择会被拒绝，因为协议没有为 resume 提供注入工具的字段。
 
 ## 委派
 

@@ -262,3 +262,15 @@ allowMainSession: z.boolean().default(false),
 6. **测试改造面**：本仓库 14 个测试文件、44 处 `"codex"` 字面量，外加 `dsh-workflow-kit` 的 10+ 文件；其中状态目录、CLI 命令、文件名等字面量不能误改。建议用"先改常量与断言，再跑全量测试"的顺序。
 7. **`allowMainSession` 的切换语义**：普通配置项意味着插件重载；若宿主在重载期间保留旧会话，回退逻辑需幂等（重复执行不应反复追加 `model/selection`）。
 8. **`resolveModel` 保持开放的代价**：`listModels()` 隐藏后，宿主仍可解析该模型；必须靠 `stream()` 门禁兜底，任何绕过 `stream()` 的路径（例如未来的直连调用）都会失去保护，需在实现时集中到唯一入口。
+
+## 9. 实施记录（2026-10-21）
+
+**Step 1（已完成）**：provider 提交 `e75fd68`，workflow 提交 `54ae4d1`。Provider ID、adapter 注册与显示名改为 `codex-app` / `codex app`；CLI 可执行名、状态目录段、`codex:` 原生前缀、owner id、Host 服务名保持不变；README 与 locale 同步。两仓失败集合与各自基线一致。
+
+**Step 2（已完成）**：provider 提交 `63f5a4d`，workflow 提交 `2a1f834`。`allowMainSession` 默认 `false`：`listModels()` 返回空、主会话 `stream()` 以 `MAIN_SESSION_DISABLED` 拒绝、标题/摘要调用直接返回不拉起进程、主会话 `/compact` 拒绝，受管子代理（携带原生执行输入）正常放行；关闭路由时把全局默认模型与已打开主会话的选择迁移到其它可用路由（可选服务缺失只告警）。`ctx.codexExecution.catalog()` 暴露路由自有目录，workflow 新增 `/workflow catalog` 端点并在设置页合并，解决 §3.5 的跨包缺口。新增 7 项测试。
+
+**Step 3（已完成，本次提交）**：删除 `runtime.commands`/`trackCommand()`、`configureSession()`、`steerTurn()`、`occupiedThreads()`（含 store 方法与 `claimsThread`/`occupied` 级联）、`pendingUserInputs()`、`SessionStore.has()`/`findByThread()`；`codex:` 前缀映射合并为 `handoff.ts` 的一份实现。保留 LegacyMirror 旧记录兼容（`store.test.mjs` 直接覆盖）与两份 Handoff 请求类型（DSH id 与原生 id 两个命名空间，且 `approvalsReviewer` 已漂移）。净 −77 行（src −72，test −5）。
+
+**验收**：两仓 `typecheck`/`build` 通过；provider 162 项（140+ 新测试通过）、workflow 148 项，失败集合与各自基线完全一致（provider 15、workflow 62，均为 Windows 平台性），零新增失败。
+
+**仍未覆盖**：真实 DSH 文件夹安装与 live 验收，`dsh.compatibility.dshReleases` 未标记 compatible（阻塞见 `DSH-UPGRADE-PLAN.zh-CN.md` §7）；重命名未写迁移器；Handoff 类型的 `approvalsReviewer` 漂移未修。

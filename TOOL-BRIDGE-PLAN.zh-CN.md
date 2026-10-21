@@ -236,3 +236,33 @@ workflow 的 PreToolUse hook 可能看到 `dsh_` 前缀后的名称，DSH guard 
 - [ ] **P2 / 桌面验收与兼容矩阵：** 尚未在关闭 DSH MCP 的测试运行时中完成创造模式端到端、Client 连接、真实获批/拒绝管理操作或重启验收；`0.160.0` 仅为已检查协议版本，不是已通过工具桥验收的版本。
 
 下一轮从 §6 的 P0 开始。本文中的配置、模块名和执行流程均为拟议设计，当前 provider 尚不支持直接调用 DSH 工具。
+
+## 9. 实施记录（2026-10-21）
+
+本节记录 P0 证据与首版实现结果，取代“尚未实现工具桥”的阶段性说明。
+
+### P0：协议基线与真机闭环（已完成）
+
+基线改为本机实际安装的 `codex-cli 0.156.1`（调研时记录的是 0.160.0，两者协议形状一致）：
+
+- `codex app-server generate-json-schema --experimental`：`ThreadStartParams` 含 `dynamicTools`，`DynamicToolSpec` 是带 `type: "function"` 的联合；`ThreadResumeParams` 与 `TurnStartParams` 均无该字段；`DynamicToolCallParams = { threadId, turnId, callId, tool, arguments, namespace? }`；响应为 `{ contentItems: [{ type: "inputText", text }], success }`。
+- 真机闭环（隔离临时 cwd，真实 App Server）：`thread/start(cwd, model, approvalPolicy=never, sandbox=read-only, dynamicTools=[dsh_probe])` 被接受 → `turn/start` 触发 `item/tool/call`（`dsh_probe`，`arguments={value:7}`，`namespace=null`）→ 客户端 `respond` 后 turn completed；`thread/resume` 之后第二轮再次回调（`{value:8}`）并 completed。证明声明随线程持久化，而 resume 无法注入新声明。
+- 实测注意：本机 ChatGPT 账号不支持配置里的 `gpt-6.1-sol`，必须显式选择 `model/list` 返回的模型（如 `gpt-6-astra`）。
+
+### P1/P2：首版实现（已完成核心闭环）
+
+- 配置 `toolBridge.enabled`（默认 false）与 `toolBridge.allow`（默认六项）；暴露集合 = allow ∩ 主请求已呈现工具 ∩ `ctx.tools.schemas(agent)`，以 `dsh_` 前缀声明，并按声明指纹冻结进 Session 记录。
+- `thread/start` 携带 `dynamicTools`，`thread/resume` 不携带；已有线程的声明与当前选择不一致时以 `EXECUTION_MISMATCH` 拒绝并要求新建会话。关闭或移除 allow 后旧线程同样被拦截。
+- `item/tool/call` 由 backend 校验 thread/turn/活 runtime 后转给 provider；provider 解析 DSH Session 与活 Agent，经 `ctx.tools.execute` 执行，文本结果回包。非文本内容显式失败而不是丢弃后报成功。
+- 同一 `(threadId,turnId,callId)` 重放返回已结算结果、不同参数视为冲突；同一 Session 的调用串行。
+- fake App Server 可脚本化一次动态工具回调；新增 7 项工具桥测试与 7 项主会话门禁测试，provider 全量 162 项、零新增失败，另有一份 backend+AppServer 的真实进程内闭环测试。
+
+### 仍未完成（相对本文验收，不得当作已验证）
+
+- 真实 DSH 创造模式端到端：关闭该运行时 MCP 后的 Host/Client 连接、技能加载与桌面资源读取；
+- 桥接调用尚未写入 DSH Session 的带来源持久记录（当前只有 provider 日志）；§4.2 的“记录先于回包、落盘失败停止、跨重启重放”只做到进程内；
+- PTC 呈现尚未显式报不支持（当前仅不暴露 `run_code`）；
+- handoff 携带桥接线程的拒绝路径未实现、未验证；
+- 冷恢复（新进程）后真实回调未实测；
+- workflow gate 对 `dsh_` 前缀名称的解析未实测；
+- 原生工具卡片与 SDK 投影未实现。
