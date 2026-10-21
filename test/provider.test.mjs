@@ -731,7 +731,6 @@ test("leaves a native question for the pane and answers it with the real values"
   assert.deepEqual(sessionServer(fixture.hub).responded, [
     { id: 41, result: { answers: { q1: { answers: ["Yes", "note"] } } } },
   ]);
-  assert.deepEqual(await fixture.backend.pendingUserInputs(OWNER, "codex:s1"), []);
 });
 
 /**

@@ -169,15 +169,6 @@ function validGate(value: unknown): boolean {
     && typeof gate.args === "object" && gate.args !== null && !Array.isArray(gate.args);
 }
 
-/** Whether one record still owns and may operate its native thread. */
-export function claimsThread(record: StoredSession): boolean {
-  return record.handedOff === undefined && occupied(record);
-}
-
-function occupied(record: StoredSession): boolean {
-  return !record.released;
-}
-
 function validReports(record: Partial<StoredSession>): boolean {
   if (record.reports === undefined) return true;
   if (!Array.isArray(record.reports)) return false;

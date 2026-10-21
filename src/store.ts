@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
-import { claimsThread, parseRecord, recover, type StoredSession } from "./records.js";
+import { parseRecord, recover, type StoredSession } from "./records.js";
 
 export type { StoredHandoffIn, StoredHandoffOut, StoredSession } from "./records.js";
 
@@ -67,18 +67,6 @@ export class SessionStore {
 
   list(ownerId: string): StoredSession[] {
     return [...this.records.values()].filter(record => record.ownerId === ownerId);
-  }
-
-  has(sessionId: string): boolean {
-    return this.records.has(sessionId);
-  }
-
-  findByThread(threadId: string): StoredSession[] {
-    return [...this.records.values()].filter(record => record.threadId === threadId);
-  }
-
-  occupiedThreads(): string[] {
-    return [...new Set([...this.records.values()].flatMap(record => claimsThread(record) && record.threadId !== undefined ? [record.threadId] : []))];
   }
 
   /**

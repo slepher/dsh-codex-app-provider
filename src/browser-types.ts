@@ -296,20 +296,16 @@ export interface CodexBackend {
   readSession(ownerId: string, sessionId: SessionId): Promise<SessionSnapshot | undefined>;
   /** `threadId` supplies an identity the record lost, recovered from the Session log. */
   resumeSession(ownerId: string, sessionId: SessionId, threadId?: ThreadId): Promise<SessionSnapshot>;
-  configureSession(ownerId: string, sessionId: SessionId, options: TurnOptions): Promise<SessionSnapshot>;
   closeSession(ownerId: string, sessionId: SessionId, confirmedStopped?: boolean): Promise<void>;
-  occupiedThreads(): Promise<readonly ThreadId[]>;
   /** Read-only thread ownership for trusted-Host reconciliation. */
   threadOwnership(ownerId: string, sessionId: SessionId): Promise<ThreadOwnership | undefined>;
   /** Transfer one stopped record's thread to a reserved successor. */
   handoffThread(ownerId: string, request: ThreadHandoffRequest): Promise<ThreadHandoffResult>;
   startTurn(ownerId: string, sessionId: SessionId, input: string | readonly TurnInput[], options?: StartTurnOptions): Promise<TurnSnapshot>;
-  steerTurn(ownerId: string, turnId: TurnId, input: string | readonly TurnInput[]): Promise<void>;
   compactSession(ownerId: string, sessionId: SessionId): Promise<void>;
   interruptTurn(ownerId: string, turnId: TurnId): Promise<void>;
   pendingApprovals(ownerId: string, sessionId: SessionId): Promise<readonly ApprovalRequest[]>;
   decideApproval(ownerId: string, requestId: string, decision: ApprovalDecision): Promise<void>;
-  pendingUserInputs(ownerId: string, sessionId: SessionId): Promise<readonly UserInputRequest[]>;
   answerUserInput(ownerId: string, requestId: string, answers: UserInputAnswer): Promise<void>;
   readFacts(ownerId: string, sessionId: SessionId): Promise<readonly ExecutionFactLine[]>;
   readReports(ownerId: string, sessionId: SessionId): Promise<readonly Report[]>;

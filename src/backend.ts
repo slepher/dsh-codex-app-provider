@@ -64,8 +64,6 @@ interface Runtime {
   rpc: BackendTransport;
   requests: Map<string, number | string>;
   inputs: Map<string, { rpcId: number | string; request: UserInputRequest; record: StoredSession }>;
-  /** Live status of every native command item this thread has reported. */
-  commands: Map<string, string>;
   /** Events of the turn in flight that an execution fact can be projected from. */
   facts: SequencedBackendEvent[];
   /** Hook runs Codex reported for this runtime, oldest first. */
@@ -277,16 +275,6 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async configureSession(ownerId: string, sessionId: string, options: TurnOptions): Promise<SessionSnapshot> {
-    const record = this.required(ownerId, sessionId);
-    this.assertThreadOwnership(record, "configure its thread");
-    if ("model" in options) record.model = options.model;
-    if ("reasoningEffort" in options) record.reasoningEffort = options.reasoningEffort;
-    record.options = { ...record.options, model: record.model, reasoningEffort: record.reasoningEffort };
-    this.store.put(record);
-    return snapshot(record);
-  }
-
   async closeSession(ownerId: string, sessionId: string, confirmedStopped = false): Promise<void> {
     const record = this.required(ownerId, sessionId);
     // A Session this process still holds is not uncertain, so it must be idle to
@@ -337,10 +325,6 @@ export class CodexSessionBackend implements CodexBackend {
     return tracked;
   }
 
-  async occupiedThreads(): Promise<readonly string[]> {
-    return this.store.occupiedThreads();
-  }
-
   /**
    * Read one native Session's thread ownership for Host reconciliation.
    * @param ownerId - the provider's own owner identity.
@@ -359,7 +343,7 @@ export class CodexSessionBackend implements CodexBackend {
    * Hand one Codex thread from a stopped source record to a reserved successor.
    *
    * The source keeps its history, reports and usage but is de-authorized for
-   * start, resume, configure, compact, steer, interrupt and restart, so
+   * start, resume, compact and interrupt, so
    * no path can take the thread back; its live App Server runtime is closed by
    * the handover. The successor record carries the original thread identity, the
    * target model/effort and the full execution inputs its first request will
@@ -540,21 +524,6 @@ export class CodexSessionBackend implements CodexBackend {
     }
   }
 
-  async steerTurn(ownerId: string, turnId: string, input: string | readonly TurnInput[]): Promise<void> {
-    const record = this.byTurn(ownerId, turnId);
-    this.assertThreadOwnership(record, "steer its thread");
-    if (record.turnId !== turnId) throw new Error("Turn not found");
-    const items = turnInput(input);
-    if (record.state !== "running") throw new Error("Steer precondition failed");
-    const runtime = this.live.get(record.sessionId);
-    if (runtime === undefined) throw new Error("Turn runtime unavailable");
-    await runtime.rpc.request("turn/steer", {
-      threadId: record.threadId,
-      expectedTurnId: turnId,
-      input: items,
-    });
-  }
-
   async interruptTurn(ownerId: string, turnId: string): Promise<void> {
     const record = this.byTurn(ownerId, turnId);
     this.assertThreadOwnership(record, "interrupt its thread");
@@ -569,11 +538,6 @@ export class CodexSessionBackend implements CodexBackend {
 
   async pendingApprovals(ownerId: string, sessionId: string): Promise<readonly ApprovalRequest[]> {
     return structuredClone(this.required(ownerId, sessionId).approvals);
-  }
-
-  async pendingUserInputs(ownerId: string, sessionId: string): Promise<readonly UserInputRequest[]> {
-    const record = this.required(ownerId, sessionId);
-    return structuredClone([...this.live.get(record.sessionId)?.inputs.values() ?? []].map(pending => pending.request));
   }
 
   async answerUserInput(ownerId: string, requestId: string, answers: UserInputAnswer): Promise<void> {
@@ -662,8 +626,8 @@ export class CodexSessionBackend implements CodexBackend {
    * to a successor.
    *
    * The source keeps its history, reports and usage, but it is no longer the
-   * thread's owner: start, resume, configure, compact, steer, interrupt
-   * and restart all fail here, including cold recovery, so nothing can take the
+   * thread's owner: start, resume, compact and interrupt all fail here,
+   * including cold recovery, so nothing can take the
    * thread back from the successor.
    * @param record - the record about to operate its thread.
    * @param action - the refused operation, named in the error.
@@ -691,7 +655,7 @@ export class CodexSessionBackend implements CodexBackend {
     const session = dshSessionId(record.sessionId);
     this.gate?.releaseRuntime(session);
     const env = this.gate?.envFor(session);
-    const runtime: Runtime = { rpc: this.factory(env === undefined ? undefined : { env }), requests: new Map(), inputs: new Map(), commands: new Map(), facts: [], hooks: [] };
+    const runtime: Runtime = { rpc: this.factory(env === undefined ? undefined : { env }), requests: new Map(), inputs: new Map(), facts: [], hooks: [] };
     this.live.set(record.sessionId, runtime);
     runtime.rpc.on("notification", (message: RpcMessage) => {
       if (!runtime.uncertain && this.live.get(record.sessionId) === runtime && !this.closed) this.notification(record, message, runtime);
@@ -741,7 +705,6 @@ export class CodexSessionBackend implements CodexBackend {
       if (typeof turnId !== "string" || this.finished(record, turnId) || record.turnId !== undefined && record.turnId !== turnId) return;
     }
     if (message.method !== undefined && (message.method.startsWith("item/") || message.method.startsWith("turn/"))) {
-      trackCommand(runtime, message.method, params);
       this.publish(record, { type: "thread.notification", method: message.method, params });
     }
     if (message.method === "turn/started") {
@@ -1088,21 +1051,5 @@ function reconcilePending(record: StoredSession, result: ThreadResult): void {
   if (typeof result.model === "string" && result.model.length > 0) record.model = result.model;
   if (typeof result.reasoningEffort === "string" && result.reasoningEffort.length > 0) record.reasoningEffort = result.reasoningEffort;
   delete record.pending;
-}
-
-/**
- * Record one command item's live status.
- *
- * Only `commandExecution` items are tracked: they are the ones that can outlive
- * the turn that asked for them, and a closed Session must not abandon one.
- * @param runtime - the runtime that owns the thread the notification arrived on.
- * @param method - the native notification method.
- * @param params - the notification parameters.
- */
-function trackCommand(runtime: Runtime, method: string, params: Record<string, unknown>): void {
-  if (method !== "item/started" && method !== "item/completed") return;
-  const item = objectValue(params.item);
-  if (item.type !== "commandExecution" || typeof item.id !== "string") return;
-  runtime.commands.set(item.id, typeof item.status === "string" ? item.status : method === "item/started" ? "inProgress" : "completed");
 }
 

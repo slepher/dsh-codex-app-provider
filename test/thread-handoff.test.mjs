@@ -136,7 +136,6 @@ test("a handoff binds the successor to the original thread and de-authorizes the
   const continued = await fixture.backend.threadOwnership(OWNER, SUCCESSOR);
   assert.equal(continued.handoffFrom, OPENING);
   assert.equal(continued.threadId, source.threadId);
-  assert.deepEqual(await fixture.backend.occupiedThreads(), [source.threadId], "only the successor occupies the thread");
   assert.equal(fixture.hub.servers[0].closed, 1, "the handover closes the source's live runtime");
 
   // A repeated request reuses the recorded handover instead of re-deciding it.
@@ -158,7 +157,6 @@ test("every thread path on the source is refused after the handover, including c
   const refusals = [
     ["start a turn", () => fixture.backend.startTurn(OWNER, OPENING, "more work")],
     ["resume its thread", () => fixture.backend.resumeSession(OWNER, OPENING)],
-    ["configure its thread", () => fixture.backend.configureSession(OWNER, OPENING, { model: "third-model" })],
     ["compact its thread", () => fixture.backend.compactSession(OWNER, OPENING)],
   ];
   for (const [action, run] of refusals) {

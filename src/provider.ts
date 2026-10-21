@@ -53,6 +53,7 @@ import {
   toolCallNames,
 } from "./history.js";
 import { usageChunk, usageContextWindow } from "./usage.js";
+import { nativeSessionId } from "./handoff.js";
 import type { NativeCatalogGroup } from "./execution.js";
 import type { BridgeCallRequest, BridgeDeclaration, BridgeResponse, ToolBridge } from "./tool-bridge.js";
 
@@ -1214,9 +1215,14 @@ function toProviderQuestion(question: UserInputQuestion): ProviderQuestion {
   };
 }
 
-export function backendSessionId(sessionId: string): string {
-  return `codex:${sessionId}`;
-}
+/**
+ * The provider's native Session identity for one DSH Session.
+ *
+ * The mapping is defined once, next to the handoff seam that translates the two
+ * namespaces; it stays exported here because the Host adapter imports it from
+ * this module.
+ */
+export const backendSessionId = nativeSessionId;
 
 function providerError(error: unknown): Error {
   if (error instanceof LlmError) return error;

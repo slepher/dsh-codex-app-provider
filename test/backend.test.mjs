@@ -242,13 +242,12 @@ test("routes blocking user input to an interactive subscriber and answers exactl
       questions: [{ id: "q1", header: "Pick", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }] }],
     },
   });
-  const [pending] = await backend.pendingUserInputs("owner", "session");
+  const pending = events.at(-1).request;
   assert.equal(pending.turnId, turn.turnId);
   assert.deepEqual(pending.questions, [{ id: "q1", header: "Pick", question: "Proceed?", isOther: true, isSecret: false, options: [{ label: "Yes", description: "go" }] }]);
   assert.equal(events.at(-1).type, "userInput.requested");
   await backend.answerUserInput("owner", pending.requestId, { q1: { answers: ["Yes"] } });
   assert.deepEqual(server.responses.at(-1), { id: 77, result: { answers: { q1: { answers: ["Yes"] } } } });
-  assert.equal((await backend.pendingUserInputs("owner", "session")).length, 0);
   await assert.rejects(backend.answerUserInput("owner", pending.requestId, null), /no longer pending/);
 
   server.emit("request", {
@@ -256,7 +255,8 @@ test("routes blocking user input to an interactive subscriber and answers exactl
     method: "item/tool/requestUserInput",
     params: { threadId: session.threadId, turnId: turn.turnId, questions: [{ id: "q2", question: "Sure?", isOther: false, isSecret: false }] },
   });
-  const [second] = await backend.pendingUserInputs("owner", "session");
+  const second = events.at(-1).request;
+  assert.equal(events.at(-1).type, "userInput.requested");
   await backend.answerUserInput("owner", second.requestId, null);
   assert.deepEqual(server.responses.at(-1), { id: 78, result: { answers: {} } });
 });
@@ -289,7 +289,6 @@ test("preserves typed skills and marks compact as maintenance", async t => {
   assert.equal((await backend.readReports("owner", "opened")).length, 1, "a compact turn is maintenance: it records no report");
   await backend.closeSession("owner", "opened");
   assert.equal((await backend.readSession("owner", "opened")).threadId, "history-thread", "close preserves durable history identity");
-  assert.equal((await backend.occupiedThreads()).includes("history-thread"), false, "idle close releases occupancy");
 });
 
 test("a resumed Session recovers the last usage from the provider's own record", async t => {
