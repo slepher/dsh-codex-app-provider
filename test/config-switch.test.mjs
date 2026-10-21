@@ -98,7 +98,7 @@ test("a managed child switches model and effort in the same thread, pending unti
   const execution = { developerInstructions: "Role A instructions" };
   const session = { id: "child", header: { cwd: fixture.cwd } };
   const agent = { session, options: { model: "luna", reasoningEffort: "high", execution } };
-  const adapter = new CodexProviderAdapter({
+  const adapter = new CodexProviderAdapter({ currentCwd: () => fixture.cwd,
     backend: fixture.backend, sessions: { get: id => (id === "child" ? session : undefined) },
     agents: { get: id => (id === "child" ? agent : undefined) }, logger: { warn() {} }, providerCwd: fixture.cwd,
   });
@@ -135,7 +135,7 @@ test("an ordinary main Session switches model and effort on a later turn without
   const fixture = setup("dsh-provider-main-switch-");
   t.after(async () => { await fixture.backend.close(); cleanup(fixture); });
   const session = { id: "main", header: { cwd: fixture.cwd } };
-  const adapter = new CodexProviderAdapter({
+  const adapter = new CodexProviderAdapter({ currentCwd: () => fixture.cwd,
     backend: fixture.backend, sessions: { get: id => (id === "main" ? session : undefined) },
     agents: { get: () => undefined }, logger: { warn() {} }, providerCwd: fixture.cwd,
   });

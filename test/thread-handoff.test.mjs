@@ -93,7 +93,7 @@ async function handedOver(fixture, request = {}) {
 function adapterFor(fixture, { execution, model = "def-model", reasoningEffort = "medium" } = {}) {
   const session = { id: "continue", header: { cwd: fixture.cwd } };
   const agent = { session, options: { model, reasoningEffort, ...(execution === undefined ? {} : { execution }) } };
-  const adapter = new CodexProviderAdapter({
+  const adapter = new CodexProviderAdapter({ currentCwd: () => fixture.cwd,
     backend: fixture.backend, sessions: { get: id => (id === "continue" ? session : undefined) },
     agents: { get: id => (id === "continue" ? agent : undefined) }, logger: { warn() {} }, providerCwd: fixture.cwd,
   });

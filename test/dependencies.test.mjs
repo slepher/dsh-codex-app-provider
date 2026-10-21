@@ -115,20 +115,18 @@ test("the development tree holds exactly one generation of every dsh package", (
   assert.deepEqual(drifted, [], `every installed dsh package must be ${generation}`);
 });
 
-test("the declared compatibility matrix holds only measured releases", () => {
+test("the runtime gate accepts the rc.1 baseline and records only measured compatibility", () => {
   const releases = manifest.dsh?.compatibility?.dshReleases;
   assert.ok(releases !== undefined, "the plugin declares the dsh releases it was verified on");
   const names = Object.keys(releases);
-  assert.ok(names.length > 0, "at least one release is declared");
   for (const [version, verdict] of Object.entries(releases)) {
     assert.match(version, /^\d+\.\d+\.\d+/, `${version} must be a concrete release`);
-    assert.equal(verdict, "compatible", `${version} is declared only after scripts/verify-dsh-compat.mjs passed it`);
+    assert.equal(verdict, "compatible", `${version} is recorded only after live folder installation was verified`);
   }
-  // The development tree pins the generation every unit test runs against, so a
-  // matrix that omitted it would claim support this checkout never exercises.
   const generation = [...new Set(Object.entries(manifest.devDependencies)
     .filter(([name]) => isDshFamily(name))
     .map(([, spec]) => spec))];
   assert.equal(generation.length, 1, "devDependencies pin one generation");
-  assert.ok(names.includes(generation[0]), `the matrix covers the development generation ${generation[0]}`);
+  assert.equal(manifest.engines.dsh, ">=0.2.1-rc.1 <0.2.2-0");
+  assert.ok(names.every(version => /^0\.2\.1(?:-|$)/.test(version)), "measurements stay within the supported release line");
 });

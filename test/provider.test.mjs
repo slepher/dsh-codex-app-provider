@@ -100,8 +100,8 @@ function cleanup(fixture) {
   rmSync(fixture.cwd, { recursive: true, force: true });
 }
 
-function adapterFor(fixture, { approval, questions, attachments, agents = new Map(), sessions = new Map(), logger } = {}) {
-  return new CodexProviderAdapter({
+function adapterFor(fixture, { approval, questions, attachments, agents = new Map(), sessions = new Map(), logger, currentCwd } = {}) {
+  return new CodexProviderAdapter({ currentCwd: currentCwd ?? (id => agents.get(id)?.options?.execution?.boundary?.cwd ?? sessions.get(id)?.header?.cwd),
     backend: fixture.backend,
     sessions: { get: id => sessions.get(id) },
     agents: { get: id => agents.get(id) },
@@ -267,7 +267,7 @@ test("relearns the context window from persisted provider records after a restar
   await fixture.backend.close();
   const restarted = new CodexSessionBackend(fixture.stateDir, () => new FakeServer(fixture.hub));
   t.after(async () => { await restarted.close(); cleanup(fixture); });
-  const second = new CodexProviderAdapter({
+  const second = new CodexProviderAdapter({ currentCwd: () => fixture.cwd,
     backend: restarted,
     sessions: { get: id => sessions.get(id) },
     agents: { get: () => undefined },
@@ -305,7 +305,7 @@ test("recovers a native thread identity the record lost from the DSH session log
   writeFileSync(recordPath, `${JSON.stringify(persisted, null, 2)}\n`);
 
   const restarted = new CodexSessionBackend(fixture.stateDir, () => new FakeServer(fixture.hub));
-  const second = new CodexProviderAdapter({
+  const second = new CodexProviderAdapter({ currentCwd: () => fixture.cwd,
     backend: restarted,
     sessions: { get: id => sessions.get(id) },
     agents: { get: () => undefined },
@@ -1350,7 +1350,7 @@ test("the deployment's own workspace supplies the default model and effort", asy
     { model: "sol", displayName: "Sol", isDefault: true, defaultReasoningEffort: "high",
       supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep" }] },
   ];
-  const adapter = new CodexProviderAdapter({ backend: fixture.backend, sessions: { get: () => undefined },
+  const adapter = new CodexProviderAdapter({ currentCwd: () => fixture.cwd, backend: fixture.backend, sessions: { get: () => undefined },
     agents: { get: () => undefined }, logger: { warn() {} }, providerCwd: workspace });
 
   const preferred = await adapter.resolveModel("codex", "sol");
@@ -1826,7 +1826,7 @@ test("refuses to import facts when the session log cannot be read", async t => {
   const reimported = [];
   const unreadable = { header: { cwd: fixture.cwd }, append(...args) { reimported.push(args); } };
   const warnings = [];
-  const second = new CodexProviderAdapter({
+  const second = new CodexProviderAdapter({ currentCwd: () => fixture.cwd,
     backend: fixture.backend,
     sessions: { get: id => (id === "main" ? unreadable : undefined) },
     agents: { get() {} },
@@ -1842,4 +1842,36 @@ test("refuses to import facts when the session log cannot be read", async t => {
   assert.equal(reimported.length, 0, "an unreadable log is never treated as an empty one");
   assert.ok(warnings.some(message => /not readable/.test(message)), `the degradation is reported once, got: ${warnings.join(" | ")}`);
   assert.equal(chunks.at(-1)?.reason?.kind, "stop", "the turn itself still completes");
+});
+
+
+test("starts in the current directory and refuses to silently move an existing thread", async t => {
+  const f = setup("provider-current-cwd-");
+  const lane = mkdtempSync(join(tmpdir(), "provider-current-lane-"));
+  let currentCwd = lane;
+  const sessions = new Map([["current", { header: { cwd: f.cwd } }]]);
+  const adapter = adapterFor(f, { sessions, currentCwd: () => currentCwd });
+  t.after(async () => { adapter.close(); await f.backend.close(); cleanup(f); rmSync(lane, { recursive: true, force: true }); });
+  await liveTurn(adapter, f, "current", options("current", [user("u1", "work in the current lane")]), async server => {
+    const started = server.calls.find(call => call.method === "thread/start");
+    assert.equal(started.params.cwd, lane);
+    server.notify("item/completed", { threadId: server.threadId, turnId: server.turnId, item: { type: "agentMessage", phase: "final_answer", text: "done" } });
+    server.notify("turn/completed", { threadId: server.threadId, turn: { id: server.turnId, status: "completed" } });
+  });
+  const record = await f.backend.readSession(OWNER, "codex:current");
+  assert.equal(record.cwd, f.cwd);
+  assert.equal(record.executionCwd, lane);
+  currentCwd = f.cwd;
+  await assert.rejects(collect(adapter.stream(options("current", [user("u2", "continue")]))), /execution location changed/);
+  assert.equal(f.hub.servers[0].calls.filter(call => call.method === "turn/start").length, 1);
+});
+
+test("orders reasoning efforts from least to greatest without moving the configured default", async t => {
+  const f = setup("provider-effort-order-");
+  f.hub.models[0].supportedReasoningEfforts = ["high", "low", "medium"].map(reasoningEffort => ({ reasoningEffort, description: "" }));
+  const adapter = adapterFor(f);
+  t.after(async () => { adapter.close(); await f.backend.close(); cleanup(f); });
+  const model = await adapter.resolveModel("codex", "luna");
+  assert.deepEqual(model.reasoning.efforts.map(effort => effort.id), ["low", "medium", "high"]);
+  assert.equal(model.reasoning.defaultEffort, "high");
 });

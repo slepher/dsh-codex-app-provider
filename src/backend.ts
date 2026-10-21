@@ -153,6 +153,7 @@ export class CodexSessionBackend implements CodexBackend {
   ): Promise<SessionSnapshot> {
     if (!ownerId || !sessionId || !isAbsolute(cwd)) throw new Error("Owner, Session ID, and absolute cwd are required");
     const boundary = normalizedBoundary(options.boundary);
+    if (options.executionCwd !== undefined && !isAbsolute(options.executionCwd)) throw new Error("Execution cwd must be absolute");
     // The gate a Host bound before this Session's first start is persisted with
     // the record, so a resume, a restart or a cold recovery of the same Session
     // keeps exactly the authority its first request carried.
@@ -164,7 +165,7 @@ export class CodexSessionBackend implements CodexBackend {
       ownerId,
       sessionId,
       cwd,
-      executionCwd: boundary?.cwd ?? cwd,
+      executionCwd: boundary?.cwd ?? options.executionCwd ?? cwd,
       state: "unknown",
       model: options.model,
       reasoningEffort: options.reasoningEffort,

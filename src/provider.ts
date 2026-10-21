@@ -144,6 +144,8 @@ export interface CodexProviderDeps {
   backend: CodexBackend;
   sessions: { get(id: string): ProviderSessionFace | undefined };
   agents: { get(id: string): Agent | undefined };
+  /** Current DSH execution directory, distinct from the original project. */
+  currentCwd(sessionId: string): string | undefined;
   /**
    * Optional DSH approval seam. Absent means a native request cannot reach a
    * composed answerer and is declined fail-closed, never fabricated.
@@ -228,7 +230,7 @@ export class CodexProviderAdapter extends LlmAdapter {
       inputModalities: this.modalities(option),
       ...(contextWindow === undefined ? {} : { context: { contextWindow } }),
       reasoning: {
-        efforts: option.supportedReasoningEfforts.map(item => ({
+        efforts: [...option.supportedReasoningEfforts].sort((a, b) => effortRank(a.reasoningEffort) - effortRank(b.reasoningEffort)).map(item => ({
           id: ReasoningEffortId(item.reasoningEffort),
           name: item.reasoningEffort,
           ...(item.description === "" ? {} : { description: item.description }),
@@ -569,8 +571,13 @@ export class CodexProviderAdapter extends LlmAdapter {
     if (recorded !== undefined && execution !== undefined && !executionInputsEqual(recorded, execution)) {
       throw new LlmError("Native execution instructions or boundary changed; create a new child", "EXECUTION_MISMATCH");
     }
-    const targetExecutionCwd = execution !== undefined ? executionCwd(execution, cwd) : undefined;
-    if (record !== undefined && targetExecutionCwd !== undefined
+    const currentCwd = this.deps.currentCwd(sessionId);
+    if (currentCwd === undefined || !isAbsolute(currentCwd)) throw new LlmError("Codex provider requires a current execution directory", "NO_WORKSPACE");
+    const targetExecutionCwd = executionCwd(execution ?? recorded, currentCwd);
+    if ((execution ?? recorded)?.boundary !== undefined && targetExecutionCwd !== currentCwd) {
+      throw new LlmError("The current directory differs from the managed execution boundary; create a new child", "EXECUTION_MISMATCH");
+    }
+    if (record !== undefined
       && (record.executionCwd ?? recordedExecution(record)?.boundary?.cwd ?? cwd) !== targetExecutionCwd) {
       throw new LlmError("This Session's Codex execution location changed; start a new child", "EXECUTION_MISMATCH");
     }
@@ -597,7 +604,7 @@ export class CodexProviderAdapter extends LlmAdapter {
     const plan = await planInput(durableMessages(options.messages), threadId, this.cursors.get(sessionId), this.imageResolver, events);
     if (successor) assertFreshSuccessorInput(plan.input);
     if (record === undefined) {
-      record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective });
+      record = await backend.createSession(owner, backendId, cwd, { ...turnOptions(options), ...effective, executionCwd: targetExecutionCwd });
     } else if (record.threadId === undefined && logThreadId !== undefined) {
       // The cache is gone and the log still names the thread: resume that exact
       // thread. `thread/start` would silently fork the conversation.
@@ -703,7 +710,7 @@ export class CodexProviderAdapter extends LlmAdapter {
 
   private async *streamAuxiliary(options: GenerateOptions, sessionId: string, signal: AbortSignal): AsyncIterable<StreamChunk> {
     if (signal.aborted) throw new LlmError("Codex auxiliary call aborted before start", "ABORTED");
-    const cwd = this.sessionCwd(sessionId) ?? this.deps.providerCwd;
+    const cwd = this.deps.currentCwd(sessionId) ?? this.deps.providerCwd;
     const owner = OWNER_ID, backendId = `${AUXILIARY_PREFIX}${randomUUID()}`, backend = this.deps.backend;
     // Tool-call names are read from durable messages only: an identity-free
     // one-shot input carries no tool history, and the auxiliary path is exactly
@@ -1087,4 +1094,12 @@ export function backendSessionId(sessionId: string): string {
 function providerError(error: unknown): Error {
   if (error instanceof LlmError) return error;
   return new LlmError(error instanceof Error ? error.message : String(error), "CODEX_ERROR");
+}
+
+/** Order the selectable Codex reasoning levels independently of the configured default. */
+function effortRank(effort: string): number {
+  const order = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const rank = order.indexOf(effort);
+  if (rank < 0) throw new LlmError(`Unknown Codex reasoning effort: ${effort}`, "INVALID_RESPONSE");
+  return rank;
 }

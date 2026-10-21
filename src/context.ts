@@ -70,10 +70,9 @@ export function selectedProvider(ctx: Context, agent: Agent): string | undefined
 
 /**
  * Drop DSH-injected context from the messages entering a Codex step. The
- * `agent/pre-step` waterfall is the supported logical-upstream seam: messages
- * removed here are neither committed to the Session surface (so the transcript
- * shows no misleading context-injection rows) nor sent to Codex. Recalls,
- * relays and compaction checkpoints are preserved.
+ * Request admission can refresh and log dynamic DSH context after this hook.
+ * The provider also filters its outgoing history before sending to Codex.
+ * Recalls, relays and compaction checkpoints are preserved.
  */
 export function installCodexContextFilter(ctx: Context): () => void {
   return ctx.on("agent/pre-step", async ({ agent, signal }, next) => {

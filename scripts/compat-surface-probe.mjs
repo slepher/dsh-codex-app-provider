@@ -12,19 +12,12 @@
  *   - the seams the plugins compose against are still where the plugins expect
  *     them: the settings layering and the structured-question answerer.
  *
- * The tool-result check is measurement, not decoration: `ToolCallRecovery`
- * deletes a pending call as soon as the run records its result, and the
- * agent-loop records every ordinary result with `surfaceOp: 'append'`. A release
- * without the class is pre-0.2.0 and has nothing to duplicate, so that check
- * reports SKIP rather than passing silently.
- *
  * Usage: node compat-surface-probe.mjs   (located in, and run from, the profile root)
  */
 import { readFileSync } from "node:fs";
 
 const PLUGINS = ["dsh-codex-app-provider", "dsh-workflow-kit"];
 const checks = [];
-const skips = [];
 const failures = [];
 
 /** Read one installed plugin's own manifest, exactly as the Plugin Manager does. */
@@ -55,7 +48,7 @@ const { evaluatePluginCompatibility, readPluginMeta } = appBoot;
 for (const name of PLUGINS) {
   const issue = evaluatePluginCompatibility(manifestOf(name));
   if (issue === undefined) checks.push(`${name} passes the compatibility gate`);
-  else failures.push(`${name} is incompatible with ${issue.runtimeVersion}: peerDependencies ${JSON.stringify(issue.peers)}`);
+  else failures.push(`${name} is incompatible with ${issue.runtimeVersion}: requirements ${JSON.stringify(issue.requirements)}`);
 }
 
 // 2. The display metadata the Plugins page reads without evaluating plugin code.
@@ -72,15 +65,8 @@ for (const name of PLUGINS) {
 
 // 3. Exactly-once tool results: the behaviour that decides whether the provider
 //    can render two `[tool result …]` lines for one `callId`.
-let ToolCallRecovery;
-try {
-  ({ ToolCallRecovery } = await import("@deepseek-ai/dsh-session"));
-} catch {
-  ToolCallRecovery = undefined;
-}
-if (typeof ToolCallRecovery !== "function") {
-  skips.push("this release has no ToolCallRecovery: a step failure cannot append a second tool result");
-} else {
+const { ToolCallRecovery } = await import("@deepseek-ai/dsh-session");
+{
   const call = (id, seq) => ({
     type: "assistant/message",
     seq,
@@ -118,20 +104,15 @@ else checks.push("the profile layering behind the settings page still composes")
 // 5. The seams the provider composes against. Absence is a supported deployment
 //    (the provider fails closed), but a renamed entry point is not: the provider
 //    would silently stop carrying the question to the human.
-const questions = await import("@deepseek-ai/dsh-user-questions").catch(() => undefined);
-if (questions === undefined) skips.push("this release installs no user-questions seam");
-else if (typeof questions.UserQuestionService?.prototype?.ask !== "function") failures.push("the structured-question seam no longer offers ask(...): the provider would stop asking the human");
-else checks.push("the structured-question ask(...) seam still exists");
-
-const askTool = await import("@deepseek-ai/dsh-tool-ask-user").catch(() => undefined);
-if (askTool === undefined) skips.push("this release installs no ask_user_question tool");
-else if (typeof askTool.Config !== "function") skips.push("this release's ask_user_question has no configurable mode: the timed path arrives with 0.2.0");
-else {
-  const { mode, timeout } = askTool.Config({});
-  checks.push(`ask_user_question defaults to ${JSON.stringify(mode)} mode (${timeout}s foreground wait)`);
+const { UserQuestionService } = await import("@deepseek-ai/dsh-user-questions");
+if (typeof UserQuestionService.prototype.ask !== "function") failures.push("missing structured-question ask(...)");
+else checks.push("structured-question ask(...) is available");
+for (const name of PLUGINS) {
+  const manifest = manifestOf(name);
+  if (evaluatePluginCompatibility(manifest, {}, "0.2.0-rc.2") === undefined) failures.push(`${name} accepts an unsupported older runtime`);
+  else checks.push(`${name} rejects an unsupported older runtime`);
 }
 
 for (const line of checks) console.log(`  · ${line}`);
-for (const line of skips) console.log(`  ~ SKIP: ${line}`);
 for (const line of failures) console.error(`  ✖ ${line}`);
 if (failures.length > 0) throw new Error(`${failures.length} surface check(s) failed on this release`);

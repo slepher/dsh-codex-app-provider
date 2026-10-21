@@ -11,6 +11,7 @@ import { CODEX_OWNER_ID } from "../lib/provider.js";
 test("headless Host registers one route, releases ownership on unload, and reloads", async t => {
   const stateDir = mkdtempSync(join(tmpdir(), "dsh-app-host-"));
   const ctx = new Context();
+  ctx.provide("workingDirectory", { get: session => session.currentCwd ?? session.header.cwd });
   new LlmRuntime(ctx);
   ctx.provide("agents", { get() {} });
   ctx.provide("sessions", { get() {} });
@@ -42,6 +43,7 @@ test("a disposed Session releases the Codex record that backed it", async t => {
     executionCwd: "/work", state: "unknown", approvals: [], options: {}, facts: [], reports: [] }));
 
   const ctx = new Context();
+  ctx.provide("workingDirectory", { get: session => session.currentCwd ?? session.header.cwd });
   new LlmRuntime(ctx);
   ctx.provide("agents", { get() {} });
   ctx.provide("sessions", { get() {} });
@@ -65,6 +67,7 @@ test("an omitted stateDir lands in the launched profile's state tree", async t =
   const home = mkdtempSync(join(tmpdir(), "dsh-app-profile-home-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const ctx = new Context();
+  ctx.provide("workingDirectory", { get: session => session.currentCwd ?? session.header.cwd });
   new LlmRuntime(ctx);
   ctx.provide("agents", { get() {} });
   ctx.provide("sessions", { get() {} });

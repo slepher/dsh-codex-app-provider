@@ -17,7 +17,7 @@ for (const fault of ["timeout", "exit"]) test(`real RPC ${fault} terminates prov
     rpc.request = (method, params) => { if (method === "turn/start") starts++; return request(method, params); };
     return rpc;
   });
-  const adapter = new CodexProviderAdapter({ backend, providerCwd: dir, sessions: { get: () => ({ header: { cwd: dir } }) }, agents: { get() {} }, logger: { warn() {} } });
+  const adapter = new CodexProviderAdapter({ currentCwd: () => dir, backend, providerCwd: dir, sessions: { get: () => ({ header: { cwd: dir } }) }, agents: { get() {} }, logger: { warn() {} } });
   t.after(async () => { adapter.close(); await backend.close(); rmSync(dir, { recursive: true, force: true }); });
   const options = { provider: "codex", model: "model", sessionId: "s", messages: [{ id: "u", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "once" }] }] };
   const run = async () => { for await (const _ of adapter.stream(options)) {} };

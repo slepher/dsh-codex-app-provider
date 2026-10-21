@@ -95,6 +95,8 @@ export interface ExecutionBoundary {
 }
 
 export interface CreateSessionOptions extends TurnOptions {
+  /** Initial execution directory; the Session's cwd remains its project identity. */
+  executionCwd?: string;
   /**
    * The workflow gate this Session was bound to before its first start. The
    * Host registers it through `ctx.codexToolGate`; a Session created without one

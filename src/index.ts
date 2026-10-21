@@ -9,6 +9,7 @@ import { installCodexContextFilter } from "./context.js";
 import { dshSessionId, nativeSessionId } from "./handoff.js";
 import { CODEX_OWNER_ID, CODEX_PROVIDER, CodexProviderAdapter, backendSessionId, type ProviderApprovalSeam, type ProviderAttachmentSeam, type ProviderQuestionSeam } from "./provider.js";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-working-directory";
 import { CodexGateBridge } from "./tool-gate.js";
 import { fileURLToPath } from "node:url";
 export type { NativeExecution, NativeExecutionReader, NativeExecutionReport } from "./execution.js";
@@ -42,7 +43,7 @@ export const Config: z<Config> = z.object({
   providerCwd: z.string().required(false),
 });
 
-export const inject = ["agents", "sessions", "llm"];
+export const inject = ["agents", "sessions", "llm", "workingDirectory"];
 
 /**
  * Launcher-provided profile facts, read defensively.
@@ -188,6 +189,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       backend,
       sessions: ctx.sessions,
       agents: ctx.agents,
+      currentCwd: id => {
+        const session = ctx.sessions.get(SessionId(id));
+        return session === undefined ? undefined : ctx.workingDirectory.get(session);
+      },
       // The user-facing halves of a native request are DSH's to ask. Codex keeps
       // its own permission judgment; the plugin only carries the question.
       approval: ctx.get("approval") as ProviderApprovalSeam | undefined,
@@ -212,6 +217,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         const liveCwd = liveSessionCwd(ctx, request.fromSessionId);
         if (liveCwd !== undefined && liveCwd !== source.cwd) {
           throw new Error("The source Session workspace changed; the Codex thread handoff was refused");
+        }
+        const liveSession = ctx.sessions.get(SessionId(request.fromSessionId));
+        if (liveSession !== undefined && ctx.workingDirectory.get(liveSession) !== (source.executionCwd ?? source.cwd)) {
+          throw new Error("The source Session execution directory changed; the Codex thread handoff was refused");
         }
         // The successor continues the same native thread, so its execution cwd
         // is the source's; the boundary the caller declared travels verbatim and

@@ -5,7 +5,7 @@ import { ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 
 export const name = "codex-app-native-child-test";
-export const inject = ["agents", "subagents", "sessionPersistence", "codexExecution", "llm"];
+export const inject = ["agents", "subagents", "sessionPersistence", "codexExecution", "llm", "workingDirectory"];
 
 /** Test-only profile plugin: exercise the real spawn/descriptor/cold-resume chain. */
 export function apply(ctx) {
@@ -40,7 +40,7 @@ export function apply(ctx) {
     for (const role of ["A", "B"]) {
       const execution = {
         developerInstructions: `Your role marker is DSH_ROLE_${role}. Reply with only this marker when asked. ${externalEvents ? `Before every reply, use your native shell to run printf DSH_TOOL_${role}.` : "Do not run tools."}`,
-        boundary: { cwd: parent.session.header.cwd, writableRoots: [parent.session.header.cwd], network: "disabled" },
+        boundary: { cwd: ctx.workingDirectory.get(parent.session), writableRoots: [parent.session.header.cwd], network: "disabled" },
       };
       // The dispatcher owns the child's execution snapshot, exactly as the
       // workflow does: it hands over a detached value, so changing its own copy
@@ -48,9 +48,9 @@ export function apply(ctx) {
       // spreading the request shallowly (`resolveChildAgentOptions`), so a nested
       // object passed by reference would stay the caller's.
       const dispatched = structuredClone(execution);
-      const created = await ctx.subagents.startContinuable({
-        provider: "spawn", label: `native role ${role}`,
-        request: { parent, prompt: [{ type: "text", text: "Reply with your role marker." }], agentOptions: {
+      const created = await ctx.subagents.startActivation({
+        delivery: "parent", provider: "spawn", label: `native role ${role}`,
+        request: { parent, cwd: execution.boundary.cwd, prompt: [{ type: "text", text: "Reply with your role marker." }], agentOptions: {
           provider: "codex", model: process.env.DSH_CODEX_TEST_MODEL ?? "gpt-6-luna", reasoningEffort: ReasoningEffortId("medium"), execution: dispatched,
         } }, signal,
       });

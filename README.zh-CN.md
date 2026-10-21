@@ -72,7 +72,7 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
   "name": "dsh-profile-codex",
   "private": true,
   "dependencies": {
-    "dsh-codex-app-provider": "file:/absolute/path/dsh-codex-app-provider-0.1.1.tgz"
+    "dsh-codex-app-provider": "file:/absolute/path/dsh-codex-app-provider-0.2.1.tgz"
   },
   "dsh": {
     "profile": {
@@ -124,7 +124,7 @@ npm pack               # dsh-codex-app-provider-<version>.tgz
 本插件是模型路由与原生执行底座，不是第二套委派系统。早期版本还带有 `codex_workers` 工具、自己的 worker 注册表、
 报告账本与验收流程；这一面与核心 `ctx.subagents` 的生命周期重复，因此已删除。委派现在走核心：
 
-- 一次性与可续 child：`subagent` / `subagent_fork` 工具（`ctx.subagents.startContinuable`），可续的那些配一套
+- 一次性与可续 child：`subagent` / `subagent_fork` 工具（`ctx.subagents.startActivation`），可续的那些配一套
   发消息 / 中断 / 列举的控制面；
 - 走 `codex` 路由的 child：在 child 的 `agentOptions` 里指定 provider，其逐轮执行事实、用量与报告仍可通过
   `ctx.codexExecution.read(childSessionId)` 读取。
@@ -205,19 +205,17 @@ gate 的策略不在这里：某个 `role` 能写什么、能调用哪些工具�
 
 ## 兼容性
 
-| DSH 版本 | 结论 |
-|---|---|
-| `0.1.7-rc.2` | compatible |
-| `0.2.0-rc.2` | compatible |
+DSH 宿主范围为 **`>=0.2.1-rc.1 <0.2.2-0`**，最低版本是 rc.1，不包含 alpha 或 0.2.2。开发依赖与 lockfile 仍固定为 `0.2.1-rc.2`。共享宿主服务使用 peer dependency，不另带旧代宿主实例。`dsh.compatibility.dshReleases` 只记录通过联合验证的版本，不代替安装门禁。
 
-所有 `@deepseek-ai/dsh-*` 宿主包都声明为可选 `*` peer 依赖，因此 harness 兼容性门禁不会用某一代钉死本插件，一份构建可加载到每个已声明版本。仓库内的 `devDependencies` 钉住用于类型检查与测试的那一代（`0.1.7-rc.2`）。
+两个插件协调使用 `0.2.1`。升级时同时更新 provider 和 workflow；不提供旧 DSH API 回退。当前执行目录由 `workingDirectory` 服务提供，与 Session 的原始项目目录分开。已有 Codex thread 不随目录切换而移动；目录改变后应新建会话/child。
 
-`scripts/verify-dsh-compat.mjs` 才是让上表成立的依据：对每个已声明版本，它把该版 CLI 装进一次性的 `DSH_HOME` profile，加入两个插件 tarball，装配 profile，针对该版自身的接缝做探测，启动 web server，并断言插件能力面有应答。只有每一步都成立，该版本才会被判为 `compatible`。
+构建两个插件后，运行本地文件夹预检，检查版本门禁、入口与本地化资源。此步骤不安装 DSH、不修改 profile，也不会下载 Office 运行库：
 
 ```bash
-node scripts/verify-dsh-compat.mjs                    # 所有已声明版本
-node scripts/verify-dsh-compat.mjs 0.1.7-rc.2 0.2.0-rc.2
+node scripts/verify-dsh-compat.mjs
 ```
+
+然后在现有 DSH 的插件页依次添加 provider 与 workflow 目录，确认激活成功、设置可读写及子代理可续跑。预检通过不能代替这一步。
 
 ## 开发
 

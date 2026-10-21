@@ -72,7 +72,7 @@ Install the tarball into a DSH profile and add the plugin to that profile's bund
   "name": "dsh-profile-codex",
   "private": true,
   "dependencies": {
-    "dsh-codex-app-provider": "file:/absolute/path/dsh-codex-app-provider-0.1.1.tgz"
+    "dsh-codex-app-provider": "file:/absolute/path/dsh-codex-app-provider-0.2.1.tgz"
   },
   "dsh": {
     "profile": {
@@ -128,7 +128,7 @@ core `ctx.subagents` lifecycle, so it was removed. Delegation now happens
 through the core:
 
 - one-shot and continuable children: the `subagent` / `subagent_fork` tools
-  (`ctx.subagents.startContinuable`), with a message/interrupt/list control
+  (`ctx.subagents.startActivation`), with a message/interrupt/list control
   surface for the continuable ones;
 - a child that runs on the `codex` route: name the provider in the child's
   `agentOptions`, and its per-turn execution facts, usage and reports stay
@@ -213,19 +213,17 @@ The gate is policy-free here: what a `role` may write or which tool names it may
 
 ## Compatibility
 
-| DSH release | Verdict |
-|---|---|
-| `0.1.7-rc.2` | compatible |
-| `0.2.0-rc.2` | compatible |
+The DSH host range is **`>=0.2.1-rc.1 <0.2.2-0`**: rc.1 is the minimum; alpha releases and 0.2.2 are excluded. Development dependencies and the lockfile remain pinned to `0.2.1-rc.2`. Shared host services remain peer dependencies. `dsh.compatibility.dshReleases` records verified releases and does not replace the installation gate.
 
-Every `@deepseek-ai/dsh-*` host package is declared as an optional `*` peer dependency, so the harness compatibility gate never judges the plugin by a pinned generation and one build loads on each declared release. The checked-in `devDependencies` pin the generation used for type checking and tests (`0.1.7-rc.2`).
+Update both plugins together to `0.2.1`. There are no older DSH API fallbacks. The `workingDirectory` service supplies the current execution directory independently of the Session's original project. An existing Codex thread keeps its directory; create a new Session/child after changing it.
 
-`scripts/verify-dsh-compat.mjs` is what makes the table true: for each declared release it installs that CLI into a throwaway `DSH_HOME` profile, adds both plugin tarballs, composes the profile, probes that release's own surfaces, boots the web server, and asserts the plugin surfaces answer. A release is only reported `compatible` when every step holds.
+After building both plugins, run the local folder preflight to check version rejection, entry points and localized resources. It installs no DSH runtime, changes no profile and downloads no Office components:
 
 ```bash
-node scripts/verify-dsh-compat.mjs                    # every declared release
-node scripts/verify-dsh-compat.mjs 0.1.7-rc.2 0.2.0-rc.2
+node scripts/verify-dsh-compat.mjs
 ```
+
+Then add the provider folder followed by the workflow folder through the existing DSH plugin page. Verify activation, settings reads/writes and child continuation there; preflight alone does not establish live compatibility.
 
 ## Development
 

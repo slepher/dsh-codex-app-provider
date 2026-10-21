@@ -200,7 +200,7 @@ export function threadParams(record: StoredSession): Record<string, unknown> {
   return {
     // The native thread runs where the task runs, which is the Session workspace
     // only when the Session declares no task boundary.
-    cwd: boundary?.cwd ?? record.cwd,
+    cwd: boundary?.cwd ?? record.executionCwd ?? record.cwd,
     model: record.model,
     ...(options.developerInstructions === undefined ? {} : { developerInstructions: options.developerInstructions }),
     ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),

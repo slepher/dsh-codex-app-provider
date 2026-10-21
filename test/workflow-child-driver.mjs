@@ -6,7 +6,7 @@ import { WorkflowConfiguration, WorkflowStore, WorkflowWorkers } from "dsh-workf
 import { setTimeout } from "node:timers/promises";
 
 export const name = "codex-app-workflow-child-test";
-export const inject = ["agents", "sessions", "subagents", "sessionPersistence", "llm", "codexExecution"];
+export const inject = ["agents", "sessions", "subagents", "sessionPersistence", "llm", "codexExecution", "workingDirectory"];
 
 /** Test-only profile plugin: exercise the real spawn/descriptor/cold-resume chain. */
 export function apply(ctx) {

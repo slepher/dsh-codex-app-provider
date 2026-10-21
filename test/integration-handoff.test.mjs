@@ -45,8 +45,8 @@ const requests = file => readFileSync(file, "utf8").trim().split("\n").filter(Bo
 
 test("the handoff entry forwards the declared lane boundary and the successor resumes the handed thread", async t => {
   const fixture = setup();
-  const opening = { id: "opening", header: { cwd: fixture.cwd } };
-  const successor = { id: "continue", header: { cwd: fixture.cwd } };
+  const opening = { id: "opening", header: { cwd: fixture.cwd }, currentCwd: fixture.lane };
+  const successor = { id: "continue", header: { cwd: fixture.cwd }, currentCwd: fixture.lane };
   const sessions = new Map([[opening.id, opening], [successor.id, successor]]);
   const agents = new Map([
     [opening.id, { session: opening, options: { model: "luna", reasoningEffort: "medium",
@@ -55,6 +55,7 @@ test("the handoff entry forwards the declared lane boundary and the successor re
       execution: { developerInstructions: "successor role", boundary: { cwd: fixture.lane, writableRoots: [fixture.lane], network: "disabled" } } } }],
   ]);
   const ctx = new Context();
+  ctx.provide("workingDirectory", { get: session => session.currentCwd ?? session.header.cwd });
   new LlmRuntime(ctx);
   ctx.provide("agents", { get: id => agents.get(id) });
   ctx.provide("sessions", { get: id => sessions.get(id) });
