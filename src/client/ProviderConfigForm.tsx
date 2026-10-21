@@ -73,6 +73,21 @@ export function withForm(form: ConfigForm<ProviderConfigFields>): (props: Plugin
 }
 
 /**
+ * Bind the Host's configuration form to the Settings page surface.
+ *
+ * A settings page receives the section owner props rather than a form, so this
+ * wrapper ignores them and renders the same page body.
+ * @param form - the Host form for this entry.
+ * @returns the settings-section component.
+ */
+export function withFormAsPage(form: ConfigForm<ProviderConfigFields>): () => ReactNode {
+  const Bound = withForm(form);
+  return function ProviderConfigSettingsPage(): ReactNode {
+    return <Bound view="page" />;
+  };
+}
+
+/**
  * The entry component: a one-liner in the summary view, the form in the page view.
  * @param props - the view the page asks for and its Host form.
  */

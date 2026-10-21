@@ -1,13 +1,13 @@
 /**
  * The browser half of the Codex app provider.
  *
- * The plugin is a Host plugin: it has no page of its own. This half exists for
- * the configurations the plugin manager shows — the bundle's own configuration
- * section and the row's Configure page — so a deployment can edit `command`,
- * `allowMainSession` and `toolBridge` from the Plugins page instead of
- * hand-editing the profile patch. Both surfaces edit the same Loader entry
- * config through the Host settings form; nothing here runs a Codex process or
- * reads a Session.
+ * The plugin is a Host plugin: it has no page of its own. This half contributes
+ * three surfaces for the same Host configuration form — the bundle's own
+ * configuration section and the row's Configure page in the Plugin manager, and
+ * a Settings page of its own (the most discoverable one) — so a deployment can
+ * edit `command`, `allowMainSession` and `toolBridge` from the UI instead of
+ * hand-editing the profile patch. Nothing here runs a Codex process or reads a
+ * Session.
  * @module dsh-codex-app-provider/client
  */
 
@@ -20,7 +20,7 @@ import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
 import type { ConfigForm } from "@deepseek-ai/dsh-client-ui-settings/client";
 // Type-only: the plugin manager declares the slots and the props they receive.
 import type {} from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
-import { withForm, type ProviderConfigFields } from "./ProviderConfigForm.js";
+import { withForm, withFormAsPage, type ProviderConfigFields } from "./ProviderConfigForm.js";
 
 /** Services this half reads: slot registration and the Host configuration form. */
 export const inject = ["slots", "configForms"];
@@ -29,14 +29,17 @@ export const inject = ["slots", "configForms"];
 const PACKAGE = "dsh-codex-app-provider";
 /** The Loader entry id its `cordis.patch.yml` declares. */
 const ROW_ID = "dsh-codex-app-provider";
+/** The Settings page id; unique among settings sections. */
+const SECTION_ID = "codex-app-provider";
 
-/** Register the bundle configuration section and the row Configure page. */
+/** Register the bundle section, the row page and a Settings page for this entry. */
 export function apply(ctx: Context): void {
   ctx.inject(["configForms", "slots"], scope => {
     // The settings service keys a form by the profile entry id, which is the row
     // id this package's patch declares.
     const form = scope.configForms.get<ProviderConfigFields>(ROW_ID);
     const bound = withForm(form as ConfigForm<ProviderConfigFields>);
+    const asPage = withFormAsPage(form as ConfigForm<ProviderConfigFields>);
     scope.slots.inject("plugins.bundle.config", () => scope.slots.register({
       name: "plugins.bundle.config",
       key: PACKAGE,
@@ -45,5 +48,12 @@ export function apply(ctx: Context): void {
       name: "plugins.row.config",
       key: `${PACKAGE}#${ROW_ID}`,
     }, bound as never));
+    // Ordered after the routine deployment pages; this one edits a model route.
+    scope.slots.inject("settings.section", () => scope.slots.register({
+      name: "settings.section",
+      id: SECTION_ID,
+      order: 60,
+      label: () => "Codex app",
+    }, asPage as never));
   });
 }

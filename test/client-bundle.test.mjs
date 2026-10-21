@@ -54,14 +54,18 @@ function loadBundle() {
   return { plugin, ctx, registrations, form };
 }
 
-test("the browser half registers both configuration surfaces", () => {
+test("the browser half registers every configuration surface", () => {
   const { plugin, ctx, registrations } = loadBundle();
   assert.deepEqual([...plugin.inject].sort(), ["configForms", "slots"]);
   plugin.apply(ctx);
-  assert.equal(registrations.length, 2);
-  const byName = new Map(registrations.map(entry => [entry.options.name, entry.options.key]));
-  assert.equal(byName.get("plugins.bundle.config"), "dsh-codex-app-provider");
-  assert.equal(byName.get("plugins.row.config"), "dsh-codex-app-provider#dsh-codex-app-provider");
+  assert.equal(registrations.length, 3);
+  const bundle = registrations.find(entry => entry.options.name === "plugins.bundle.config");
+  assert.equal(bundle.options.key, "dsh-codex-app-provider");
+  const row = registrations.find(entry => entry.options.name === "plugins.row.config");
+  assert.equal(row.options.key, "dsh-codex-app-provider#dsh-codex-app-provider");
+  const section = registrations.find(entry => entry.options.name === "settings.section");
+  assert.equal(section.options.id, "codex-app-provider");
+  assert.equal(section.options.label(), "Codex app");
   for (const entry of registrations) assert.equal(typeof entry.component, "function");
 });
 
