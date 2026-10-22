@@ -26,7 +26,8 @@ async function publish(canPublish = () => true) {
   const stage = join(root, ".watch", "publish-build");
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(join(stage, "scripts"), { recursive: true });
-  for (const path of ["src", "package.json", "tsconfig.json"]) cpSync(join(root, path), join(stage, path), { recursive: true });
+  for (const path of ["src", "package.json", "tsconfig.json", "tsconfig.client.json"]) cpSync(join(root, path), join(stage, path), { recursive: true });
+  cpSync(join(root, "scripts", "build-client.mjs"), join(stage, "scripts", "build-client.mjs"));
   symlinkSync(join(root, "node_modules"), join(stage, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   const code = await new Promise((resolveExit, rejectExit) => {
     child = spawn("npm", ["run", "build"], { cwd: stage, stdio: "inherit", shell: process.platform === "win32" });
