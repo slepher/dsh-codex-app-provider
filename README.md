@@ -278,8 +278,8 @@ npm run test:integration:handoff  # thread-handoff integration
 npm run test:live                 # real Codex CLI, end to end
 npm run test:live:handoff         # real-model successor handoff (Codex → Codex)
 npm run test:live:handoff:cross   # real-model continuation (Codex → DeepSeek)
-npm run publish                   # staged build, atomic replace of lib/
-npm run publish:watch             # republish on every source change
+npm run release                   # staged build, atomic replace of lib/
+npm run release:watch             # republish on every source change
 ```
 
 The provider's suites spawn child processes, so the cases that spawn need an environment allowed to do so. The recorded runs used `node --test --test-isolation=none test/*.test.mjs` to run the whole suite in one process.
@@ -326,7 +326,7 @@ node scripts/enable-hmr.mjs --write --remove   # back to the shipped default
 
 HMR watches the profile patch, the home patch and the profile manifest, so the
 entry applies without a restart; afterwards `npm run build` (or a running
-`tsc --watch` / `npm run publish:watch`) reloads the plugin about two seconds
+`tsc --watch` / `npm run release:watch`) reloads the plugin about two seconds
 after the write (`awaitWriteFinish` 2 s + 100 ms debounce). Only this package's
 `lib/` is watched, and a reload tears down the plugin instance, so live Codex
 workers are interrupted.

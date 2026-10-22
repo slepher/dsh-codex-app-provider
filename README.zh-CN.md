@@ -243,8 +243,8 @@ npm run test:integration:handoff  # thread 移交集成测试
 npm run test:live                 # 真实 Codex CLI 端到端
 npm run test:live:handoff         # 真实模型后继移交（Codex → Codex）
 npm run test:live:handoff:cross   # 真实模型延续（Codex → DeepSeek）
-npm run publish                   # 暂存构建，原子替换 lib/
-npm run publish:watch             # 源码变化即重新发布
+npm run release                   # 暂存构建，原子替换 lib/
+npm run release:watch             # 源码变化即重新发布
 ```
 
 本仓库的测试会派生进程，因此派生进程的用例需要允许派生的环境。已记录的运行使用 `node --test --test-isolation=none test/*.test.mjs`，在单进程内跑完整套测试。
@@ -286,7 +286,7 @@ node scripts/enable-hmr.mjs --write --remove   # 回到出厂默认
 ```
 
 HMR 监视 profile patch、home patch 与 profile manifest，因此这条条目**无需重启**即可生效；之后
-`npm run build`（或常驻的 `tsc --watch` / `npm run publish:watch`）会在写入后约两秒触发重载
+`npm run build`（或常驻的 `tsc --watch` / `npm run release:watch`）会在写入后约两秒触发重载
 （`awaitWriteFinish` 2 秒 + 100 毫秒 debounce）。只监视本包的 `lib/`；重载会拆除插件实例，
 因此正在运行的 Codex worker 会被中断。
 

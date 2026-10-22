@@ -356,7 +356,7 @@ fixture 与 driver：driver 都是 test-only 的 Cordis profile 插件，由 `te
 | `verify-dsh-compat.mjs`（177 行） | 让 `dsh.compatibility.dshReleases` 成为可验证事实 | 对每个声明 release 建一次性 `DSH_HOME`：写 profile + `cordis.patch.yml`（含 `stateDir`）→ `npm install` 两个 tarball → `--dump-config` 要求两个 row 名都在 → 跑 `compat-surface-probe.mjs` → 起 `dsh web`、60×2s 探活、从 boot log 取 token、对 `/workflow/profiles` 与一个不存在的端点各 POST 一次并要求两者状态码不同（`CHANNEL_NOT_DISTINCT` 即失败）；判词 `OK`/`RED`，逐级 `INSTALL_FAIL`/`COMPOSE_FAIL`/`SURFACE_FAIL`/`BOOT_FAIL` |
 | `compat-surface-probe.mjs`（137 行） | 单个已装 release 的兼容面探针（用该 release 自己的依赖运行） | 5 类检查：`evaluatePluginCompatibility` 评审 peer 声明；`readPluginMeta` + **locale 断言**（`en` 为英文锚点、`zh` 非空、任一语言为空即缺陷）；`ToolCallRecovery` 存在性及其"已记录结果不得重复、缺失结果恰好补一次"的实测（缺失则 `SKIP`）；`app-boot` 仍导出 `loadProfileDirectory`/`composeEntries`；`dsh-user-questions` 的 `ask` 是函数（缺失 `SKIP`）、`dsh-tool-ask-user` 的 `Config` 可选 |
 | `publish.mjs`（86 行） | 原子化"暂存构建 → 校验 → 替换 `lib/`" | stage `.watch/publish-build`（`node_modules` 用 symlink/junction），在 stage 内 `npm run build`，要求 `lib/index.js`、`lib/backend.js`、`lib/provider.js` 都在；`replaceDirectory` 用 `lib.watch-backup` 实现替换与失败回滚；watch 模式三态 `pending/building/coreChanged`、SIGINT/SIGTERM 停止、构建事件串行化；`--no-initial-build` 要求基线产物存在 |
-| `watch.mjs`（4 行） | `publish.mjs` 的 development 薄封装 | `watchPublication(true)`：**首次 `src` 变更即策略性停止发布**（打印 "restart required; publication paused"）；需要持续发布要用 `npm run publish:watch` |
+| `watch.mjs`（4 行） | `publish.mjs` 的 development 薄封装 | `watchPublication(true)`：**首次 `src` 变更即策略性停止发布**（打印 "restart required; publication paused"）；需要持续发布要用 `npm run release:watch` |
 
 本地可复现性缺口（静态阅读得出，未执行验证）：`verify-dsh-compat.mjs` 默认需要 `../dsh-workflow-kit/dsh-workflow-kit-<version>.tgz`，当前 checkout 只有 provider 的 tgz；`test-live.mjs` 无条件读取 `../dsh-workflow-kit/package.json`，且默认 skill 目录 `root/../../codex-workflow/skills/codex-workflow` 在本机不存在（需 `DSH_WORKFLOW_SKILL_DIR`）。
 
@@ -396,7 +396,7 @@ fixture 与 driver：driver 都是 test-only 的 Cordis profile 插件，由 `te
 7. **平台面**：锁身份依赖 `/proc`（`store.ts:306`、`store.ts:320`），hook IPC 依赖 Unix domain socket（`tool-gate.ts:345`）。两者在 Windows 上不可用；`processStartTime` 已导出，说明它是被测试直接覆盖的接缝。
 8. **文档与工作树已漂移**：`EXECUTION.md` 描述的"同包客户端"链路（`scripts/build-client.mjs`、`src/client/`、`lib/client.js`、`dsh.client`、react/react-dom peer、`test/client-bundle.test.mjs`）在当前工作树中**没有对应物**——`scripts/` 无该文件，`src/` 无子目录，`package.json` 无 client 字段/依赖/脚本，`tsconfig.json` 也只收顶层 `src/*.ts`。当前布局与 README 的"本包不提供浏览器 UI"一致。
 9. **证据无法在当前磁盘核验**：`evidence/` 被 `.gitignore` 忽略且当前不存在，`EXECUTION.md` 与两个 prompt 引用的全部 `evidence/*.log`、`evidence/probe-405/` 都不在。`EXECUTION.md` 的完成度表是文档自述：E0 基线 / E1 单插件迁移 = PASS，E2 恢复与 child / E3 设置与原生事件 / E4 侧栏 / E5 隔离安装与真实主会话 = PARTIAL，E6 旧消费者退役 = TODO；文首自述"完整目标未完成"。本文件只把它当作声明而非事实。
-10. **部分脚本未接入 npm scripts**：`clean-rc1-live.mjs`、`verify-dsh-compat.mjs`、`compat-surface-probe.mjs`、`watch.mjs` 只能 `node scripts/...` 直调；`watch.mjs` 在首次源码变更后会主动暂停发布，持续发布必须用 `npm run publish:watch`。
+10. **部分脚本未接入 npm scripts**：`clean-rc1-live.mjs`、`verify-dsh-compat.mjs`、`compat-surface-probe.mjs`、`watch.mjs` 只能 `node scripts/...` 直调；`watch.mjs` 在首次源码变更后会主动暂停发布，持续发布必须用 `npm run release:watch`。
 11. **`prompt.md` / `prompt-2026-09-13-previous.md` 是交接文档而非产品文档**，且内部绝对路径是 Linux 路径（`/home/slepher/...`），与当前 macOS 工作区 `/Users/slepher/project/dsh` 不一致；不能按字面复现。
 
 ---
